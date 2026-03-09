@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "command": "bash ./scripts/activator.sh \"$PROMPT\""
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "command": "bash ./scripts/error-detector.sh \"$EXIT_CODE\" \"$STDOUT\" \"$STDERR\""
+      }
+    ]
+  }
+}
