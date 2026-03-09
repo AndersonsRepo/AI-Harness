@@ -1,6 +1,6 @@
 # AI Harness — Build Plan
 
-> A self-improving, persistently learning AI agent system built natively on Claude Code's skills v2 architecture. No OpenClaw dependency. Uses Discord (primary) and iMessage (secondary) as communication channels.
+> A self-improving, persistently learning AI agent system built natively on Claude Code's skills v2 architecture. No OpenClaw dependency. Uses Discord as primary communication channel.
 
 ---
 
@@ -16,20 +16,15 @@ AI-Harness/
 │   ├── skills/
 │   │   ├── self-improve/                  # Phase 2
 │   │   ├── find-skill/                    # Phase 4
-│   │   ├── heartbeat/                     # Phase 5
-│   │   ├── monitor-lexxi/                 # Phase 6
-│   │   └── mento-tracker/                 # Phase 6
+│   │   └── heartbeat/                     # Phase 4
 │   └── agents/
 │       ├── researcher.md                  # Deep research subagent
 │       └── reviewer.md                    # Code review subagent
 ├── bridges/
-│   ├── discord/                           # Phase 3
-│   │   ├── package.json
-│   │   ├── bot.ts                         # Discord bot using discord.js
-│   │   └── session-store.ts              # Discord channel → Claude session mapping
-│   └── imessage/                          # Phase 7
-│       ├── bridge.sh                      # imsg watch → claude -p pipeline
-│       └── README.md
+│   └── discord/                           # Phase 3
+│       ├── package.json
+│       ├── bot.ts                         # Discord bot using discord.js
+│       └── session-store.ts              # Discord channel → Claude session mapping
 ├── learnings/
 │   ├── LEARNINGS.md                       # Corrections, knowledge gaps, best practices
 │   ├── ERRORS.md                          # Command failures, patterns
@@ -171,9 +166,48 @@ The core differentiator. Every interaction teaches the agent.
 
 ---
 
-## Phase 4: Skill Discovery & Auto-Generation
+## Phase 4: Heartbeat & Scheduled Tasks
 
-### 4.1 Skill: `find-skill`
+### 4.1 Architecture
+
+Use macOS `launchd` (native, reliable) + `claude -p` for scheduled background tasks.
+
+```
+[launchd plist] → runs every N minutes → [claude -p "task prompt" --allowedTools ...]
+                                         ↓
+                     [writes results to learnings/ or sends via Discord]
+```
+
+### 4.2 Skill: `heartbeat`
+
+A meta-skill for creating and managing scheduled tasks:
+```
+/heartbeat create "Scrape trending AI repos" --interval 30m
+/heartbeat list
+/heartbeat pause <name>
+/heartbeat delete <name>
+```
+
+Generates launchd plist files in ~/Library/LaunchAgents/ with the right claude -p invocations.
+
+### 4.3 Shared State Between Runs
+Each heartbeat task writes to a state file so the next run knows what happened:
+```
+~/.claude/heartbeat-state/
+├── <task-name>.json    # { lastRun, result, lastError, consecutiveFailures }
+```
+
+### 4.4 Tasks
+- [ ] Write heartbeat/SKILL.md with launchd plist generation logic
+- [ ] Create launchd plist template
+- [ ] Write state management helpers
+- [ ] Test: create a heartbeat → verify plist generated → verify it runs on schedule
+
+---
+
+## Phase 5: Skill Discovery & Auto-Generation
+
+### 5.1 Skill: `find-skill`
 
 When you ask "how do I do X" or "is there a way to...", instead of just failing:
 1. Search existing skills in .claude/skills/ for keyword matches
@@ -188,136 +222,17 @@ description: Discovers existing skills or creates new ones when the user asks fo
 ---
 ```
 
-### 4.2 Tasks
+### 5.2 Tasks
 - [ ] Write find-skill/SKILL.md
 - [ ] Test: ask for a nonexistent capability → verify it searches existing skills → verify it offers to create one
 
 ---
 
-## Phase 5: Heartbeat & Scheduled Tasks
-
-### 5.1 Architecture
-
-Use macOS `launchd` (native, reliable) + `claude -p` for scheduled background tasks.
-
-```
-[launchd plist] → runs every N minutes → [claude -p "task prompt" --allowedTools ...]
-                                         ↓
-                     [writes results to learnings/ or sends via Discord]
-```
-
-### 5.2 Skill: `heartbeat`
-
-A meta-skill for creating and managing scheduled tasks:
-```
-/heartbeat create "Check Hey Lexxi uptime" --interval 15m
-/heartbeat list
-/heartbeat pause <name>
-/heartbeat delete <name>
-```
-
-Generates launchd plist files in ~/Library/LaunchAgents/ with the right claude -p invocations.
-
-### 5.3 Built-in Heartbeats (Phase 6 creates these)
-- **monitor-lexxi**: Every 15 min, check https://app.client-project.com, Vercel deploy status, Supabase health
-- **mento-tracker**: Daily at 9 AM and 9 PM, summarize git activity, open issues, test results
-
-### 5.4 Shared State Between Runs
-Each heartbeat task writes to a state file so the next run knows what happened:
-```
-~/.claude/heartbeat-state/
-├── monitor-lexxi.json    # { lastCheck, status, lastError, consecutiveFailures }
-├── mento-tracker.json    # { lastReport, commitsSinceLastReport, openIssues }
-```
-
-### 5.5 Tasks
-- [ ] Write heartbeat/SKILL.md with launchd plist generation logic
-- [ ] Create launchd plist template
-- [ ] Write state management helpers
-- [ ] Test: create a heartbeat → verify plist generated → verify it runs on schedule
-
----
-
-## Phase 6: Project-Specific Monitoring Skills
-
-### 6.1 monitor-lexxi
-```yaml
----
-name: monitor-lexxi
-description: Monitor Hey Lexxi production health
-disable-model-invocation: true
-context: fork
----
-```
-- Curl https://app.client-project.com and check response code
-- Check Vercel deploy status via `vercel ls` or API
-- Alert via Discord if anything is down
-- Track uptime percentage in state file
-
-### 6.2 mento-tracker
-```yaml
----
-name: mento-tracker
-description: Summarize Mento development progress
-disable-model-invocation: true
-context: fork
----
-```
-- Git log since last report in $HOME/Desktop/Seniorproject/mento
-- Count open TODOs in codebase
-- Summarize what changed, what's next
-- Send report via Discord
-
-### 6.3 Tasks
-- [ ] Write monitor-lexxi/SKILL.md
-- [ ] Write mento-tracker/SKILL.md
-- [ ] Create corresponding heartbeat schedules
-- [ ] Test both with manual invocation first, then scheduled
-
----
-
-## Phase 7: iMessage Bridge (Secondary Channel)
-
-### 7.1 Prerequisites
-- **Full Disk Access** granted to Terminal.app (for reading ~/Library/Messages/chat.db)
-- **Automation** permission for AppleScript to control Messages.app
-- Install `imsg` CLI: `brew install steipete/tap/imsg`
-
-### 7.2 Architecture
-```
-[iMessage] → [Messages.app] → [chat.db]
-                                  ↓
-                          [imsg watch --json]  (FSEvents)
-                                  ↓
-                         [bridge.sh / bridge.ts]
-                                  ↓
-              [claude -p "$message" --output-format json]
-                                  ↓
-                    [imsg send $recipient "$response"]
-```
-
-### 7.3 Key Gotchas
-- **FDA doesn't propagate** to LaunchAgents — must run as a persistent Terminal process
-- **attributedBody on macOS 14+** — `imsg` handles this, raw SQLite queries may miss messages
-- **No incoming message trigger** in macOS Shortcuts — must use chat.db polling/watching
-- **Rate limiting** — Apple may flag high-volume automated messages; build in daily caps
-- **Whitelist senders** — only respond to your own phone number/Apple ID
-
-### 7.4 Tasks
-- [ ] Install imsg: `brew install steipete/tap/imsg`
-- [ ] Grant FDA to Terminal.app
-- [ ] Write bridges/imessage/bridge.sh using imsg watch + claude -p pipeline
-- [ ] Add sender whitelist (your phone number only)
-- [ ] Test: send yourself an iMessage → verify Claude responds
-- [ ] Document the TCC permission setup
-
----
-
-## Phase 8: Emergent Behavior & Intelligence Loop
+## Phase 6: Emergent Behavior & Intelligence Loop
 
 This is where it gets interesting. The system creates compounding returns:
 
-### 8.1 The Positive Feedback Loop
+### 6.1 The Positive Feedback Loop
 ```
 You use Claude → mistakes happen → errors logged automatically
               → you correct it → learnings logged automatically
@@ -328,21 +243,21 @@ You use Claude → mistakes happen → errors logged automatically
               → Claude can do more → you use it more → cycle continues
 ```
 
-### 8.2 Emergent Behaviors to Cultivate
+### 6.2 Emergent Behaviors to Cultivate
 - **Self-optimization**: Agent notices it's using inefficient approaches and creates better skills
 - **Proactive suggestions**: After enough learnings, agent starts anticipating your needs
 - **Cross-project knowledge**: Learnings from Mento improve Hey Lexxi work and vice versa
 - **Skill ecosystem growth**: Each new skill compounds with existing ones
 - **Model routing**: Agent learns which tasks need Opus vs Sonnet vs Haiku and auto-routes
 
-### 8.3 Guardrails
+### 6.3 Guardrails
 - All promotions to CLAUDE.md require your approval (logged, not auto-applied)
 - Skills auto-generated by extract-skill.sh start with `disable-model-invocation: true`
 - Daily learning digest sent via Discord — review what it learned
 - Maximum skill count cap to prevent bloat
 - Regular pruning: archive stale learnings older than 90 days
 
-### 8.4 Tasks
+### 6.4 Tasks
 - [ ] Implement promotion approval workflow (Discord message: "Promote this learning? Y/N")
 - [ ] Create daily digest skill that summarizes new learnings
 - [ ] Build skill pruning/archival logic
@@ -353,24 +268,38 @@ You use Claude → mistakes happen → errors logged automatically
 ## Build Order & Dependencies
 
 ```
-Phase 1 (Foundation) ──────────────────────────────────┐
-    ↓                                                   │
-Phase 2 (Self-Improvement) ─── depends on Phase 1      │
-    ↓                                                   │
-Phase 3 (Discord Bridge) ──── depends on Phase 1       │
-    ↓                                                   │
-Phase 4 (Skill Discovery) ── depends on Phase 2        │
-    ↓                                                   │
-Phase 5 (Heartbeat) ────────── depends on Phase 3      │
-    ↓                                                   │
-Phase 6 (Project Monitors) ── depends on Phase 5       │
-    ↓                                                   │
-Phase 7 (iMessage Bridge) ── independent, do anytime   │
-    ↓                                                   │
-Phase 8 (Emergent Loop) ──── depends on all above      │
+Phase 1 (Foundation) ─────────────────────────────┐
+    ↓                                              │
+Phase 2 (Self-Improvement) ── depends on Phase 1  │
+    ↓                                              │
+Phase 3 (Discord Bridge) ──── depends on Phase 1  │
+    ↓                                              │
+Phase 4 (Heartbeat) ────────── depends on Phase 3 │
+    ↓                                              │
+Phase 5 (Skill Discovery) ── depends on Phase 2   │
+    ↓                                              │
+Phase 6 (Emergent Loop) ──── depends on all above │
 ```
 
-**Estimated effort**: Phases 1-3 in a weekend. Phase 4-6 in a second weekend. Phase 7-8 ongoing.
+**Estimated effort**: Phases 1-3 in a weekend. Phase 4-5 in a second session. Phase 6 ongoing.
+
+---
+
+## Future Options (Not Currently Planned)
+
+These can be added later once the core system is solid:
+
+### iMessage Bridge
+- Secondary communication channel using `imsg` CLI by Steipete
+- Requires Full Disk Access + Automation permissions on macOS
+- Architecture: `imsg watch --json` → `claude -p` → `imsg send`
+- Must run as persistent Terminal process (FDA doesn't propagate to LaunchAgents)
+- Reference: [imsg CLI](https://github.com/steipete/imsg)
+
+### Project-Specific Monitors
+- **monitor-lexxi**: Uptime checks on https://app.client-project.com, Vercel deploy status, Supabase health (15 min interval)
+- **mento-tracker**: Daily dev progress reports — git log, open TODOs, test results
+- Both would use the heartbeat system (Phase 4) + Discord alerts
 
 ---
 
@@ -382,7 +311,6 @@ Phase 8 (Emergent Loop) ──── depends on all above      │
 | Skills Framework   | Claude Code Skills v2 (SKILL.md + frontmatter)  |
 | Hooks              | Claude Code hooks (UserPromptSubmit, PostToolUse)|
 | Discord Bridge     | discord.js + TypeScript                          |
-| iMessage Bridge    | imsg CLI + bash/TypeScript                       |
 | Scheduling         | macOS launchd                                    |
 | Process Manager    | pm2 or launchd                                   |
 | Session Storage    | Local JSON files                                 |

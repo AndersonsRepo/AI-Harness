@@ -1,0 +1,21 @@
+{
+  "name": "ai-harness-discord",
+  "version": "1.0.0",
+  "description": "Discord bridge for AI Harness — pipes messages to Claude Code CLI",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch bot.ts",
+    "start": "tsx bot.ts",
+    "build": "tsc",
+    "start:prod": "node dist/bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}
