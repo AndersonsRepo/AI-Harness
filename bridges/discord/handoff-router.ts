@@ -31,6 +31,28 @@ export interface HandoffDirective {
   preHandoffText: string;
 }
 
+export interface CreateChannelDirective {
+  channelName: string;
+  agent?: string;
+  description?: string;
+}
+
+/**
+ * Parse agent output for [CREATE_CHANNEL:name] directives.
+ * Optional syntax: [CREATE_CHANNEL:name --agent builder "description"]
+ */
+export function parseCreateChannel(output: string): CreateChannelDirective | null {
+  const match = output.match(
+    /\[CREATE_CHANNEL\s*:\s*([\w-]+)(?:\s+--agent\s+(\w+))?(?:\s+"([^"]*)")?\]/i
+  );
+  if (!match) return null;
+  return {
+    channelName: match[1],
+    agent: match[2],
+    description: match[3],
+  };
+}
+
 export function parseHandoff(output: string): HandoffDirective | null {
   // Match [HANDOFF:agent_name] message (case-insensitive, optional whitespace)
   const match = output.match(

@@ -32,7 +32,12 @@ To hand off, write your findings/output first, then on the last line:
 
     [HANDOFF:agent_name] Clear description of what you need them to do
 
+To create a new project channel:
+
+    [CREATE_CHANNEL:channel-name --agent ops "Project description"]
+
 Rules:
 - Complete your own work first before handing off
 - Only hand off when you genuinely need another agent's expertise
 - Be specific about what you need from the other agent
+- Only create channels when the work clearly needs a dedicated space
