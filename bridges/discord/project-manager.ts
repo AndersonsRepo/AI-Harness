@@ -185,3 +185,90 @@ export function incrementHandoffDepth(channelId: string): number {
 export function isProjectChannel(channelId: string): boolean {
   return getProject(channelId) !== null;
 }
+
+/**
+ * Auto-adopt a channel as a project if it's under the Projects category
+ * but not yet registered. Returns the new project config or null.
+ */
+export function autoAdoptIfInCategory(
+  channelId: string,
+  channelName: string,
+  parentId: string | null,
+  guildId: string
+): ProjectConfig | null {
+  // Already registered
+  if (getProject(channelId)) return null;
+  // No parent category
+  if (!parentId) return null;
+
+  // Check if the parent category is "Projects" by looking at existing projects
+  // or by matching the parentId against known category IDs
+  const existing = listProjects();
+  const knownCategoryIds = new Set(existing.map((p) => p.categoryId));
+
+  // If we have no projects yet, we can't match by ID — caller must check category name
+  // This function is called with verified category info from bot.ts
+  const name = channelName.replace(/^proj-/, "");
+
+  const project: ProjectConfig = {
+    channelId,
+    categoryId: parentId,
+    guildId,
+    name,
+    description: `Auto-adopted from #${channelName}`,
+    agents: DEFAULT_AGENTS,
+    handoffDepth: 0,
+    maxHandoffDepth: DEFAULT_MAX_DEPTH,
+    createdAt: new Date().toISOString(),
+  };
+
+  const map = load();
+  map[channelId] = project;
+  save(map);
+
+  setChannelConfig(channelId, { agent: DEFAULT_AGENTS[0] });
+
+  return project;
+}
+
+/**
+ * Adopt an existing channel as a project (for /project adopt command).
+ */
+export function adoptChannel(
+  channelId: string,
+  channelName: string,
+  parentId: string | null,
+  guildId: string,
+  description?: string,
+  agents?: string[]
+): ProjectConfig {
+  const name = channelName.replace(/^proj-/, "");
+  const projectAgents = agents || DEFAULT_AGENTS;
+
+  const project: ProjectConfig = {
+    channelId,
+    categoryId: parentId || "",
+    guildId,
+    name,
+    description: description || `Project channel #${channelName}`,
+    agents: projectAgents,
+    handoffDepth: 0,
+    maxHandoffDepth: DEFAULT_MAX_DEPTH,
+    createdAt: new Date().toISOString(),
+  };
+
+  const map = load();
+  map[channelId] = project;
+  save(map);
+
+  setChannelConfig(channelId, { agent: projectAgents[0] });
+
+  return project;
+}
+
+/**
+ * Get the category ID for "Projects" in a guild, if it exists.
+ */
+export function getProjectsCategoryName(): string {
+  return PROJECTS_CATEGORY_NAME;
+}

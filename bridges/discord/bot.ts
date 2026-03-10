@@ -33,9 +33,13 @@ import {
   closeProject,
   isProjectChannel,
   resetHandoffDepth,
+  autoAdoptIfInCategory,
+  adoptChannel,
+  getProjectsCategoryName,
 } from "./project-manager.js";
 import {
   parseHandoff,
+  parseCreateChannel,
   runHandoffChain,
   getProjectSessionKey,
 } from "./handoff-router.js";
@@ -435,6 +439,40 @@ async function handleClaude(
           }
 
           if (responseText) {
+            // Check for [CREATE_CHANNEL:name] directive in agent output
+            const createDir = parseCreateChannel(responseText);
+            if (createDir && message.guild) {
+              try {
+                const newProject = await createProject(
+                  message.guild,
+                  createDir.channelName,
+                  createDir.description || `Created by ${agentName || "agent"}`,
+                  createDir.agent ? [createDir.agent, ...["researcher", "reviewer", "builder", "ops"].filter(a => a !== createDir.agent)] : undefined
+                );
+                // Strip the directive from the response before posting
+                const cleanResponse = responseText.replace(
+                  /\[CREATE_CHANNEL\s*:\s*[\w-]+(?:\s+--agent\s+\w+)?(?:\s+"[^"]*")?\]/i,
+                  `*(Created project channel <#${newProject.channelId}>)*`
+                );
+                const chunks = splitMessage(cleanResponse);
+                if (streamMessage) {
+                  await streamMessage.edit(chunks[0]);
+                  for (let i = 1; i < chunks.length; i++) {
+                    await message.reply(chunks[i]);
+                  }
+                } else {
+                  for (const chunk of chunks) {
+                    await message.reply(chunk);
+                  }
+                }
+                releaseChannel(channelId);
+                return;
+              } catch (err: any) {
+                console.error(`[CREATE_CHANNEL] Failed: ${err.message}`);
+                // Fall through to normal response handling
+              }
+            }
+
             // Check for handoff in project channels
             if (project && agentName && parseHandoff(responseText)) {
               // Post the pre-handoff text, then run the handoff chain
@@ -787,6 +825,33 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     return true;
   }
 
+  // /project adopt ["description"] — register this channel as a project
+  const adoptMatch = content.match(/^\/project\s+adopt(?:\s+"([^"]+)")?$/);
+  if (adoptMatch) {
+    const project = getProject(channelId);
+    if (project) {
+      await message.reply("This channel is already a project.");
+      return true;
+    }
+    const ch = message.channel;
+    if (!("name" in ch)) {
+      await message.reply("This command only works in a server text channel.");
+      return true;
+    }
+    const textCh = ch as TextChannel;
+    const adopted = adoptChannel(
+      channelId,
+      textCh.name,
+      textCh.parentId,
+      message.guild?.id || "",
+      adoptMatch[1] || undefined
+    );
+    await message.reply(
+      `Channel adopted as project \`${adopted.name}\`.\nAgents: ${adopted.agents.join(", ")}\nDescription: ${adopted.description}`
+    );
+    return true;
+  }
+
   // /project close — archive project channel
   if (content === "/project close") {
     const guild = message.guild;
@@ -820,9 +885,12 @@ async function handleCommand(message: Message, content: string): Promise<boolean
 • \`/cancel <id>\` — Cancel a running subagent
 • \`/channel create <name> [--agent <name>]\` — Create a new channel
 • \`/project create <name> "description"\` — Create a project channel
+• \`/project adopt ["description"]\` — Register this channel as a project
 • \`/project list\` — List active projects
 • \`/project agents <a1,a2,...>\` — Set project agents
 • \`/project close\` — Archive project channel
+*Channels under the Projects category are auto-adopted on first message.*
+*Agents can create channels with \`[CREATE_CHANNEL:name]\` in their output.*
 • \`/help\` — Show this help message`
     );
     return true;
@@ -963,9 +1031,32 @@ client.on("messageCreate", async (message: Message) => {
     // If not a recognized command, fall through to Claude
   }
 
+  // Auto-adopt channels under the Projects category
+  const channelId = message.channel.id;
+  if (
+    !getProject(channelId) &&
+    "parent" in message.channel &&
+    message.channel.parent &&
+    message.channel.parent.name.toLowerCase() ===
+      getProjectsCategoryName().toLowerCase()
+  ) {
+    const ch = message.channel as TextChannel;
+    const adopted = autoAdoptIfInCategory(
+      channelId,
+      ch.name,
+      ch.parentId,
+      message.guild?.id || ""
+    );
+    if (adopted) {
+      console.log(`[PROJECT] Auto-adopted #${ch.name} as project "${adopted.name}"`);
+      await message.reply(
+        `Auto-registered as project \`${adopted.name}\` (in Projects category). Agents: ${adopted.agents.join(", ")}`
+      );
+    }
+  }
+
   // For project channels: reset handoff depth on human message
   // and route to addressed agent if specified (e.g., "builder: do X")
-  const channelId = message.channel.id;
   const project = getProject(channelId);
   if (project) {
     resetHandoffDepth(channelId);
