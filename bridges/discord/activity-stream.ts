@@ -110,6 +110,95 @@ export async function postError(
   }
 }
 
+// --- Channel agent activity (regular requests) ---
+
+export interface AgentActivity {
+  channelId: string;
+  agent: string;
+  prompt: string;
+  startedAt: number;
+  streamMessageId?: string;
+}
+
+export async function postAgentStart(activity: AgentActivity): Promise<string | null> {
+  if (!streamChannel) return null;
+  const embed = new EmbedBuilder()
+    .setTitle(`Agent Active`)
+    .setDescription(activity.prompt.slice(0, 200))
+    .addFields(
+      { name: "Agent", value: activity.agent, inline: true },
+      { name: "Channel", value: `<#${activity.channelId}>`, inline: true }
+    )
+    .setColor(0x9b59b6)
+    .setTimestamp();
+
+  const msg = await streamChannel.send({ embeds: [embed] });
+  return msg.id;
+}
+
+export async function postAgentComplete(
+  activity: AgentActivity,
+  result: string
+): Promise<void> {
+  if (!streamChannel || !activity.streamMessageId) return;
+  try {
+    const msg = await streamChannel.messages.fetch(activity.streamMessageId);
+    const duration = Math.round((Date.now() - activity.startedAt) / 1000);
+    const durationStr = duration < 60 ? `${duration}s` : `${Math.floor(duration / 60)}m ${duration % 60}s`;
+    const truncated = result.length > 1800 ? result.slice(0, 1800) + "..." : result;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Agent Done`)
+      .setDescription(truncated)
+      .addFields(
+        { name: "Agent", value: activity.agent, inline: true },
+        { name: "Channel", value: `<#${activity.channelId}>`, inline: true },
+        { name: "Duration", value: durationStr, inline: true }
+      )
+      .setColor(0x2ecc71)
+      .setTimestamp();
+
+    const files: AttachmentBuilder[] = [];
+    if (result.length > 1800) {
+      files.push(
+        new AttachmentBuilder(Buffer.from(result, "utf-8"), {
+          name: `result-${activity.agent}-${Date.now()}.md`,
+        })
+      );
+    }
+
+    await msg.edit({ embeds: [embed], files });
+  } catch (err: any) {
+    console.error(`[STREAM] Failed to post agent completion: ${err.message}`);
+  }
+}
+
+export async function postAgentError(
+  activity: AgentActivity,
+  error: string
+): Promise<void> {
+  if (!streamChannel || !activity.streamMessageId) return;
+  try {
+    const msg = await streamChannel.messages.fetch(activity.streamMessageId);
+    const duration = Math.round((Date.now() - activity.startedAt) / 1000);
+    const durationStr = duration < 60 ? `${duration}s` : `${Math.floor(duration / 60)}m ${duration % 60}s`;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Agent Error`)
+      .setDescription(error.slice(0, 1800))
+      .addFields(
+        { name: "Agent", value: activity.agent, inline: true },
+        { name: "Channel", value: `<#${activity.channelId}>`, inline: true },
+        { name: "Duration", value: durationStr, inline: true }
+      )
+      .setColor(0xe74c3c)
+      .setTimestamp();
+    await msg.edit({ embeds: [embed] });
+  } catch (err: any) {
+    console.error(`[STREAM] Failed to post agent error: ${err.message}`);
+  }
+}
+
 function getDuration(entry: SubagentEntry): string {
   const start = new Date(entry.startedAt).getTime();
   const end = entry.completedAt

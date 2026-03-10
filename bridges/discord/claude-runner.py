@@ -42,13 +42,14 @@ def main():
 
     claude_args = remaining
 
-    claude_path = "$HOME/.local/bin/claude"
-    cwd = os.environ.get("HARNESS_ROOT", "$HOME/Desktop/AI-Harness")
+    home = os.environ.get("HOME", os.path.expanduser("~"))
+    claude_path = os.environ.get("CLAUDE_CLI_PATH", os.path.join(home, ".local", "bin", "claude"))
+    cwd = os.environ.get("HARNESS_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
     clean_env = {
-        "HOME": os.environ.get("HOME", "$HOME"),
-        "USER": os.environ.get("USER", "user"),
-        "PATH": "$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "HOME": home,
+        "USER": os.environ.get("USER", os.path.basename(home)),
+        "PATH": os.environ.get("CLAUDE_RUNNER_PATH", f"{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"),
         "SHELL": os.environ.get("SHELL", "/bin/zsh"),
         "LANG": os.environ.get("LANG", "en_US.UTF-8"),
         "TERM": "dumb",
