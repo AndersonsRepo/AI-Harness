@@ -1,0 +1,16 @@
+{
+  "name": "daily-digest",
+  "prompt": "Read all files in vault/learnings/ that exist. For each file, read its YAML frontmatter. Summarize: (1) total learnings count, (2) any patterns with recurrence-count >= 2 that are approaching promotion, (3) any feature requests (type: feature_request). Write the summary to vault/daily/ with today's date as filename (YYYY-MM-DD.md). Be concise.",
+  "interval_minutes": 1440,
+  "notify": "discord",
+  "discord_channel": "general",
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Glob",
+    "Grep"
+  ],
+  "enabled": true,
+  "timeout": 300,
+  "created": "2025-03-10T00:00:00"
+}

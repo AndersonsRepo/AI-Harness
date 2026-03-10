@@ -1,0 +1,11 @@
+{
+  "name": "session-cleanup",
+  "prompt": "Read bridges/discord/sessions.json. For each session, check if the 'lastActivity' timestamp is older than 7 days from now. Remove any stale sessions and write the cleaned file back. Report how many sessions were removed.",
+  "interval_minutes": 1440,
+  "notify": null,
+  "discord_channel": null,
+  "allowed_tools": ["Read", "Write"],
+  "enabled": true,
+  "timeout": 120,
+  "created": "2025-03-10T00:00:00"
+}
