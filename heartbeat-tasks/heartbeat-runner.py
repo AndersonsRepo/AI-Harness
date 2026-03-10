@@ -116,6 +116,32 @@ def run_claude(prompt, allowed_tools=None, timeout=300):
         return False, str(e)
 
 
+def run_script(script_path, timeout=300):
+    """Run a local Python script. Returns (success, output_text)."""
+    try:
+        result = subprocess.run(
+            [PYTHON, script_path],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            env={
+                **os.environ,
+                "HARNESS_ROOT": HARNESS_ROOT,
+            },
+            timeout=timeout,
+            cwd=HARNESS_ROOT,
+        )
+        output = result.stdout.strip()
+        if result.returncode == 0:
+            return True, output or "Script completed successfully"
+        else:
+            return False, f"Exit code {result.returncode}: {result.stderr}"
+    except subprocess.TimeoutExpired:
+        return False, f"Script timed out after {timeout}s"
+    except Exception as e:
+        return False, str(e)
+
+
 def send_discord_notification(config, summary):
     """Send a summary to Discord via the bot's webhook or channel post.
 
@@ -184,13 +210,19 @@ def run_task(task_name):
             send_discord_notification(config, f"Task '{task_name}' auto-paused after 3 consecutive failures.")
         return
 
-    # Run Claude
-    prompt = config["prompt"]
-    allowed_tools = config.get("allowed_tools")
+    # Determine task type
+    task_type = config.get("type", "claude")
     timeout = config.get("timeout", 300)
 
-    log(task_name, f"Running claude with prompt: {prompt[:100]}...")
-    success, output = run_claude(prompt, allowed_tools, timeout)
+    if task_type == "script":
+        script_path = os.path.join(TASKS_DIR, "scripts", config["script"])
+        log(task_name, f"Running script: {script_path}")
+        success, output = run_script(script_path, timeout)
+    else:
+        prompt = config["prompt"]
+        allowed_tools = config.get("allowed_tools")
+        log(task_name, f"Running claude with prompt: {prompt[:100]}...")
+        success, output = run_claude(prompt, allowed_tools, timeout)
 
     # Update state
     now = datetime.datetime.now().isoformat()

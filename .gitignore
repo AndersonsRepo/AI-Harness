@@ -9,3 +9,7 @@ build/
 .claude/heartbeat-state/
 .tmp/
 .bot.pid
+vault/.obsidian/
+heartbeat-tasks/*.state.json
+heartbeat-tasks/pending-notifications.jsonl
+heartbeat-tasks/logs/*.log
