@@ -59,6 +59,16 @@ export function clearSession(channelId: string): boolean {
   return true;
 }
 
+export function validateSession(channelId: string): boolean {
+  const map = load();
+  if (!map[channelId]) return true; // No session = valid (nothing to clear)
+  // Clear stale/invalid session so next request starts fresh
+  delete map[channelId];
+  save(map);
+  console.log(`[SESSION] Cleared stale session for channel ${channelId}`);
+  return false;
+}
+
 export function listSessions(): SessionMap {
   return load();
 }

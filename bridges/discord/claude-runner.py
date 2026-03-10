@@ -3,23 +3,44 @@
 Workaround for nested session detection and Node.js spawn stalling.
 See: https://github.com/anthropics/claude-code/issues/771
 
-Usage: python3 claude-runner.py <output_file> [claude args...]
+Usage: python3 claude-runner.py <output_file> [--timeout <seconds>] [--stream-dir <path>] [claude args...]
 Output is written to <output_file> instead of stdout to avoid
-Node.js pipe stalling when this is spawned from a Node.js parent."""
+Node.js pipe stalling when this is spawned from a Node.js parent.
+
+Options:
+  --timeout <seconds>   Override default 120s timeout
+  --stream-dir <path>   Write stream-json events as numbered chunk files"""
 
 import subprocess
 import sys
 import os
 import json
+import threading
 
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
-        print(json.dumps({"error": "Usage: claude-runner.py <output_file> [claude args...]"}))
+        print(json.dumps({"error": "Usage: claude-runner.py <output_file> [--timeout N] [--stream-dir path] [claude args...]"}))
         sys.exit(1)
 
     output_file = args[0]
-    claude_args = args[1:]
+    remaining = args[1:]
+
+    # Parse our own flags before passing the rest to claude
+    timeout = 120
+    stream_dir = None
+
+    while remaining:
+        if remaining[0] == "--timeout" and len(remaining) > 1:
+            timeout = int(remaining[1])
+            remaining = remaining[2:]
+        elif remaining[0] == "--stream-dir" and len(remaining) > 1:
+            stream_dir = remaining[1]
+            remaining = remaining[2:]
+        else:
+            break
+
+    claude_args = remaining
 
     claude_path = "$HOME/.local/bin/claude"
     cwd = os.environ.get("HARNESS_ROOT", "$HOME/Desktop/AI-Harness")
@@ -43,27 +64,98 @@ def main():
             json.dump(data, f)
         os.rename(tmp, output_file)
 
-    try:
-        result = subprocess.run(
-            [claude_path] + claude_args,
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            env=clean_env,
-            timeout=120,
-            cwd=cwd,
-        )
+    if stream_dir:
+        # Streaming mode: run with stream-json output, write chunks to files
+        os.makedirs(stream_dir, exist_ok=True)
 
-        write_result({
-            "stdout": result.stdout or "",
-            "stderr": result.stderr or "",
-            "returncode": result.returncode,
-        })
+        # Replace --output-format json with stream-json for streaming
+        streaming_args = []
+        i = 0
+        while i < len(claude_args):
+            if claude_args[i] == "--output-format" and i + 1 < len(claude_args):
+                streaming_args.append("--output-format")
+                streaming_args.append("stream-json")
+                i += 2
+            else:
+                streaming_args.append(claude_args[i])
+                i += 1
 
-    except subprocess.TimeoutExpired:
-        write_result({"stdout": "", "stderr": "Claude timed out after 120 seconds", "returncode": 1})
-    except Exception as e:
-        write_result({"stdout": "", "stderr": str(e), "returncode": 1})
+        try:
+            proc = subprocess.Popen(
+                [claude_path] + streaming_args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                env=clean_env,
+                cwd=cwd,
+            )
+
+            chunk_num = 0
+            all_stdout = []
+
+            def read_stderr(p, container):
+                container.append(p.stderr.read())
+
+            stderr_container = []
+            stderr_thread = threading.Thread(target=read_stderr, args=(proc, stderr_container))
+            stderr_thread.start()
+
+            for line in proc.stdout:
+                decoded = line.decode("utf-8", errors="replace").strip()
+                if not decoded:
+                    continue
+                all_stdout.append(decoded)
+
+                # Write chunk file for the stream poller
+                try:
+                    chunk_file = os.path.join(stream_dir, f"chunk-{chunk_num:04d}.json")
+                    parsed = json.loads(decoded)
+                    with open(chunk_file, "w") as f:
+                        json.dump(parsed, f)
+                    chunk_num += 1
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            proc.wait(timeout=timeout)
+            stderr_thread.join(timeout=5)
+            stderr_text = stderr_container[0].decode("utf-8", errors="replace") if stderr_container else ""
+
+            # Write final aggregated result (backward compat)
+            write_result({
+                "stdout": "\n".join(all_stdout),
+                "stderr": stderr_text,
+                "returncode": proc.returncode or 0,
+            })
+
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            write_result({"stdout": "", "stderr": f"Claude timed out after {timeout} seconds", "returncode": 1})
+        except Exception as e:
+            write_result({"stdout": "", "stderr": str(e), "returncode": 1})
+
+    else:
+        # Non-streaming mode: original behavior
+        try:
+            result = subprocess.run(
+                [claude_path] + claude_args,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                env=clean_env,
+                timeout=timeout,
+                cwd=cwd,
+            )
+
+            write_result({
+                "stdout": result.stdout or "",
+                "stderr": result.stderr or "",
+                "returncode": result.returncode,
+            })
+
+        except subprocess.TimeoutExpired:
+            write_result({"stdout": "", "stderr": f"Claude timed out after {timeout} seconds", "returncode": 1})
+        except Exception as e:
+            write_result({"stdout": "", "stderr": str(e), "returncode": 1})
 
 if __name__ == "__main__":
     main()
