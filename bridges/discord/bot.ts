@@ -23,7 +23,13 @@ import {
   onSubagentComplete,
 } from "./subagent-manager.js";
 import { getRunning, getByChannel, cleanupStale } from "./process-registry.js";
-import { initActivityStream } from "./activity-stream.js";
+import {
+  initActivityStream,
+  postAgentStart,
+  postAgentComplete,
+  postAgentError,
+  type AgentActivity,
+} from "./activity-stream.js";
 import { StreamPoller } from "./stream-poller.js";
 import {
   createProject,
@@ -357,6 +363,17 @@ async function handleClaude(
 
   console.log(`[CLAUDE] Spawned PID ${proc.pid}, channel: ${channelId}, agent: ${agentName || "default"}`);
 
+  // Post to activity stream
+  const activity: AgentActivity = {
+    channelId,
+    agent: agentName || "default",
+    prompt: userText,
+    startedAt: Date.now(),
+  };
+  postAgentStart(activity).then((msgId) => {
+    if (msgId) activity.streamMessageId = msgId;
+  });
+
   // Set up streaming message updates
   let streamMessage: Message | null = null;
   let lastStreamText = "";
@@ -430,6 +447,7 @@ async function handleClaude(
           const errorMsg =
             stderr?.trim() || `Claude exited with code ${returncode}`;
           const errorReply = `Something went wrong:\n\`\`\`\n${errorMsg.slice(0, 500)}\n\`\`\``;
+          postAgentError(activity, errorMsg).catch(() => {});
           if (streamMessage) {
             await streamMessage.edit(errorReply);
           } else {
@@ -531,9 +549,14 @@ async function handleClaude(
             }
           }
         }
+
+        // Post completion to activity stream
+        const streamResult = extractResponse(stdout || "") || "Completed";
+        postAgentComplete(activity, streamResult).catch(() => {});
       } catch (err: any) {
         console.error("[FILE READ ERROR]", err.message);
         await message.reply("Error reading Claude's response. Check logs.");
+        postAgentError(activity, err.message || "File read error").catch(() => {});
       }
 
       // Clean up stream directory
