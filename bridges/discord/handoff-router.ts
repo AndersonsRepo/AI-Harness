@@ -233,7 +233,7 @@ export async function executeHandoff(
     args.push("--resume", existingSession);
   }
 
-  args.push(prompt);
+  args.push("--", prompt);
 
   const outputFile = join(
     TEMP_DIR,

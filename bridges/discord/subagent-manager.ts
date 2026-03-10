@@ -104,8 +104,8 @@ export function spawnSubagent(options: SpawnOptions): registry.SubagentEntry | n
     args.push("--model", channelConfig.model);
   }
 
-  // The prompt
-  args.push(options.description);
+  // The prompt (-- separator prevents flags from consuming it)
+  args.push("--", options.description);
 
   const pythonArgs = [
     `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
