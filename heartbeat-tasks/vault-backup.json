@@ -1,0 +1,10 @@
+{
+  "name": "vault-backup",
+  "type": "script",
+  "script": "vault-backup.py",
+  "interval_minutes": 240,
+  "notify": null,
+  "enabled": true,
+  "timeout": 30,
+  "created": "2025-03-10T00:00:00"
+}

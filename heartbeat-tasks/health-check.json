@@ -1,0 +1,11 @@
+{
+  "name": "health-check",
+  "type": "script",
+  "script": "health-check.py",
+  "interval_minutes": 10,
+  "notify": "discord",
+  "discord_channel": "notifications",
+  "enabled": true,
+  "timeout": 30,
+  "created": "2025-03-10T00:00:00"
+}

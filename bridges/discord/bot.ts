@@ -269,10 +269,78 @@ async function handleClaude(message: Message, userText: string): Promise<void> {
   setTimeout(poll, POLL_INTERVAL);
 }
 
+// --- Notification Drain ---
+// Polls pending-notifications.jsonl and sends heartbeat results to Discord channels
+const NOTIFY_FILE = join(HARNESS_ROOT, "heartbeat-tasks", "pending-notifications.jsonl");
+const NOTIFY_POLL_MS = 60_000; // every 60 seconds
+
+async function drainNotifications(): Promise<void> {
+  try {
+    if (!existsSync(NOTIFY_FILE)) return;
+
+    const raw = readFileSync(NOTIFY_FILE, "utf-8").trim();
+    if (!raw) return;
+
+    const lines = raw.split("\n").filter(Boolean);
+    const failed: string[] = [];
+
+    for (const line of lines) {
+      try {
+        const notif = JSON.parse(line);
+        const channelName: string = notif.channel || "general";
+        const task: string = notif.task || "unknown";
+        const summary: string = notif.summary || "No summary";
+        const ts: string = (notif.timestamp || "").slice(0, 16);
+
+        // Find channel by name across all guilds
+        let targetChannel: TextChannel | null = null;
+        for (const guild of client.guilds.cache.values()) {
+          const ch = guild.channels.cache.find(
+            (c) => c.name === channelName && c.isTextBased() && c.type === 0
+          );
+          if (ch) {
+            targetChannel = ch as TextChannel;
+            break;
+          }
+        }
+
+        if (!targetChannel) {
+          console.log(`[NOTIFY] Channel '${channelName}' not found, skipping`);
+          failed.push(line);
+          continue;
+        }
+
+        const message = `**Heartbeat: ${task}** (${ts})\n${summary.slice(0, 1800)}`;
+        await targetChannel.send(message);
+        console.log(`[NOTIFY] Sent '${task}' to #${channelName}`);
+      } catch (err: any) {
+        console.error(`[NOTIFY] Failed to process: ${err.message}`);
+        failed.push(line);
+      }
+    }
+
+    // Rewrite with only failed entries, or delete if all sent
+    if (failed.length > 0) {
+      writeFileSync(NOTIFY_FILE, failed.join("\n") + "\n");
+    } else {
+      unlinkSync(NOTIFY_FILE);
+    }
+  } catch (err: any) {
+    // Don't crash the bot for notification errors
+    if (err.code !== "ENOENT") {
+      console.error(`[NOTIFY] Error: ${err.message}`);
+    }
+  }
+}
+
 client.on("clientReady", () => {
   console.log(`AI Harness bot online as ${client.user?.tag}`);
   console.log(`Allowed users: ${ALLOWED_USER_IDS.join(", ")}`);
   console.log(`Working directory: ${HARNESS_ROOT}`);
+
+  // Start notification drain polling
+  setInterval(drainNotifications, NOTIFY_POLL_MS);
+  console.log(`[NOTIFY] Polling every ${NOTIFY_POLL_MS / 1000}s`);
 });
 
 client.on("messageCreate", async (message: Message) => {
