@@ -166,137 +166,119 @@ The core differentiator. Every interaction teaches the agent.
 
 ---
 
-## Phase 3.5: Memory Infrastructure — mem0 Semantic Memory Layer
+## Phase 3.5: Memory Infrastructure — Obsidian Vault
 
-### 3.5.1 Why mem0
+### 3.5.1 Why an Obsidian Vault
 
-Markdown files in `learnings/` work for human auditing, but they fail at scale:
-- **Keyword search breaks** — "git push auth error" won't match "remote rejected because credentials expired"
-- **Cross-agent blindness** — The researcher agent can't find what the Discord agent learned yesterday
-- **No scoping** — Everything is flat files; no distinction between shared knowledge, per-agent knowledge, and session-ephemeral context
+The `learnings/` monolithic markdown files work for early-stage logging, but they don't scale:
+- **No structure** — Everything appended to one file; hard to search, cross-reference, or prune
+- **No scoping** — No distinction between shared knowledge, per-agent knowledge, and project-specific knowledge
+- **No graph** — Learnings exist in isolation; no way to see connections
 
-**mem0** solves this by adding a semantic memory layer on top. It stores memories as embeddings, supports scoped access (user/agent/session), and lets agents search by meaning rather than keywords.
+An **Obsidian vault** (a folder of structured markdown files) solves this with zero infrastructure:
+- Claude Code reads/writes markdown files natively — no SDK, no server, no database
+- Each learning is its own file with YAML frontmatter and `[[wikilinks]]`
+- Multi-agent scoping via folder structure (`shared/` vs `agents/<name>/`)
+- Obsidian app provides graph view, backlinks, and full-text search for free (but is NOT required for agents to function)
+- Git-tracked — every memory change is diffable
 
-### 3.5.2 Architecture
-
-```
-[Agent writes a learning]
-        ↓
-[Dual-write strategy]
-  ├── learnings/*.md  ← human audit trail (existing system, unchanged)
-  └── mem0 API        ← semantic search index (new)
-        ↓
-[mem0 stores embedding in ChromaDB via Ollama nomic-embed-text]
-        ↓
-[Any agent can search semantically: mem0.search("auth failures on push", agent_id=...)]
-```
-
-### 3.5.3 Stack — No Docker Required
-
-| Component         | Role                        | Install                              |
-|-------------------|-----------------------------|--------------------------------------|
-| mem0ai            | Memory SDK                  | `pip install mem0ai`                 |
-| Ollama            | Local embedding model host  | `brew install ollama`                |
-| nomic-embed-text  | Embedding model (768-dim)   | `ollama pull nomic-embed-text`       |
-| ChromaDB          | Vector store (embedded)     | Bundled with mem0ai (SQLite-backed)  |
-
-**Upgrade path**: When memories exceed ~1000 entries, swap ChromaDB for Qdrant binary (`brew install qdrant`). mem0 supports both — just change the config.
-
-### 3.5.4 Multi-Agent Memory Architecture
+### 3.5.2 Vault Structure
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        mem0 Memory Store                        │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Scope: user_id="anderson" (SHARED — all agents read/write)    │
-│  ├── Promoted learnings, project conventions, tool gotchas      │
-│  ├── Cross-project knowledge (Mento ↔ Hey Lexxi)               │
-│  └── User preferences and corrections                           │
-│                                                                  │
-│  Scope: agent_id="researcher" (PRIVATE to researcher agent)    │
-│  ├── Research methodology notes                                 │
-│  ├── Source credibility ratings                                  │
-│  └── In-progress investigation context                          │
-│                                                                  │
-│  Scope: agent_id="discord" (PRIVATE to Discord bridge agent)   │
-│  ├── Conversation tone calibration                              │
-│  ├── Message formatting preferences                             │
-│  └── Channel-specific context                                   │
-│                                                                  │
-│  Scope: agent_id="reviewer" (PRIVATE to code review agent)     │
-│  ├── Code style preferences per project                         │
-│  ├── Common review findings                                     │
-│  └── PR review history patterns                                 │
-│                                                                  │
-│  Scope: run_id="session-xyz" (EPHEMERAL — single session)      │
-│  ├── Current task context                                       │
-│  ├── Scratch findings (discarded after session ends)            │
-│  └── Intermediate reasoning steps                               │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
+vault/
+├── shared/                    # Cross-agent knowledge (all agents read/write)
+│   ├── conventions.md         # Coding standards, project conventions
+│   ├── tool-gotchas.md        # Known issues with tools, CLIs, APIs
+│   └── project-knowledge/     # Per-project context
+│       ├── mento.md
+│       └── client-project.md
+├── agents/                    # Private working memory per agent
+│   ├── researcher/
+│   ├── discord/
+│   └── reviewer/
+├── learnings/                 # Individual .md files per learning entry
+│   ├── LRN-20250309-001.md
+│   ├── ERR-20250309-001.md
+│   └── FEAT-20250309-001.md
+└── daily/                     # Daily digest notes
 ```
 
-**Agent IDs:**
-| Agent       | agent_id     | Reads from shared? | Writes to shared? |
-|-------------|--------------|---------------------|--------------------|
-| Main        | `main`       | Yes                 | Yes                |
-| Researcher  | `researcher` | Yes                 | Yes (findings)     |
-| Reviewer    | `reviewer`   | Yes                 | Yes (patterns)     |
-| Discord     | `discord`    | Yes                 | Yes (corrections)  |
+### 3.5.3 Learning File Format
 
-**Communication flow**: Agents don't talk to each other directly. Instead:
-1. Agent A writes findings to shared memory (`user_id="anderson"`)
-2. Agent B searches shared memory semantically before starting work
-3. This creates implicit coordination — the researcher's findings automatically inform the reviewer's decisions
+Each learning is its own file with YAML frontmatter:
 
-### 3.5.5 MCP Integration
+```markdown
+---
+id: LRN-20250309-001
+logged: 2025-03-09T14:30:00
+type: learning          # learning | error | feature
+severity: medium        # (errors) low | medium | high | critical
+priority: medium        # (learnings) low | medium | high | critical
+status: new             # new | investigating | resolved | promoted | wont_fix
+category: correction    # correction | knowledge_gap | best_practice | tool_failure
+area: infra             # frontend | backend | infra | tools | docs | config | general
+agent: main             # main | researcher | discord | reviewer
+project: ai-harness     # ai-harness | mento | client-project | general
+pattern-key: node-claude-spawn-hang
+recurrence-count: 1
+first-seen: 2025-03-09
+last-seen: 2025-03-09
+tags: [node, claude-cli, subprocess, spawn]
+related:
+  - "[[ERR-20250309-002]]"
+  - "[[LRN-20250309-003]]"
+---
 
-Use `mem0-mcp-selfhosted` to expose mem0 as an MCP server, giving Claude Code native tool access:
+# Node.js child_process hangs when spawning Claude CLI
 
-```json
-// .claude/settings.json (mcpServers section)
-{
-  "mcpServers": {
-    "mem0": {
-      "command": "mem0-mcp-selfhosted",
-      "args": ["--config", "./memory/mem0-config.yaml"]
-    }
-  }
-}
+## What happened
+Spawning `claude -p` via Node.js `child_process.spawn()` hangs indefinitely.
+
+## What was learned
+Claude CLI is itself a Node.js/Bun app that forks workers. The process tree causes stdout pipe stalling. Use a Python intermediary with file-based output instead.
+
+## Why it matters
+The Discord bot cannot function without a working Claude CLI integration.
 ```
 
-This gives Claude Code tools like `mem0_add`, `mem0_search`, `mem0_update`, `mem0_delete` — accessible from any skill or agent.
+### 3.5.4 Multi-Agent Scoping
 
-### 3.5.6 Dual-Write Strategy
+Scoping is achieved through folder structure, not database queries:
 
-The existing markdown files in `learnings/` remain the source of truth for human review. mem0 is the search index.
+| Folder | Who reads | Who writes | Contents |
+|--------|-----------|------------|----------|
+| `vault/shared/` | All agents | All agents | Conventions, gotchas, project knowledge |
+| `vault/agents/researcher/` | Researcher only | Researcher only | Research methodology, source notes |
+| `vault/agents/discord/` | Discord bot only | Discord bot only | Tone calibration, formatting prefs |
+| `vault/agents/reviewer/` | Reviewer only | Reviewer only | Code style prefs, review patterns |
+| `vault/learnings/` | All agents | All agents | Individual learning/error/feature files |
+| `vault/daily/` | All agents | Main agent | Daily digest summaries |
 
-```
-[self-improve skill detects learning]
-        ↓
-  ├── 1. Write to learnings/LEARNINGS.md (existing behavior, unchanged)
-  └── 2. mem0.add(learning_text, user_id="anderson", metadata={
-              "source": "self-improve",
-              "entry_id": "LRN-20260309-001",
-              "type": "correction",
-              "project": "mento"
-          })
-```
+Agents communicate implicitly: Agent A writes a learning to `vault/learnings/` with tags; Agent B discovers it when searching for matching tags or `[[wikilinks]]`.
 
-If mem0 is down or unavailable, the system degrades gracefully — markdown files still work, just without semantic search.
+### 3.5.5 Migration
+
+Existing `learnings/*.md` files are empty templates — no entries to migrate. The vault replaces them as the primary storage location. The old `learnings/` directory is kept for backward compatibility but new entries go to `vault/learnings/`.
+
+### 3.5.6 Future: Semantic Search Bolt-ons (deferred — needs research)
+
+The vault is always the source of truth. These are optional search indexes that can be layered on top later:
+
+- **Smart Connections plugin** — Obsidian plugin with local embeddings and an MCP server; searches vault content semantically
+- **mem0** — Multi-agent memory SDK; could index vault files and provide semantic search via MCP
+- **LightRAG** — User has a fork at `$HOME/Desktop/RAG/LightRAG` (branch: `neuromentor-customizations`); could provide graph-based retrieval over vault content
+- **Graphiti / Neo4j** — Temporal knowledge graph; good for "what changed when" queries across the vault
+
+The key constraint: any search layer is an *index* over vault files, not a replacement. If the index breaks, the vault still works. If the vault changes, the index rebuilds.
 
 ### 3.5.7 Tasks
-- [ ] Install mem0ai: `pip install mem0ai`
-- [ ] Install Ollama and pull embedding model: `ollama pull nomic-embed-text`
-- [ ] Create `memory/mem0-config.yaml` with ChromaDB + Ollama settings
-- [ ] Configure MCP server (`mem0-mcp-selfhosted`) in `.claude/settings.json`
-- [ ] Create `scripts/migrate-learnings.py` — parse existing markdown entries and bulk-insert into mem0
-- [ ] Update `self-improve` skill SKILL.md for dual-write (markdown + mem0)
-- [ ] Add memory injection to `claude-runner.py` — query mem0 for relevant context before each task
-- [ ] Define agent IDs and document scoping rules in CLAUDE.md
-- [ ] Test cross-agent memory sharing: write from researcher → search from main → verify retrieval
-- [ ] Test graceful degradation: stop Ollama → verify markdown-only fallback works
+- [ ] Create `vault/` directory structure
+- [ ] Create vault template files (`shared/conventions.md`, `shared/tool-gotchas.md`, project knowledge files)
+- [ ] Update self-improve skill to write individual `.md` files with YAML frontmatter to `vault/learnings/`
+- [ ] Migrate existing `learnings/*.md` entries into vault (if any exist)
+- [ ] Update `CLAUDE.md` to reference vault as the memory system
+- [ ] Add MCP server for Obsidian (optional, for richer search)
+- [ ] Test: trigger a learning → verify it creates a file in `vault/learnings/` with proper frontmatter and wikilinks
 
 ---
 
@@ -345,11 +327,11 @@ Each heartbeat task writes to a state file so the next run knows what happened:
 
 When you ask "how do I do X" or "is there a way to...", instead of just failing:
 1. Search existing skills in .claude/skills/ for keyword matches
-2. **Search mem0 semantically** for related learnings, past solutions, and cross-agent findings (replaces grep-based search of learnings/ files)
-3. Fall back to grep-based search of learnings/ if mem0 is unavailable
+2. Search `vault/learnings/` by tags, frontmatter fields, and content for related entries
+3. Search vault semantically if a semantic search bolt-on is configured (method TBD — see Phase 3.5.6)
 4. If nothing found, suggest building a new skill and draft a SKILL.md scaffold
 
-> **mem0 upgrade (Phase 3.5):** The find-skill search is dramatically improved by semantic memory. Asking "how do I deploy" will match learnings about "Vercel push", "git remote setup", and "CI/CD pipeline" — connections that keyword grep would miss entirely.
+> **Vault integration (Phase 3.5):** Skills can search the vault by tags, `pattern-key`, and `[[wikilinks]]` in frontmatter. A future semantic search layer would further improve discovery.
 
 **SKILL.md frontmatter:**
 ```yaml
@@ -371,24 +353,24 @@ This is where it gets interesting. The system creates compounding returns:
 
 ### 6.1 The Positive Feedback Loop
 ```
-You use Claude → mistakes happen → errors logged automatically
-              → you correct it → learnings logged automatically
-              → dual-write to markdown + mem0 (Phase 3.5)
+You use Claude → mistakes happen → errors logged to vault/learnings/
+              → you correct it → learnings logged to vault/learnings/
+              → wikilinks connect related entries across the vault
               → patterns recur → learnings promoted to CLAUDE.md
               → Claude gets smarter → fewer mistakes
               → you ask for new things → feature requests logged
-              → find-skill searches mem0 semantically → finds related solutions
+              → find-skill searches vault by tags/frontmatter → finds related solutions
               → or builds a new skill → new skill created
               → Claude can do more → you use it more → cycle continues
 ```
 
-> **Semantic memory supercharges this loop.** Without mem0, pattern detection relies on keyword matching and manual review. With mem0, the agent discovers connections across agents, projects, and time — a correction in Mento informs behavior in Hey Lexxi without explicit rules.
+> **The vault enables this loop with zero infrastructure.** Pattern detection works via tags, `pattern-key` frontmatter, and `[[wikilinks]]`. A future semantic search layer would discover deeper connections across agents, projects, and time.
 
 ### 6.2 Emergent Behaviors to Cultivate
 - **Self-optimization**: Agent notices it's using inefficient approaches and creates better skills
 - **Proactive suggestions**: After enough learnings, agent starts anticipating your needs
-- **Cross-project knowledge**: Learnings from Mento improve Hey Lexxi work and vice versa — powered by mem0 shared memory scope (`user_id="anderson"`)
-- **Cross-agent learning**: The reviewer agent benefits from the researcher's findings without explicit handoff — both read/write to shared mem0 memory
+- **Cross-project knowledge**: Learnings from Mento improve Hey Lexxi work and vice versa — vault `shared/` folder is readable by all agents
+- **Cross-agent learning**: The reviewer agent benefits from the researcher's findings without explicit handoff — both read/write to `vault/learnings/` and `vault/shared/`
 - **Skill ecosystem growth**: Each new skill compounds with existing ones
 - **Model routing**: Agent learns which tasks need Opus vs Sonnet vs Haiku and auto-routes
 
@@ -416,19 +398,19 @@ Phase 2 (Self-Improvement) ──── depends on Phase 1    │
     ↓                                                   │
 Phase 3 (Discord Bridge) ────── depends on Phase 1    │
     ↓                                                   │
-Phase 3.5 (Memory / mem0) ──── depends on Phase 2     │
-    ↓                          (needs self-improve      │
-    │                           for dual-write)         │
+Phase 3.5 (Obsidian Vault) ──── depends on Phase 2    │
+    ↓                           (rewires self-improve   │
+    │                            to write to vault)     │
 Phase 4 (Heartbeat) ──────────  depends on Phase 3    │
     ↓                                                   │
 Phase 5 (Skill Discovery) ──── depends on Phase 2     │
     │                          + Phase 3.5              │
-    │                          (semantic search)        │
+    │                          (vault search)           │
     ↓                                                   │
 Phase 6 (Emergent Loop) ────── depends on all above   │
 ```
 
-**Estimated effort**: Phases 1-3 in a weekend. Phase 3.5 in an afternoon (pip install + config + migration script). Phase 4-5 in a second session. Phase 6 ongoing.
+**Estimated effort**: Phases 1-3 in a weekend. Phase 3.5 in an hour (create folders + update skill). Phase 4-5 in a second session. Phase 6 ongoing.
 
 ---
 
@@ -458,14 +440,13 @@ These can be added later once the core system is solid:
 | Skills Framework   | Claude Code Skills v2 (SKILL.md + frontmatter)  |
 | Hooks              | Claude Code hooks (UserPromptSubmit, PostToolUse)|
 | Discord Bridge     | discord.js + TypeScript                          |
-| Semantic Memory    | mem0ai (multi-agent memory with scoping)         |
-| Vector Store       | ChromaDB (embedded) → Qdrant (at scale)          |
-| Embeddings         | Ollama + nomic-embed-text (local, 768-dim)       |
-| Memory MCP         | mem0-mcp-selfhosted (MCP server for Claude Code) |
+| Memory Layer       | Obsidian vault (structured markdown + YAML frontmatter) |
+| Memory Scoping     | Folder-based: shared/, agents/<name>/, learnings/ |
+| Semantic Search    | TBD — future bolt-on (Smart Connections, mem0, LightRAG, or Graphiti) |
 | Scheduling         | macOS launchd                                    |
 | Process Manager    | pm2 or launchd                                   |
 | Session Storage    | Local JSON files                                 |
-| Learning Storage   | Structured Markdown + mem0 (dual-write)          |
+| Learning Storage   | Individual .md files in vault/learnings/ with YAML frontmatter |
 | Version Control    | Git                                              |
 
 ---
@@ -480,7 +461,8 @@ These can be added later once the core system is solid:
 - [claude-pipe](https://github.com/georgi/claude-pipe) — Minimal Discord+Telegram bridge
 - [imsg CLI](https://github.com/steipete/imsg) — iMessage programmatic access
 - Reddit thread: "Honest review about OpenClaw vs Claude Code after a month" — Community validation of DIY approach
-- [mem0ai](https://github.com/mem0ai/mem0) — Multi-agent semantic memory layer
-- [mem0-mcp-selfhosted](https://github.com/ryaker/mem0-mcp-selfhosted) — MCP server for mem0 integration with Claude Code
-- [Ollama](https://ollama.ai) — Local model runner for embeddings (nomic-embed-text)
-- [ChromaDB](https://www.trychroma.com) — Embedded vector database (SQLite-backed, no Docker)
+- [Obsidian](https://obsidian.md) — Markdown-based knowledge management (optional app; vault works without it)
+- [Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) — Obsidian plugin with local embeddings + MCP server (future option)
+- [mem0ai](https://github.com/mem0ai/mem0) — Multi-agent semantic memory layer (future option)
+- [LightRAG](https://github.com/HKUDS/LightRAG) — Graph-based RAG system (user fork: AndersonsRepo/LightRAG)
+- [Graphiti](https://github.com/getzep/graphiti) — Temporal knowledge graph (future option)

@@ -32,79 +32,145 @@ You are a continuously learning agent. After every meaningful interaction, evalu
 
 ## How to Log
 
-### Error Entry Format
-Append to `learnings/ERRORS.md`:
+Each entry is an **individual markdown file** in `vault/learnings/` with YAML frontmatter.
+
+### File Naming
+- `vault/learnings/LRN-YYYYMMDD-XXX.md` for learnings
+- `vault/learnings/ERR-YYYYMMDD-XXX.md` for errors
+- `vault/learnings/FEAT-YYYYMMDD-XXX.md` for feature requests
+
+To determine the next sequence number (XXX), list existing files in `vault/learnings/` matching today's date and the entry type prefix, then increment.
+
+### Learning Entry (LRN)
 
 ```markdown
-### ERR-YYYYMMDD-XXX
-- **Logged**: YYYY-MM-DDTHH:MM:SS
-- **Severity**: low | medium | high | critical
-- **Status**: new | investigating | resolved | wont_fix
-- **Command**: The command or operation that failed
-- **Error**: "Actual error message or output"
-- **Environment**: Relevant context (OS, tool version, project)
-- **Root Cause**: What went wrong (fill in when resolved)
-- **Fix**: How it was fixed (fill in when resolved)
-- **See Also**: Links to related ERR/LRN entries
+---
+id: LRN-YYYYMMDD-XXX
+logged: YYYY-MM-DDTHH:MM:SS
+type: learning
+priority: low | medium | high | critical
+status: new | resolved | promoted
+category: correction | knowledge_gap | best_practice
+area: frontend | backend | infra | tools | docs | config | general
+agent: main | researcher | discord | reviewer
+project: ai-harness | mento | client-project | general
+pattern-key: short-kebab-case-identifier
+recurrence-count: 1
+first-seen: YYYY-MM-DD
+last-seen: YYYY-MM-DD
+tags: [tag1, tag2, tag3]
+related:
+  - "[[LRN-YYYYMMDD-XXX]]"
+  - "[[ERR-YYYYMMDD-XXX]]"
+---
+
+# Title of the learning
+
+## What happened
+Description of the situation.
+
+## What was learned
+The actual insight or correction.
+
+## Why it matters
+Impact or consequence of not knowing this.
 ```
 
-### Learning Entry Format
-Append to `learnings/LEARNINGS.md`:
+### Error Entry (ERR)
 
 ```markdown
-### LRN-YYYYMMDD-XXX
-- **Logged**: YYYY-MM-DDTHH:MM:SS
-- **Priority**: low | medium | high | critical
-- **Status**: pending | resolved | promoted
-- **Category**: correction | knowledge_gap | best_practice
-- **Area**: frontend | backend | infra | tools | docs | config | general
-- **Pattern-Key**: short-kebab-case-identifier (for recurring pattern matching)
-- **Recurrence-Count**: 1
-- **First-Seen**: YYYY-MM-DD
-- **Last-Seen**: YYYY-MM-DD
+---
+id: ERR-YYYYMMDD-XXX
+logged: YYYY-MM-DDTHH:MM:SS
+type: error
+severity: low | medium | high | critical
+status: new | investigating | resolved | wont_fix
+category: tool_failure | config_error | api_error | runtime_error
+area: frontend | backend | infra | tools | docs | config | general
+agent: main | researcher | discord | reviewer
+project: ai-harness | mento | client-project | general
+pattern-key: short-kebab-case-identifier
+recurrence-count: 1
+first-seen: YYYY-MM-DD
+last-seen: YYYY-MM-DD
+tags: [tag1, tag2, tag3]
+related:
+  - "[[ERR-YYYYMMDD-XXX]]"
+---
 
-**What happened**: Description of the situation
-**What was learned**: The actual insight or correction
-**Why it matters**: Impact or consequence of not knowing this
+# Title of the error
 
-- **See Also**: Links to related LRN/ERR entries
+## Command
+The command or operation that failed.
+
+## Error
+Actual error message or output.
+
+## Environment
+Relevant context (OS, tool version, project).
+
+## Root Cause
+What went wrong (fill in when resolved).
+
+## Fix
+How it was fixed (fill in when resolved).
 ```
 
-### Feature Request Format
-Append to `learnings/FEATURE_REQUESTS.md`:
+### Feature Request Entry (FEAT)
 
 ```markdown
-### FEAT-YYYYMMDD-XXX
-- **Logged**: YYYY-MM-DDTHH:MM:SS
-- **Status**: requested | in_progress | built | wont_build
-- **Complexity**: simple | medium | complex
-- **Requested capability**: What the user wants
-- **User context**: Why they want it
-- **Suggested implementation**: How it could be built
-- **Skill candidate**: yes | no (could this become a reusable skill?)
+---
+id: FEAT-YYYYMMDD-XXX
+logged: YYYY-MM-DDTHH:MM:SS
+type: feature
+status: requested | in_progress | built | wont_build
+complexity: simple | medium | complex
+area: frontend | backend | infra | tools | docs | config | general
+agent: main | researcher | discord | reviewer
+project: ai-harness | mento | client-project | general
+pattern-key: short-kebab-case-identifier
+recurrence-count: 1
+first-seen: YYYY-MM-DD
+last-seen: YYYY-MM-DD
+tags: [tag1, tag2, tag3]
+related: []
+---
+
+# Title of the feature request
+
+## Requested capability
+What the user wants.
+
+## User context
+Why they want it.
+
+## Suggested implementation
+How it could be built.
+
+## Skill candidate
+Yes | No — could this become a reusable skill?
 ```
 
 ## Recurring Pattern Detection
 
 Before creating a new entry:
-1. Read the relevant log file (LEARNINGS.md, ERRORS.md, or FEATURE_REQUESTS.md)
-2. Search for entries with matching keywords or Pattern-Key
-3. If a match is found:
-   - Add a "See Also" link on both entries
-   - Increment `Recurrence-Count` on the original
-   - Update `Last-Seen` date on the original
-   - Do NOT create a duplicate entry
-4. If no match, create a new entry
+1. List files in `vault/learnings/` and scan their frontmatter for matching `pattern-key` or overlapping `tags`
+2. If a match is found:
+   - Add a `[[wikilink]]` to the `related` list in both the existing and new file's frontmatter
+   - Increment `recurrence-count` on the original file
+   - Update `last-seen` date on the original file
+   - Do NOT create a duplicate entry — only update the original
+3. If no match, create a new entry file
 
 ## Promotion Rules
 
 When a learning meets ALL of these criteria, flag it for promotion:
-- `Recurrence-Count` >= 3
+- `recurrence-count` >= 3
 - Occurred across 2+ distinct tasks
-- Within a 30-day window (`Last-Seen` - `First-Seen` <= 30 days)
+- Within a 30-day window (`last-seen` - `first-seen` <= 30 days)
 
 **Promotion process:**
-1. Change Status to `promoted`
+1. Change `status` to `promoted` in the file's frontmatter
 2. Append the learning to the `## Promoted Learnings` section of `CLAUDE.md`
 3. Format: `- **[Area]**: Learning description (promoted YYYY-MM-DD, from LRN-XXXXXXXX-XXX)`
 
@@ -114,7 +180,7 @@ When a learning meets ALL of these criteria, flag it for promotion:
 ## Skill Extraction
 
 When a learning is valuable enough to become a reusable skill, it qualifies if:
-- It has 2+ "See Also" links to related entries
+- It has 2+ `[[wikilinks]]` in its `related` list
 - Status is `resolved` with a verified working fix
 - It required non-obvious debugging to discover
 - It's broadly applicable across projects
@@ -129,6 +195,6 @@ Always ask the user before creating a new skill.
 ## Daily Digest
 
 When invoked with `/self-improve digest` or at the end of a long session, summarize:
-- New entries added today (count by type)
-- Any patterns approaching promotion threshold
+- New entries added today (count by type) — check `vault/learnings/` for files with today's date
+- Any patterns approaching promotion threshold (recurrence-count >= 2)
 - Any feature requests that could be built quickly
