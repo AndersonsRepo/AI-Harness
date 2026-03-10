@@ -9,24 +9,26 @@ interface SessionEntry {
 
 type SessionMap = Record<string, SessionEntry>;
 
-const STORE_PATH = join(
-  process.env.HARNESS_ROOT || ".",
-  "bridges",
-  "discord",
-  "sessions.json"
-);
+function getStorePath(): string {
+  return join(
+    process.env.HARNESS_ROOT || ".",
+    "bridges",
+    "discord",
+    "sessions.json"
+  );
+}
 
 function load(): SessionMap {
-  if (!existsSync(STORE_PATH)) return {};
+  if (!existsSync(getStorePath())) return {};
   try {
-    return JSON.parse(readFileSync(STORE_PATH, "utf-8"));
+    return JSON.parse(readFileSync(getStorePath(), "utf-8"));
   } catch {
     return {};
   }
 }
 
 function save(map: SessionMap): void {
-  writeFileSync(STORE_PATH, JSON.stringify(map, null, 2));
+  writeFileSync(getStorePath(), JSON.stringify(map, null, 2));
 }
 
 export function getSession(channelId: string): string | null {

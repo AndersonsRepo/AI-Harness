@@ -8,8 +8,58 @@ import {
 import { spawn } from "child_process";
 import { config } from "dotenv";
 import { getSession, setSession, clearSession } from "./session-store.js";
+import { readFileSync, existsSync, unlinkSync, mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
 
 config();
+
+// PID file to prevent multiple instances
+const PID_FILE = join(import.meta.dirname || ".", ".bot.pid");
+try {
+  if (existsSync(PID_FILE)) {
+    const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
+    try {
+      process.kill(oldPid, 0); // Check if process exists
+      console.error(`Bot already running (PID ${oldPid}). Exiting.`);
+      process.exit(1);
+    } catch {
+      // Old process is dead, continue
+    }
+  }
+  writeFileSync(PID_FILE, String(process.pid));
+  process.on("exit", () => { try { unlinkSync(PID_FILE); } catch {} });
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
+} catch {}
+
+
+// Extract the human-readable response from Claude's JSON output
+function extractResponse(output: string): string | null {
+  // Try JSON.parse first
+  try {
+    const jsonStart = output.indexOf('{"type"');
+    if (jsonStart !== -1) {
+      const jsonEnd = output.lastIndexOf('}') + 1;
+      const parsed = JSON.parse(output.slice(jsonStart, jsonEnd));
+      if (parsed.is_error) return `Error: ${parsed.result || "Unknown error"}`;
+      const text = parsed.result || parsed.text || parsed.content;
+      return text ? text.trim() : null;
+    }
+  } catch {}
+
+  // Fallback: regex extract the "result" field
+  const match = output.match(/"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (match) {
+    return match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').trim();
+  }
+
+  return null;
+}
+
+function extractSessionId(output: string): string | null {
+  const match = output.match(/"session_id"\s*:\s*"([^"]+)"/);
+  return match ? match[1] : null;
+}
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "")
@@ -100,6 +150,10 @@ function splitMessage(text: string): string[] {
   return chunks;
 }
 
+// Temp directory for Claude response files
+const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
+try { mkdirSync(TEMP_DIR, { recursive: true }); } catch {}
+
 async function handleClaude(message: Message, userText: string): Promise<void> {
   const channelId = message.channel.id;
 
@@ -121,82 +175,98 @@ async function handleClaude(message: Message, userText: string): Promise<void> {
   // Add the user's message
   args.push(userText);
 
-  return new Promise((resolve) => {
-    const proc = spawn("claude", args, {
-      cwd: HARNESS_ROOT,
-      env: { ...process.env, TERM: "dumb" },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+  // Use file-based output to avoid Node.js pipe stalling bug
+  // Python writes Claude's response to a temp file, we poll for it
+  const outputFile = join(TEMP_DIR, `response-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
 
-    let stdout = "";
-    let stderr = "";
+  const pythonArgs = [
+    `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
+    outputFile,
+    ...args,
+  ];
 
-    proc.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-      // Re-send typing indicator every 5s for long operations
-      if ("sendTyping" in channel) {
-        (channel as TextChannel).sendTyping().catch(() => {});
-      }
-    });
-
-    proc.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on("close", async (code) => {
-      activeRequest = false;
-
-      if (code !== 0 || !stdout.trim()) {
-        const errorMsg = stderr.trim() || `Claude exited with code ${code}`;
-        await message.reply(
-          `Something went wrong:\n\`\`\`\n${errorMsg.slice(0, 500)}\n\`\`\``
-        );
-        resolve();
-        processQueue();
-        return;
-      }
-
-      try {
-        const result = JSON.parse(stdout);
-
-        // Extract session ID for future --resume
-        if (result.session_id) {
-          setSession(channelId, result.session_id);
-        }
-
-        // Extract the response text
-        let responseText =
-          result.result ||
-          result.text ||
-          result.content ||
-          "No response from Claude.";
-
-        // Send response, splitting if needed
-        const chunks = splitMessage(responseText);
-        for (const chunk of chunks) {
-          await message.reply(chunk);
-        }
-      } catch {
-        // If JSON parsing fails, send raw output
-        const chunks = splitMessage(stdout);
-        for (const chunk of chunks) {
-          await message.reply(chunk);
-        }
-      }
-
-      resolve();
-      processQueue();
-    });
-
-    proc.on("error", async (err) => {
-      activeRequest = false;
-      await message.reply(
-        `Failed to start Claude: ${err.message}\n\nIs \`claude\` installed and in your PATH?`
-      );
-      resolve();
-      processQueue();
-    });
+  // Spawn detached so Node.js event loop doesn't interfere
+  const proc = spawn("python3", pythonArgs, {
+    cwd: HARNESS_ROOT,
+    env: { ...process.env, HARNESS_ROOT },
+    detached: true,
+    stdio: "ignore",
   });
+
+  proc.unref();
+
+  console.log(`[CLAUDE] Spawned detached process, output file: ${outputFile}`);
+
+  // Poll for the output file
+  const startTime = Date.now();
+  const TIMEOUT = 120_000;
+  const POLL_INTERVAL = 1_000;
+
+  const poll = async (): Promise<void> => {
+    // Keep typing indicator alive
+    if ("sendTyping" in channel) {
+      (channel as TextChannel).sendTyping().catch(() => {});
+    }
+
+    if (existsSync(outputFile)) {
+      try {
+        const raw = readFileSync(outputFile, "utf-8");
+        unlinkSync(outputFile); // Clean up
+
+        const result = JSON.parse(raw);
+        const { stdout, stderr, returncode } = result;
+
+        console.log(`[CLAUDE] returncode: ${returncode}, stdout length: ${(stdout || "").length}`);
+        if (stderr) console.error(`[CLAUDE STDERR] ${stderr.slice(0, 500)}`);
+
+        if (returncode !== 0) {
+          const errorMsg = stderr?.trim() || `Claude exited with code ${returncode}`;
+          await message.reply(
+            `Something went wrong:\n\`\`\`\n${errorMsg.slice(0, 500)}\n\`\`\``
+          );
+        } else {
+          const responseText = extractResponse(stdout);
+          const sessionId = extractSessionId(stdout);
+
+          if (sessionId) {
+            setSession(channelId, sessionId);
+          }
+
+          if (responseText) {
+            const chunks = splitMessage(responseText);
+            for (const chunk of chunks) {
+              await message.reply(chunk);
+            }
+          } else {
+            console.error("[PARSE ERROR] Raw stdout:", stdout.slice(0, 500));
+            await message.reply("Got a response but couldn't parse it. Check logs.");
+          }
+        }
+      } catch (err: any) {
+        console.error("[FILE READ ERROR]", err.message);
+        await message.reply("Error reading Claude's response. Check logs.");
+      }
+
+      activeRequest = false;
+      processQueue();
+      return;
+    }
+
+    // Check timeout
+    if (Date.now() - startTime > TIMEOUT) {
+      activeRequest = false;
+      await message.reply("Claude timed out after 2 minutes.");
+      // Clean up output file if it appears later
+      setTimeout(() => { try { unlinkSync(outputFile); } catch {} }, 5000);
+      processQueue();
+      return;
+    }
+
+    // Continue polling
+    setTimeout(poll, POLL_INTERVAL);
+  };
+
+  setTimeout(poll, POLL_INTERVAL);
 }
 
 client.on("clientReady", () => {
@@ -206,11 +276,16 @@ client.on("clientReady", () => {
 });
 
 client.on("messageCreate", async (message: Message) => {
+  console.log(`[MSG] from ${message.author.tag} (${message.author.id}): "${message.content}" | bot: ${message.author.bot}`);
+
   // Ignore bot messages
   if (message.author.bot) return;
 
   // Whitelist check
-  if (!ALLOWED_USER_IDS.includes(message.author.id)) return;
+  if (!ALLOWED_USER_IDS.includes(message.author.id)) {
+    console.log(`[BLOCKED] User ${message.author.id} not in allowed list: ${ALLOWED_USER_IDS}`);
+    return;
+  }
 
   const content = message.content.trim();
   if (!content) return;
