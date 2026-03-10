@@ -215,7 +215,7 @@ export async function executeHandoff(
   const prompt = `${context}\n\n${capitalize(fromAgent)} has handed off to you with this request:\n${handoffMessage}`;
 
   // Build claude args
-  const args = ["-p", "--output-format", "json"];
+  const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
 
   // Agent personality
   const agentPrompt = readAgentPrompt(toAgent);

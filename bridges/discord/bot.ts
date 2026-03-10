@@ -281,7 +281,7 @@ async function handleClaude(
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   // Build claude command args
-  const args = ["-p", "--output-format", "json"];
+  const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
 
   // Apply channel config
   const channelConfig = getChannelConfig(channelId);

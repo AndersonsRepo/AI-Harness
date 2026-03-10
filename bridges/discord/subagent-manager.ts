@@ -75,7 +75,7 @@ export function spawnSubagent(options: SpawnOptions): registry.SubagentEntry | n
   } catch {}
 
   // Build claude args
-  const args = ["-p", "--output-format", "json"];
+  const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
 
   // Agent personality
   const agentName = options.agent || getChannelConfig(options.channelId)?.agent;
