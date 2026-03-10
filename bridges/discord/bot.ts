@@ -26,6 +26,20 @@ import { getRunning, getByChannel, cleanupStale } from "./process-registry.js";
 import { initActivityStream } from "./activity-stream.js";
 import { StreamPoller } from "./stream-poller.js";
 import {
+  createProject,
+  getProject,
+  listProjects,
+  updateProject,
+  closeProject,
+  isProjectChannel,
+  resetHandoffDepth,
+} from "./project-manager.js";
+import {
+  parseHandoff,
+  runHandoffChain,
+  getProjectSessionKey,
+} from "./handoff-router.js";
+import {
   readFileSync,
   existsSync,
   unlinkSync,
@@ -298,7 +312,13 @@ async function handleClaude(
   }
 
   // Check for existing session to resume
-  const existingSession = getSession(channelId);
+  // Project channels use compound keys (channelId:agentName)
+  const project = getProject(channelId);
+  const sessionKey =
+    project && agentName
+      ? getProjectSessionKey(channelId, agentName)
+      : channelId;
+  const existingSession = getSession(sessionKey);
   if (existingSession) {
     args.push("--resume", existingSession);
   }
@@ -391,7 +411,7 @@ async function handleClaude(
           (stderr?.includes("not found") || stderr?.includes("expired"))
         ) {
           console.log(`[CLAUDE] Stale session detected, clearing and retrying`);
-          validateSession(channelId);
+          validateSession(sessionKey);
           releaseChannel(channelId);
           await handleClaude(message, userText, true);
           return;
@@ -411,10 +431,41 @@ async function handleClaude(
           const sessionId = extractSessionId(stdout);
 
           if (sessionId) {
-            setSession(channelId, sessionId);
+            setSession(sessionKey, sessionId);
           }
 
           if (responseText) {
+            // Check for handoff in project channels
+            if (project && agentName && parseHandoff(responseText)) {
+              // Post the pre-handoff text, then run the handoff chain
+              const handoff = parseHandoff(responseText)!;
+              if (handoff.preHandoffText) {
+                const preChunks = splitMessage(
+                  `**${agentName.charAt(0).toUpperCase() + agentName.slice(1)}:** ${handoff.preHandoffText}`
+                );
+                if (streamMessage) {
+                  await streamMessage.edit(preChunks[0]);
+                  for (let i = 1; i < preChunks.length; i++) {
+                    await (channel as TextChannel).send(preChunks[i]);
+                  }
+                } else {
+                  for (const chunk of preChunks) {
+                    await (channel as TextChannel).send(chunk);
+                  }
+                }
+              } else if (streamMessage) {
+                await streamMessage.delete().catch(() => {});
+              }
+              // Release channel before handoff chain (it manages its own spawns)
+              releaseChannel(channelId);
+              await runHandoffChain(
+                channel as TextChannel,
+                agentName,
+                responseText
+              );
+              return;
+            }
+
             const chunks = splitMessage(responseText);
             if (streamMessage) {
               // Edit the streaming message with the first chunk
@@ -675,6 +726,83 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     return true;
   }
 
+  // /project create <name> "description" — create a project channel
+  const projectCreateMatch = content.match(
+    /^\/project\s+create\s+(\w[\w-]*)\s+"([^"]+)"$/
+  );
+  if (projectCreateMatch) {
+    const [, name, description] = projectCreateMatch;
+    const guild = message.guild;
+    if (!guild) {
+      await message.reply("This command only works in a server.");
+      return true;
+    }
+    try {
+      const project = await createProject(guild, name, description);
+      await message.reply(
+        `Project created: <#${project.channelId}>\nAgents: ${project.agents.join(", ")}\nDescription: ${description}`
+      );
+    } catch (err: any) {
+      await message.reply(`Failed to create project: ${err.message}`);
+    }
+    return true;
+  }
+
+  // /project list — list active projects
+  if (content === "/project list") {
+    const projects = listProjects();
+    if (projects.length === 0) {
+      await message.reply("No active projects.");
+    } else {
+      const lines = projects.map(
+        (p) =>
+          `• <#${p.channelId}> — ${p.description.slice(0, 80)} (agents: ${p.agents.join(", ")})`
+      );
+      await message.reply(`**Active projects (${projects.length}):**\n${lines.join("\n")}`);
+    }
+    return true;
+  }
+
+  // /project agents <agent1,agent2,...> — set project agents for this channel
+  const projectAgentsMatch = content.match(
+    /^\/project\s+agents\s+([\w,]+)$/
+  );
+  if (projectAgentsMatch) {
+    const agents = projectAgentsMatch[1].split(",").map((a) => a.trim());
+    const project = getProject(channelId);
+    if (!project) {
+      await message.reply("This channel is not a project channel.");
+      return true;
+    }
+    const available = listAgents();
+    const invalid = agents.filter((a) => !available.includes(a));
+    if (invalid.length > 0) {
+      await message.reply(
+        `Unknown agents: ${invalid.join(", ")}. Available: ${available.join(", ")}`
+      );
+      return true;
+    }
+    updateProject(channelId, { agents });
+    await message.reply(`Project agents updated: ${agents.join(", ")}`);
+    return true;
+  }
+
+  // /project close — archive project channel
+  if (content === "/project close") {
+    const guild = message.guild;
+    if (!guild) {
+      await message.reply("This command only works in a server.");
+      return true;
+    }
+    const closed = await closeProject(guild, channelId);
+    if (closed) {
+      await message.reply("Project closed and channel archived.");
+    } else {
+      await message.reply("This channel is not a project channel.");
+    }
+    return true;
+  }
+
   // /help — list all commands
   if (content === "/help") {
     await message.reply(
@@ -691,6 +819,10 @@ async function handleCommand(message: Message, content: string): Promise<boolean
 • \`/tasks\` — List running subagents
 • \`/cancel <id>\` — Cancel a running subagent
 • \`/channel create <name> [--agent <name>]\` — Create a new channel
+• \`/project create <name> "description"\` — Create a project channel
+• \`/project list\` — List active projects
+• \`/project agents <a1,a2,...>\` — Set project agents
+• \`/project close\` — Archive project channel
 • \`/help\` — Show this help message`
     );
     return true;
@@ -831,8 +963,25 @@ client.on("messageCreate", async (message: Message) => {
     // If not a recognized command, fall through to Claude
   }
 
-  // Enqueue the Claude request
+  // For project channels: reset handoff depth on human message
+  // and route to addressed agent if specified (e.g., "builder: do X")
   const channelId = message.channel.id;
+  const project = getProject(channelId);
+  if (project) {
+    resetHandoffDepth(channelId);
+
+    // Check if user is addressing a specific agent ("agent: message")
+    const agentAddressMatch = content.match(/^(\w+)\s*:\s*(.+)$/s);
+    if (agentAddressMatch) {
+      const [, addressedAgent, agentMessage] = agentAddressMatch;
+      if (project.agents.includes(addressedAgent.toLowerCase())) {
+        setChannelConfig(channelId, { agent: addressedAgent.toLowerCase() });
+        updateProject(channelId, { activeAgent: addressedAgent.toLowerCase() });
+      }
+    }
+  }
+
+  // Enqueue the Claude request
   const task: QueuedTask = {
     message,
     execute: () => {
