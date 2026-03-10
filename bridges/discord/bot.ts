@@ -277,6 +277,9 @@ async function handleClaude(
     await (channel as TextChannel).sendTyping();
   }
 
+  // Unique ID for this request (used for temp files)
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
   // Build claude command args
   const args = ["-p", "--output-format", "json"];
 
@@ -327,11 +330,10 @@ async function handleClaude(
     args.push("--resume", existingSession);
   }
 
-  // Add the user's message
-  args.push(userText);
+  // Add the user's message (-- separator prevents flags from consuming it)
+  args.push("--", userText);
 
   // Streaming: set up stream directory for this request
-  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const streamDir = join(STREAM_DIR, requestId);
   const outputFile = join(TEMP_DIR, `response-${requestId}.json`);
 

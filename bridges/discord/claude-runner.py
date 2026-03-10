@@ -69,7 +69,8 @@ def main():
         os.makedirs(stream_dir, exist_ok=True)
 
         # Replace --output-format json with stream-json for streaming
-        streaming_args = []
+        # Claude CLI requires --verbose with stream-json in --print mode
+        streaming_args = ["--verbose"]
         i = 0
         while i < len(claude_args):
             if claude_args[i] == "--output-format" and i + 1 < len(claude_args):
