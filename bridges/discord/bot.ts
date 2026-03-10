@@ -4,11 +4,35 @@ import {
   Partials,
   Message,
   TextChannel,
+  ChannelType,
+  PermissionFlagsBits,
 } from "discord.js";
 import { spawn } from "child_process";
 import { config } from "dotenv";
-import { getSession, setSession, clearSession } from "./session-store.js";
-import { readFileSync, existsSync, unlinkSync, mkdirSync, writeFileSync } from "fs";
+import { getSession, setSession, clearSession, validateSession } from "./session-store.js";
+import {
+  getChannelConfig,
+  setChannelConfig,
+  clearChannelConfig,
+  listConfigs,
+} from "./channel-config-store.js";
+import {
+  spawnSubagent,
+  startPolling as startSubagentPolling,
+  cancelSubagent,
+  onSubagentComplete,
+} from "./subagent-manager.js";
+import { getRunning, getByChannel, cleanupStale } from "./process-registry.js";
+import { initActivityStream } from "./activity-stream.js";
+import { StreamPoller } from "./stream-poller.js";
+import {
+  readFileSync,
+  existsSync,
+  unlinkSync,
+  mkdirSync,
+  writeFileSync,
+  readdirSync,
+} from "fs";
 import { join } from "path";
 
 config();
@@ -19,7 +43,7 @@ try {
   if (existsSync(PID_FILE)) {
     const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
     try {
-      process.kill(oldPid, 0); // Check if process exists
+      process.kill(oldPid, 0);
       console.error(`Bot already running (PID ${oldPid}). Exiting.`);
       process.exit(1);
     } catch {
@@ -27,19 +51,21 @@ try {
     }
   }
   writeFileSync(PID_FILE, String(process.pid));
-  process.on("exit", () => { try { unlinkSync(PID_FILE); } catch {} });
+  process.on("exit", () => {
+    try {
+      unlinkSync(PID_FILE);
+    } catch {}
+  });
   process.on("SIGINT", () => process.exit(0));
   process.on("SIGTERM", () => process.exit(0));
 } catch {}
 
-
 // Extract the human-readable response from Claude's JSON output
 function extractResponse(output: string): string | null {
-  // Try JSON.parse first
   try {
     const jsonStart = output.indexOf('{"type"');
     if (jsonStart !== -1) {
-      const jsonEnd = output.lastIndexOf('}') + 1;
+      const jsonEnd = output.lastIndexOf("}") + 1;
       const parsed = JSON.parse(output.slice(jsonStart, jsonEnd));
       if (parsed.is_error) return `Error: ${parsed.result || "Unknown error"}`;
       const text = parsed.result || parsed.text || parsed.content;
@@ -47,7 +73,6 @@ function extractResponse(output: string): string | null {
     }
   } catch {}
 
-  // Fallback: regex extract the "result" field
   const match = output.match(/"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   if (match) {
     return match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').trim();
@@ -68,6 +93,17 @@ const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "")
   .filter(Boolean);
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const MAX_DISCORD_LENGTH = 1900;
+const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_PROCESSES || "5", 10);
+
+// Global safety guardrails for all Claude invocations
+const GLOBAL_DISALLOWED_TOOLS = [
+  "Bash(rm -rf:*)",
+  "Bash(git push --force:*)",
+  "Bash(git reset --hard:*)",
+  "Bash(DROP:*)",
+  "Bash(DELETE FROM:*)",
+  "Bash(kill -9:*)",
+].join(",");
 
 if (!DISCORD_TOKEN) {
   console.error("DISCORD_TOKEN is required in .env");
@@ -89,14 +125,52 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message],
 });
 
-// Track active requests to prevent concurrent Claude processes
-let activeRequest = false;
-const requestQueue: Array<() => void> = [];
+// --- Per-Channel Queue System ---
+interface QueuedTask {
+  execute: () => void;
+  message: Message;
+}
 
-function processQueue(): void {
-  if (activeRequest || requestQueue.length === 0) return;
-  const next = requestQueue.shift();
-  if (next) next();
+const channelQueues: Map<string, QueuedTask[]> = new Map();
+const activeChannels: Set<string> = new Set();
+let globalRunningCount = 0;
+
+function processChannelQueue(channelId: string): void {
+  if (activeChannels.has(channelId)) return;
+  if (globalRunningCount >= MAX_CONCURRENT) return;
+
+  const queue = channelQueues.get(channelId);
+  if (!queue || queue.length === 0) return;
+
+  const task = queue.shift()!;
+  activeChannels.add(channelId);
+  globalRunningCount++;
+
+  task.execute();
+}
+
+function releaseChannel(channelId: string): void {
+  activeChannels.delete(channelId);
+  globalRunningCount--;
+  // Try to process this channel's next task
+  processChannelQueue(channelId);
+  // Try to unblock other channels that were waiting on global capacity
+  for (const [queuedChannelId, queue] of channelQueues) {
+    if (queue.length > 0 && !activeChannels.has(queuedChannelId)) {
+      processChannelQueue(queuedChannelId);
+    }
+  }
+}
+
+function enqueueTask(channelId: string, task: QueuedTask): boolean {
+  if (!channelQueues.has(channelId)) {
+    channelQueues.set(channelId, []);
+  }
+
+  const isQueued = activeChannels.has(channelId) || globalRunningCount >= MAX_CONCURRENT;
+  channelQueues.get(channelId)!.push(task);
+  processChannelQueue(channelId);
+  return isQueued;
 }
 
 // Split long messages at line boundaries, preserving code blocks
@@ -114,7 +188,6 @@ function splitMessage(text: string): string[] {
       break;
     }
 
-    // Find a good split point (line boundary before the limit)
     let splitAt = remaining.lastIndexOf("\n", MAX_DISCORD_LENGTH);
     if (splitAt === -1 || splitAt < MAX_DISCORD_LENGTH * 0.5) {
       splitAt = MAX_DISCORD_LENGTH;
@@ -122,12 +195,9 @@ function splitMessage(text: string): string[] {
 
     let chunk = remaining.slice(0, splitAt);
 
-    // Track code block state
     const codeBlockMatches = chunk.match(/```/g);
     if (codeBlockMatches && codeBlockMatches.length % 2 !== 0) {
-      // Odd number of ``` means we're splitting inside a code block
       if (!inCodeBlock) {
-        // Entering a code block — find the language
         const langMatch = chunk.match(/```(\w*)\n/);
         codeBlockLang = langMatch ? langMatch[1] : "";
         inCodeBlock = true;
@@ -138,10 +208,8 @@ function splitMessage(text: string): string[] {
     }
 
     chunks.push(chunk);
-
     remaining = remaining.slice(splitAt).trimStart();
 
-    // Re-open code block in next chunk if we split inside one
     if (inCodeBlock && remaining.length > 0) {
       remaining = `\`\`\`${codeBlockLang}\n${remaining}`;
     }
@@ -150,11 +218,39 @@ function splitMessage(text: string): string[] {
   return chunks;
 }
 
+// List available agent personalities
+function listAgents(): string[] {
+  const agentsDir = join(HARNESS_ROOT, ".claude", "agents");
+  if (!existsSync(agentsDir)) return [];
+  return readdirSync(agentsDir)
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => f.replace(".md", ""));
+}
+
+// Read an agent's system prompt
+function readAgentPrompt(name: string): string | null {
+  const agentFile = join(HARNESS_ROOT, ".claude", "agents", `${name}.md`);
+  if (!existsSync(agentFile)) return null;
+  return readFileSync(agentFile, "utf-8");
+}
+
 // Temp directory for Claude response files
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
-try { mkdirSync(TEMP_DIR, { recursive: true }); } catch {}
+try {
+  mkdirSync(TEMP_DIR, { recursive: true });
+} catch {}
 
-async function handleClaude(message: Message, userText: string): Promise<void> {
+// Streaming support
+const STREAM_DIR = join(TEMP_DIR, "streams");
+try {
+  mkdirSync(STREAM_DIR, { recursive: true });
+} catch {}
+
+async function handleClaude(
+  message: Message,
+  userText: string,
+  isRetry: boolean = false
+): Promise<void> {
   const channelId = message.channel.id;
 
   // Show typing indicator
@@ -166,6 +262,41 @@ async function handleClaude(message: Message, userText: string): Promise<void> {
   // Build claude command args
   const args = ["-p", "--output-format", "json"];
 
+  // Apply channel config
+  const channelConfig = getChannelConfig(channelId);
+
+  // Agent personality — pass as system prompt append
+  const agentName = channelConfig?.agent;
+  if (agentName) {
+    const agentPrompt = readAgentPrompt(agentName);
+    if (agentPrompt) {
+      args.push("--append-system-prompt", agentPrompt);
+    }
+  }
+
+  // Permission mode
+  if (channelConfig?.permissionMode) {
+    args.push("--permission-mode", channelConfig.permissionMode);
+  }
+
+  // Model override
+  if (channelConfig?.model) {
+    args.push("--model", channelConfig.model);
+  }
+
+  // Global safety guardrails
+  args.push("--disallowedTools", GLOBAL_DISALLOWED_TOOLS);
+
+  // Channel-specific allowed tools
+  if (channelConfig?.allowedTools?.length) {
+    args.push("--allowedTools", channelConfig.allowedTools.join(","));
+  }
+
+  // Channel-specific disallowed tools (append to global)
+  if (channelConfig?.disallowedTools?.length) {
+    args.push("--disallowedTools", channelConfig.disallowedTools.join(","));
+  }
+
   // Check for existing session to resume
   const existingSession = getSession(channelId);
   if (existingSession) {
@@ -175,55 +306,106 @@ async function handleClaude(message: Message, userText: string): Promise<void> {
   // Add the user's message
   args.push(userText);
 
-  // Use file-based output to avoid Node.js pipe stalling bug
-  // Python writes Claude's response to a temp file, we poll for it
-  const outputFile = join(TEMP_DIR, `response-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  // Streaming: set up stream directory for this request
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const streamDir = join(STREAM_DIR, requestId);
+  const outputFile = join(TEMP_DIR, `response-${requestId}.json`);
 
   const pythonArgs = [
     `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
     outputFile,
+    "--stream-dir",
+    streamDir,
     ...args,
   ];
 
-  // Spawn detached so Node.js event loop doesn't interfere
   const proc = spawn("python3", pythonArgs, {
     cwd: HARNESS_ROOT,
     env: { ...process.env, HARNESS_ROOT },
     detached: true,
     stdio: "ignore",
   });
-
   proc.unref();
 
-  console.log(`[CLAUDE] Spawned detached process, output file: ${outputFile}`);
+  console.log(`[CLAUDE] Spawned PID ${proc.pid}, channel: ${channelId}, agent: ${agentName || "default"}`);
 
-  // Poll for the output file
+  // Set up streaming message updates
+  let streamMessage: Message | null = null;
+  let lastStreamText = "";
+
+  const streamPoller = new StreamPoller(streamDir, async (text, toolInfo) => {
+    try {
+      const displayText = toolInfo
+        ? `${text}\n\n*${toolInfo}*`
+        : text || "Thinking...";
+      const truncated =
+        displayText.length > MAX_DISCORD_LENGTH
+          ? displayText.slice(-MAX_DISCORD_LENGTH)
+          : displayText;
+
+      if (truncated === lastStreamText) return;
+      lastStreamText = truncated;
+
+      if (!streamMessage) {
+        streamMessage = await message.reply(truncated || "Thinking...");
+      } else {
+        await streamMessage.edit(truncated);
+      }
+    } catch (err: any) {
+      // Rate limited or message deleted — ignore
+    }
+  });
+
+  streamPoller.start();
+
+  // Poll for the output file (final result)
   const startTime = Date.now();
   const TIMEOUT = 120_000;
   const POLL_INTERVAL = 1_000;
 
   const poll = async (): Promise<void> => {
-    // Keep typing indicator alive
     if ("sendTyping" in channel) {
       (channel as TextChannel).sendTyping().catch(() => {});
     }
 
     if (existsSync(outputFile)) {
+      streamPoller.stop();
+
       try {
         const raw = readFileSync(outputFile, "utf-8");
-        unlinkSync(outputFile); // Clean up
+        unlinkSync(outputFile);
 
         const result = JSON.parse(raw);
         const { stdout, stderr, returncode } = result;
 
-        console.log(`[CLAUDE] returncode: ${returncode}, stdout length: ${(stdout || "").length}`);
+        console.log(
+          `[CLAUDE] returncode: ${returncode}, stdout length: ${(stdout || "").length}`
+        );
         if (stderr) console.error(`[CLAUDE STDERR] ${stderr.slice(0, 500)}`);
 
+        // Check for stale session error and retry
+        if (
+          returncode !== 0 &&
+          !isRetry &&
+          stderr?.includes("session") &&
+          (stderr?.includes("not found") || stderr?.includes("expired"))
+        ) {
+          console.log(`[CLAUDE] Stale session detected, clearing and retrying`);
+          validateSession(channelId);
+          releaseChannel(channelId);
+          await handleClaude(message, userText, true);
+          return;
+        }
+
         if (returncode !== 0) {
-          const errorMsg = stderr?.trim() || `Claude exited with code ${returncode}`;
-          await message.reply(
-            `Something went wrong:\n\`\`\`\n${errorMsg.slice(0, 500)}\n\`\`\``
-          );
+          const errorMsg =
+            stderr?.trim() || `Claude exited with code ${returncode}`;
+          const errorReply = `Something went wrong:\n\`\`\`\n${errorMsg.slice(0, 500)}\n\`\`\``;
+          if (streamMessage) {
+            await streamMessage.edit(errorReply);
+          } else {
+            await message.reply(errorReply);
+          }
         } else {
           const responseText = extractResponse(stdout);
           const sessionId = extractSessionId(stdout);
@@ -234,12 +416,25 @@ async function handleClaude(message: Message, userText: string): Promise<void> {
 
           if (responseText) {
             const chunks = splitMessage(responseText);
-            for (const chunk of chunks) {
-              await message.reply(chunk);
+            if (streamMessage) {
+              // Edit the streaming message with the first chunk
+              await streamMessage.edit(chunks[0]);
+              for (let i = 1; i < chunks.length; i++) {
+                await message.reply(chunks[i]);
+              }
+            } else {
+              for (const chunk of chunks) {
+                await message.reply(chunk);
+              }
             }
           } else {
             console.error("[PARSE ERROR] Raw stdout:", stdout.slice(0, 500));
-            await message.reply("Got a response but couldn't parse it. Check logs.");
+            const errMsg = "Got a response but couldn't parse it. Check logs.";
+            if (streamMessage) {
+              await streamMessage.edit(errMsg);
+            } else {
+              await message.reply(errMsg);
+            }
           }
         }
       } catch (err: any) {
@@ -247,32 +442,270 @@ async function handleClaude(message: Message, userText: string): Promise<void> {
         await message.reply("Error reading Claude's response. Check logs.");
       }
 
-      activeRequest = false;
-      processQueue();
+      // Clean up stream directory
+      try {
+        const files = readdirSync(streamDir);
+        for (const f of files) unlinkSync(join(streamDir, f));
+        unlinkSync(streamDir);
+      } catch {}
+
+      releaseChannel(channelId);
       return;
     }
 
-    // Check timeout
     if (Date.now() - startTime > TIMEOUT) {
-      activeRequest = false;
-      await message.reply("Claude timed out after 2 minutes.");
-      // Clean up output file if it appears later
-      setTimeout(() => { try { unlinkSync(outputFile); } catch {} }, 5000);
-      processQueue();
+      streamPoller.stop();
+      const timeoutMsg = "Claude timed out after 2 minutes.";
+      if (streamMessage) {
+        await streamMessage.edit(timeoutMsg);
+      } else {
+        await message.reply(timeoutMsg);
+      }
+      setTimeout(() => {
+        try {
+          unlinkSync(outputFile);
+        } catch {}
+      }, 5000);
+      releaseChannel(channelId);
       return;
     }
 
-    // Continue polling
     setTimeout(poll, POLL_INTERVAL);
   };
 
   setTimeout(poll, POLL_INTERVAL);
 }
 
+// --- Command Handler ---
+
+async function handleCommand(message: Message, content: string): Promise<boolean> {
+  const channelId = message.channel.id;
+
+  // /new — clear session
+  if (content === "/new") {
+    const cleared = clearSession(channelId);
+    await message.reply(
+      cleared
+        ? "Session cleared. Next message starts a fresh conversation."
+        : "No active session in this channel."
+    );
+    return true;
+  }
+
+  // /status — show session info
+  if (content === "/status") {
+    const session = getSession(channelId);
+    await message.reply(
+      session
+        ? `Active session: \`${session}\``
+        : "No active session in this channel."
+    );
+    return true;
+  }
+
+  // /agents — list available agent personalities
+  if (content === "/agents") {
+    const agents = listAgents();
+    if (agents.length === 0) {
+      await message.reply("No agent personalities found.");
+    } else {
+      await message.reply(
+        `**Available agents:**\n${agents.map((a) => `• \`${a}\``).join("\n")}`
+      );
+    }
+    return true;
+  }
+
+  // /agent clear — remove agent override
+  if (content === "/agent clear") {
+    const cfg = getChannelConfig(channelId);
+    if (cfg?.agent) {
+      setChannelConfig(channelId, { agent: undefined });
+      await message.reply("Agent cleared. Channel will use default behavior.");
+    } else {
+      await message.reply("No agent set on this channel.");
+    }
+    return true;
+  }
+
+  // /agent create <name> "<description>" — create a new agent
+  const createMatch = content.match(
+    /^\/agent\s+create\s+(\w+)\s+"([^"]+)"$/
+  );
+  if (createMatch) {
+    const [, name, description] = createMatch;
+    const agentsDir = join(HARNESS_ROOT, ".claude", "agents");
+    try {
+      mkdirSync(agentsDir, { recursive: true });
+    } catch {}
+    const agentFile = join(agentsDir, `${name}.md`);
+    if (existsSync(agentFile)) {
+      await message.reply(`Agent \`${name}\` already exists.`);
+      return true;
+    }
+    const template = `# ${name.charAt(0).toUpperCase() + name.slice(1)} Agent\n\n${description}\n\n## Behavior\n- Follow the description above\n- Be thorough and precise\n\n## Default Tools\nAll tools available. Destructive Bash commands are blocked by guardrails.\n`;
+    writeFileSync(agentFile, template);
+    await message.reply(`Agent \`${name}\` created.`);
+    return true;
+  }
+
+  // /agent <name> — set channel agent
+  const agentMatch = content.match(/^\/agent\s+(\w+)$/);
+  if (agentMatch) {
+    const name = agentMatch[1];
+    const available = listAgents();
+    if (!available.includes(name)) {
+      await message.reply(
+        `Agent \`${name}\` not found. Available: ${available.map((a) => `\`${a}\``).join(", ") || "none"}`
+      );
+      return true;
+    }
+    setChannelConfig(channelId, { agent: name });
+    await message.reply(`Channel agent set to \`${name}\`.`);
+    return true;
+  }
+
+  // /model <name> — set channel model override
+  const modelMatch = content.match(/^\/model\s+(.+)$/);
+  if (modelMatch) {
+    const model = modelMatch[1].trim();
+    setChannelConfig(channelId, { model });
+    await message.reply(`Channel model set to \`${model}\`.`);
+    return true;
+  }
+
+  // /config — show current channel config
+  if (content === "/config") {
+    const cfg = getChannelConfig(channelId);
+    const session = getSession(channelId);
+    if (!cfg && !session) {
+      await message.reply("No configuration set for this channel.");
+      return true;
+    }
+    const lines: string[] = ["**Channel Config:**"];
+    if (cfg?.agent) lines.push(`• Agent: \`${cfg.agent}\``);
+    if (cfg?.model) lines.push(`• Model: \`${cfg.model}\``);
+    if (cfg?.permissionMode)
+      lines.push(`• Permission mode: \`${cfg.permissionMode}\``);
+    if (session) lines.push(`• Session: \`${session}\``);
+    if (cfg?.allowedTools?.length)
+      lines.push(`• Allowed tools: ${cfg.allowedTools.join(", ")}`);
+    if (cfg?.disallowedTools?.length)
+      lines.push(`• Disallowed tools: ${cfg.disallowedTools.join(", ")}`);
+    await message.reply(lines.join("\n"));
+    return true;
+  }
+
+  // /spawn [--agent <name>] <description> — spawn a background subagent
+  const spawnMatch = content.match(
+    /^\/spawn\s+(?:--agent\s+(\w+)\s+)?(.+)$/s
+  );
+  if (spawnMatch) {
+    const [, agentOverride, description] = spawnMatch;
+    const entry = spawnSubagent({
+      channelId,
+      description,
+      agent: agentOverride,
+    });
+    if (!entry) {
+      await message.reply(
+        `At capacity (${MAX_CONCURRENT} concurrent processes). Try again later.`
+      );
+    } else {
+      await message.reply(
+        `Subagent spawned: \`${entry.id}\`\nAgent: ${entry.agent || "default"}\nTask: ${description.slice(0, 200)}`
+      );
+    }
+    return true;
+  }
+
+  // /tasks — list running subagents
+  if (content === "/tasks") {
+    const running = getRunning();
+    if (running.length === 0) {
+      await message.reply("No running subagents.");
+    } else {
+      const lines = running.map(
+        (e) =>
+          `• \`${e.id}\` (${e.agent || "default"}) — ${e.description.slice(0, 80)}`
+      );
+      await message.reply(`**Running subagents (${running.length}):**\n${lines.join("\n")}`);
+    }
+    return true;
+  }
+
+  // /cancel <id> — cancel a running subagent
+  const cancelMatch = content.match(/^\/cancel\s+(\S+)$/);
+  if (cancelMatch) {
+    const cancelled = cancelSubagent(cancelMatch[1]);
+    await message.reply(
+      cancelled
+        ? `Subagent \`${cancelMatch[1]}\` cancelled.`
+        : `Subagent \`${cancelMatch[1]}\` not found or not running.`
+    );
+    return true;
+  }
+
+  // /channel create <name> [--agent <agentName>] — create a new Discord channel
+  const channelCreateMatch = content.match(
+    /^\/channel\s+create\s+(\S+)(?:\s+--agent\s+(\w+))?$/
+  );
+  if (channelCreateMatch) {
+    const [, name, agentName] = channelCreateMatch;
+    const guild = message.guild;
+    if (!guild) {
+      await message.reply("This command only works in a server.");
+      return true;
+    }
+    try {
+      const newChannel = await guild.channels.create({
+        name,
+        type: ChannelType.GuildText,
+        reason: `Created by AI Harness bot`,
+      });
+      if (agentName) {
+        setChannelConfig(newChannel.id, { agent: agentName });
+      }
+      await message.reply(
+        `Channel <#${newChannel.id}> created${agentName ? ` with agent \`${agentName}\`` : ""}.`
+      );
+    } catch (err: any) {
+      await message.reply(`Failed to create channel: ${err.message}`);
+    }
+    return true;
+  }
+
+  // /help — list all commands
+  if (content === "/help") {
+    await message.reply(
+      `**Available commands:**
+• \`/new\` — Clear session, start fresh conversation
+• \`/status\` — Show current session info
+• \`/agent <name>\` — Set channel agent personality
+• \`/agent clear\` — Remove agent override
+• \`/agent create <name> "description"\` — Create a new agent
+• \`/agents\` — List available agent personalities
+• \`/model <name>\` — Set channel model override
+• \`/config\` — Show current channel configuration
+• \`/spawn [--agent <name>] <task>\` — Spawn a background subagent
+• \`/tasks\` — List running subagents
+• \`/cancel <id>\` — Cancel a running subagent
+• \`/channel create <name> [--agent <name>]\` — Create a new channel
+• \`/help\` — Show this help message`
+    );
+    return true;
+  }
+
+  return false;
+}
+
 // --- Notification Drain ---
-// Polls pending-notifications.jsonl and sends heartbeat results to Discord channels
-const NOTIFY_FILE = join(HARNESS_ROOT, "heartbeat-tasks", "pending-notifications.jsonl");
-const NOTIFY_POLL_MS = 60_000; // every 60 seconds
+const NOTIFY_FILE = join(
+  HARNESS_ROOT,
+  "heartbeat-tasks",
+  "pending-notifications.jsonl"
+);
+const NOTIFY_POLL_MS = 60_000;
 
 async function drainNotifications(): Promise<void> {
   try {
@@ -292,7 +725,6 @@ async function drainNotifications(): Promise<void> {
         const summary: string = notif.summary || "No summary";
         const ts: string = (notif.timestamp || "").slice(0, 16);
 
-        // Find channel by name across all guilds
         let targetChannel: TextChannel | null = null;
         for (const guild of client.guilds.cache.values()) {
           const ch = guild.channels.cache.find(
@@ -305,13 +737,15 @@ async function drainNotifications(): Promise<void> {
         }
 
         if (!targetChannel) {
-          console.log(`[NOTIFY] Channel '${channelName}' not found, skipping`);
+          console.log(
+            `[NOTIFY] Channel '${channelName}' not found, skipping`
+          );
           failed.push(line);
           continue;
         }
 
-        const message = `**Heartbeat: ${task}** (${ts})\n${summary.slice(0, 1800)}`;
-        await targetChannel.send(message);
+        const msg = `**Heartbeat: ${task}** (${ts})\n${summary.slice(0, 1800)}`;
+        await targetChannel.send(msg);
         console.log(`[NOTIFY] Sent '${task}' to #${channelName}`);
       } catch (err: any) {
         console.error(`[NOTIFY] Failed to process: ${err.message}`);
@@ -319,24 +753,54 @@ async function drainNotifications(): Promise<void> {
       }
     }
 
-    // Rewrite with only failed entries, or delete if all sent
     if (failed.length > 0) {
       writeFileSync(NOTIFY_FILE, failed.join("\n") + "\n");
     } else {
       unlinkSync(NOTIFY_FILE);
     }
   } catch (err: any) {
-    // Don't crash the bot for notification errors
     if (err.code !== "ENOENT") {
       console.error(`[NOTIFY] Error: ${err.message}`);
     }
   }
 }
 
+// --- Bot Events ---
+
 client.on("clientReady", () => {
   console.log(`AI Harness bot online as ${client.user?.tag}`);
   console.log(`Allowed users: ${ALLOWED_USER_IDS.join(", ")}`);
   console.log(`Working directory: ${HARNESS_ROOT}`);
+  console.log(`Max concurrent processes: ${MAX_CONCURRENT}`);
+
+  // Initialize activity stream
+  initActivityStream(client);
+
+  // Start subagent polling
+  startSubagentPolling();
+
+  // Clean up stale subagents from previous runs
+  const cleaned = cleanupStale();
+  if (cleaned > 0) console.log(`[SUBAGENT] Cleaned up ${cleaned} stale entries`);
+
+  // Set up subagent completion notifications
+  onSubagentComplete(async (entry, result) => {
+    try {
+      const ch = client.channels.cache.get(entry.parentChannelId);
+      if (ch && ch.isTextBased()) {
+        const status = entry.status === "completed" ? "completed" : "failed";
+        const preview = result.slice(0, 300);
+        const streamNote = process.env.STREAM_CHANNEL_ID
+          ? `\nFull result in <#${process.env.STREAM_CHANNEL_ID}>`
+          : "";
+        await (ch as TextChannel).send(
+          `**Subagent \`${entry.id}\` ${status}** (${entry.agent || "default"})\n${preview}${result.length > 300 ? "..." : ""}${streamNote}`
+        );
+      }
+    } catch (err: any) {
+      console.error(`[SUBAGENT] Failed to notify channel: ${err.message}`);
+    }
+  });
 
   // Start notification drain polling
   setInterval(drainNotifications, NOTIFY_POLL_MS);
@@ -344,56 +808,44 @@ client.on("clientReady", () => {
 });
 
 client.on("messageCreate", async (message: Message) => {
-  console.log(`[MSG] from ${message.author.tag} (${message.author.id}): "${message.content}" | bot: ${message.author.bot}`);
+  console.log(
+    `[MSG] from ${message.author.tag} (${message.author.id}): "${message.content}" | bot: ${message.author.bot}`
+  );
 
-  // Ignore bot messages
   if (message.author.bot) return;
 
-  // Whitelist check
   if (!ALLOWED_USER_IDS.includes(message.author.id)) {
-    console.log(`[BLOCKED] User ${message.author.id} not in allowed list: ${ALLOWED_USER_IDS}`);
+    console.log(
+      `[BLOCKED] User ${message.author.id} not in allowed list: ${ALLOWED_USER_IDS}`
+    );
     return;
   }
 
   const content = message.content.trim();
   if (!content) return;
 
-  // Handle commands
-  if (content === "/new") {
-    const cleared = clearSession(message.channel.id);
-    await message.reply(
-      cleared
-        ? "Session cleared. Next message starts a fresh conversation."
-        : "No active session in this channel."
-    );
-    return;
+  // Handle commands first
+  if (content.startsWith("/")) {
+    const handled = await handleCommand(message, content);
+    if (handled) return;
+    // If not a recognized command, fall through to Claude
   }
 
-  if (content === "/status") {
-    const session = getSession(message.channel.id);
-    await message.reply(
-      session
-        ? `Active session: \`${session}\``
-        : "No active session in this channel."
-    );
-    return;
-  }
-
-  // Queue the request
-  const task = () => {
-    activeRequest = true;
-    handleClaude(message, content).catch(async (err) => {
-      activeRequest = false;
-      await message.reply(`Error: ${err.message}`);
-      processQueue();
-    });
+  // Enqueue the Claude request
+  const channelId = message.channel.id;
+  const task: QueuedTask = {
+    message,
+    execute: () => {
+      handleClaude(message, content).catch(async (err) => {
+        await message.reply(`Error: ${err.message}`);
+        releaseChannel(channelId);
+      });
+    },
   };
 
-  if (activeRequest) {
+  const wasQueued = enqueueTask(channelId, task);
+  if (wasQueued) {
     await message.react("⏳");
-    requestQueue.push(task);
-  } else {
-    task();
   }
 });
 
