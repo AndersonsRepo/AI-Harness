@@ -27,7 +27,7 @@ def main():
     remaining = args[1:]
 
     # Parse our own flags before passing the rest to claude
-    timeout = 120
+    timeout = 1800
     stream_dir = None
 
     while remaining:

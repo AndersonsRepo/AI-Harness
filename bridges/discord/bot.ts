@@ -151,6 +151,7 @@ interface QueuedTask {
 
 const channelQueues: Map<string, QueuedTask[]> = new Map();
 const activeChannels: Set<string> = new Set();
+const activeProcesses: Map<string, number> = new Map(); // channelId → PID
 let globalRunningCount = 0;
 
 function processChannelQueue(channelId: string): void {
@@ -169,6 +170,7 @@ function processChannelQueue(channelId: string): void {
 
 function releaseChannel(channelId: string): void {
   activeChannels.delete(channelId);
+  activeProcesses.delete(channelId);
   globalRunningCount--;
   // Try to process this channel's next task
   processChannelQueue(channelId);
@@ -384,9 +386,10 @@ async function handleClaude(
 
   streamPoller.start();
 
-  // Poll for the output file (final result)
-  const startTime = Date.now();
-  const TIMEOUT = 120_000;
+  // Track active process for /stop command
+  activeProcesses.set(channelId, proc.pid!);
+
+  // Poll for the output file (no timeout — use /stop to cancel)
   const POLL_INTERVAL = 1_000;
 
   const poll = async (): Promise<void> => {
@@ -544,23 +547,6 @@ async function handleClaude(
       return;
     }
 
-    if (Date.now() - startTime > TIMEOUT) {
-      streamPoller.stop();
-      const timeoutMsg = "Claude timed out after 2 minutes.";
-      if (streamMessage) {
-        await streamMessage.edit(timeoutMsg);
-      } else {
-        await message.reply(timeoutMsg);
-      }
-      setTimeout(() => {
-        try {
-          unlinkSync(outputFile);
-        } catch {}
-      }, 5000);
-      releaseChannel(channelId);
-      return;
-    }
-
     setTimeout(poll, POLL_INTERVAL);
   };
 
@@ -571,6 +557,22 @@ async function handleClaude(
 
 async function handleCommand(message: Message, content: string): Promise<boolean> {
   const channelId = message.channel.id;
+
+  // /stop — kill the active Claude process in this channel
+  if (content === "/stop") {
+    const pid = activeProcesses.get(channelId);
+    if (!pid) {
+      await message.reply("Nothing running in this channel.");
+      return true;
+    }
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+    activeProcesses.delete(channelId);
+    releaseChannel(channelId);
+    await message.reply("Stopped the active request.");
+    return true;
+  }
 
   // /new — clear session
   if (content === "/new") {
@@ -874,6 +876,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
   if (content === "/help") {
     await message.reply(
       `**Available commands:**
+• \`/stop\` — Kill the active request in this channel
 • \`/new\` — Clear session, start fresh conversation
 • \`/status\` — Show current session info
 • \`/agent <name>\` — Set channel agent personality
