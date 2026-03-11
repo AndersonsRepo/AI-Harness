@@ -133,7 +133,7 @@ Generate a plist at `~/Library/LaunchAgents/com.aiharness.heartbeat.<name>.plist
 </plist>
 ```
 
-**Important**: Use the symlink path (`~/.local/ai-harness`) not the Desktop path, to avoid TCC issues.
+**Important**: Use the symlink path (`~/.local/ai-harness`) not the Desktop path, to avoid TCC issues. When generating the plist, replace `$HOME` with the user's actual home directory (e.g., `/Users/yourusername`), since launchd plist files do not expand environment variables.
 
 ### Step 3: Load the Plist
 ```bash

@@ -5,7 +5,10 @@ import subprocess
 import os
 import signal
 
-HARNESS_ROOT = os.environ.get("HARNESS_ROOT", "$HOME/.local/ai-harness")
+HARNESS_ROOT = os.environ.get(
+    "HARNESS_ROOT",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 PID_FILE = os.path.join(HARNESS_ROOT, "bridges", "discord", ".bot.pid")
 PLIST_LABEL = "com.aiharness.discord-bot"
 

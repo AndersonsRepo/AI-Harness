@@ -6,7 +6,10 @@ import subprocess
 import os
 import datetime
 
-HARNESS_ROOT = os.environ.get("HARNESS_ROOT", "$HOME/.local/ai-harness")
+HARNESS_ROOT = os.environ.get(
+    "HARNESS_ROOT",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 
 def run(cmd, **kwargs):

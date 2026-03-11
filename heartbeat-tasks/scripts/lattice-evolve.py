@@ -5,7 +5,10 @@ import subprocess
 import os
 import sys
 
-HARNESS_ROOT = os.environ.get("HARNESS_ROOT", "$HOME/.local/ai-harness")
+HARNESS_ROOT = os.environ.get(
+    "HARNESS_ROOT",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 LATTICE_DIR = os.path.join(HARNESS_ROOT, "projects", "lattice")
 TSX_PATH = "/opt/homebrew/bin/npx"
 

@@ -6,9 +6,9 @@
  */
 
 import { writeFileSync, existsSync, unlinkSync, mkdirSync, renameSync, readFileSync } from "fs";
-import { join } from "path";
+import { join, resolve, dirname } from "path";
 
-const HARNESS_ROOT = process.env.HARNESS_ROOT || "$HOME/Desktop/AI-Harness";
+const HARNESS_ROOT = process.env.HARNESS_ROOT || resolve(dirname(new URL(import.meta.url).pathname), "../..");
 process.env.HARNESS_ROOT = HARNESS_ROOT;
 
 const TEST_DB = join(HARNESS_ROOT, "bridges", "discord", "harness-test.db");

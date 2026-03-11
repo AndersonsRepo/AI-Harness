@@ -11,7 +11,10 @@ are piling up (bot might be down) and logs a warning.
 import os
 import json
 
-HARNESS_ROOT = os.environ.get("HARNESS_ROOT", "$HOME/.local/ai-harness")
+HARNESS_ROOT = os.environ.get(
+    "HARNESS_ROOT",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 NOTIFY_FILE = os.path.join(HARNESS_ROOT, "heartbeat-tasks", "pending-notifications.jsonl")
 
 

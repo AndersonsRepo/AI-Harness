@@ -18,12 +18,12 @@ import traceback
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
-    "$HOME/.local/ai-harness"
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 CLAUDE_RUNNER = os.path.join(HARNESS_ROOT, "bridges", "discord", "claude-runner.py")
 PYTHON = "/opt/homebrew/bin/python3"
-CLAUDE_PATH = "$HOME/.local/bin/claude"
+CLAUDE_PATH = os.path.join(os.environ.get("HOME", ""), ".local", "bin", "claude")
 
 
 def log(task_name, msg):
@@ -77,9 +77,9 @@ def run_claude(prompt, allowed_tools=None, timeout=300, env_passthrough=None):
     claude_args.extend(["--", prompt])
 
     clean_env = {
-        "HOME": os.environ.get("HOME", "$HOME"),
+        "HOME": os.environ.get("HOME", ""),
         "USER": os.environ.get("USER", "user"),
-        "PATH": "$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "PATH": os.path.join(os.environ.get("HOME", ""), ".local", "bin") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "SHELL": os.environ.get("SHELL", "/bin/zsh"),
         "LANG": os.environ.get("LANG", "en_US.UTF-8"),
         "TERM": "dumb",

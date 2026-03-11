@@ -64,12 +64,12 @@ Course names appear in brackets in event summaries (e.g., `[CS 4310] Homework 3`
 ## GoodNotes Commands
 
 GoodNotes folders:
-- **Auto-backup**: `~/Library/CloudStorage/GoogleDrive-REDACTED@example.com/My Drive/GoodNotes/`
+- **Auto-backup**: `~/Library/CloudStorage/GoogleDrive-$GOOGLE_DRIVE_ACCOUNT/My Drive/GoodNotes/`
 - **Manual exports**: `~/Documents/GoodNotes-Export/`
 
 ### `notes list` — List exported PDFs
 ```bash
-ls -ltR ~/Library/CloudStorage/GoogleDrive-REDACTED@example.com/My\ Drive/GoodNotes\ 6/*.pdf ~/Documents/GoodNotes-Export/*.pdf 2>/dev/null | head -20
+ls -ltR ~/Library/CloudStorage/GoogleDrive-$GOOGLE_DRIVE_ACCOUNT/My\ Drive/GoodNotes\ 6/*.pdf ~/Documents/GoodNotes-Export/*.pdf 2>/dev/null | head -20
 ```
 
 ### `notes read <filename>` — Read a PDF

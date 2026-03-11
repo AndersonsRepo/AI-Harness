@@ -7,11 +7,14 @@ import os
 import sys
 import datetime
 
-HARNESS_ROOT = os.environ.get("HARNESS_ROOT", "$HOME/.local/ai-harness")
+HARNESS_ROOT = os.environ.get(
+    "HARNESS_ROOT",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 STATE_FILE = os.path.join(TASKS_DIR, "deploy-monitor.vercel-state.json")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
-PROJECT_DIR = "$HOME/Desktop/Hey-Lexxi-prod"
+PROJECT_DIR = os.environ.get("HEY_LEXXI_DIR", os.path.join(os.environ.get("HOME", ""), "Desktop", "Hey-Lexxi-prod"))
 
 
 def load_state():
