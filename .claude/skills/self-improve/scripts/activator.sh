@@ -70,6 +70,18 @@ else
   exit 0
 fi
 
+# --- Check for duplicates before creating ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/dedup-learning.sh"
+
+# Build a CSV of tags for dedup matching
+TAGS_CSV=$(echo "$TAGS" | tr -d '[]' | sed 's/, */,/g')
+check_and_dedup "auto-${CATEGORY}" "$CATEGORY" "$TAGS_CSV"
+
+if [ "$DEDUP_ACTION" = "skip" ]; then
+  exit 0
+fi
+
 # --- Write vault entry ---
 mkdir -p "$VAULT_DIR"
 TODAY=$(date +%Y%m%d)

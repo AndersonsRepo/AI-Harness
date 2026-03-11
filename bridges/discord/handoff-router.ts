@@ -11,6 +11,7 @@ import {
 import { getSession, setSession } from "./session-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
+import { monitor } from "./truncation-monitor.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -202,7 +203,8 @@ export async function executeHandoff(
 
   // Post the originating agent's message to the channel
   if (preHandoffText) {
-    await channel.send(`**${capitalize(fromAgent)}:** ${preHandoffText.slice(0, 1900)}`);
+    const chunks = monitor.splitForDiscord(`**${capitalize(fromAgent)}:** ${preHandoffText}`, 1900, "handoff:pre-text");
+    for (const chunk of chunks) await channel.send(chunk);
   }
   await channel.send(
     `*${capitalize(fromAgent)} → ${capitalize(toAgent)}:* ${handoffMessage.slice(0, 500)}`
@@ -372,15 +374,17 @@ export async function runHandoffChain(
     // Post the responding agent's non-handoff text
     if (result.nextHandoff) {
       if (result.nextHandoff.preHandoffText) {
-        await channel.send(
-          `**${capitalize(result.agentName)}:** ${result.nextHandoff.preHandoffText.slice(0, 1900)}`
+        const chunks = monitor.splitForDiscord(
+          `**${capitalize(result.agentName)}:** ${result.nextHandoff.preHandoffText}`, 1900, "handoff:chain-pre-text"
         );
+        for (const chunk of chunks) await channel.send(chunk);
       }
     } else {
       // No further handoff — post full response
-      await channel.send(
-        `**${capitalize(result.agentName)}:** ${result.response.slice(0, 1900)}`
+      const chunks = monitor.splitForDiscord(
+        `**${capitalize(result.agentName)}:** ${result.response}`, 1900, "handoff:response"
       );
+      for (const chunk of chunks) await channel.send(chunk);
     }
 
     fromAgent = result.agentName;

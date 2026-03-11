@@ -48,6 +48,18 @@ echo "$ERROR_HASH" >> "$DEDUP_FILE"
 # Keep dedup file bounded (last 200 hashes)
 tail -200 "$DEDUP_FILE" > "$DEDUP_FILE.tmp" && mv "$DEDUP_FILE.tmp" "$DEDUP_FILE"
 
+# --- Check for duplicates before creating ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/dedup-learning.sh"
+
+# Extract key terms from error for tag matching
+ERROR_TAGS="auto-captured,exit-code-$EXIT_CODE"
+check_and_dedup "auto-captured-error" "runtime_error" "$ERROR_TAGS"
+
+if [ "$DEDUP_ACTION" = "skip" ]; then
+  exit 0
+fi
+
 # --- Write vault entry ---
 mkdir -p "$VAULT_DIR"
 TODAY=$(date +%Y%m%d)

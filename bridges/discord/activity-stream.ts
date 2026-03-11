@@ -1,5 +1,6 @@
 import { Client, TextChannel, EmbedBuilder, AttachmentBuilder } from "discord.js";
 import type { SubagentEntry } from "./process-registry.js";
+import { monitor } from "./truncation-monitor.js";
 
 let streamChannel: TextChannel | null = null;
 let discordClient: Client | null = null;
@@ -45,7 +46,7 @@ export async function postUpdate(
   try {
     const msg = await streamChannel.messages.fetch(entry.streamMessageId);
     const embed = EmbedBuilder.from(msg.embeds[0])
-      .addFields({ name: "Status", value: summary.slice(0, 1024) });
+      .addFields({ name: "Status", value: monitor.truncate(summary, 1024, "stream:status-field") });
     await msg.edit({ embeds: [embed] });
   } catch (err: any) {
     console.error(`[STREAM] Failed to update message: ${err.message}`);
@@ -59,8 +60,7 @@ export async function postComplete(
   if (!streamChannel || !entry.streamMessageId) return;
   try {
     const msg = await streamChannel.messages.fetch(entry.streamMessageId);
-    const truncated =
-      result.length > 1800 ? result.slice(0, 1800) + "..." : result;
+    const { text: truncated, overflow } = monitor.truncateForEmbed(result, 1800, "stream:subagent-complete");
     const embed = new EmbedBuilder()
       .setTitle(`✅ Subagent Completed`)
       .setDescription(truncated)
@@ -73,7 +73,7 @@ export async function postComplete(
       .setTimestamp();
 
     const files: AttachmentBuilder[] = [];
-    if (result.length > 1800) {
+    if (overflow) {
       files.push(
         new AttachmentBuilder(Buffer.from(result, "utf-8"), {
           name: `result-${entry.id}.md`,
@@ -96,7 +96,7 @@ export async function postError(
     const msg = await streamChannel.messages.fetch(entry.streamMessageId);
     const embed = new EmbedBuilder()
       .setTitle(`❌ Subagent Failed`)
-      .setDescription(error.slice(0, 1800))
+      .setDescription(monitor.truncate(error, 1800, "stream:subagent-error"))
       .addFields(
         { name: "ID", value: entry.id, inline: true },
         { name: "Agent", value: entry.agent || "default", inline: true },
@@ -124,7 +124,7 @@ export async function postAgentStart(activity: AgentActivity): Promise<string | 
   if (!streamChannel) return null;
   const embed = new EmbedBuilder()
     .setTitle(`Agent Active`)
-    .setDescription(activity.prompt.slice(0, 200))
+    .setDescription(monitor.truncate(activity.prompt, 200, "stream:agent-prompt"))
     .addFields(
       { name: "Agent", value: activity.agent, inline: true },
       { name: "Channel", value: `<#${activity.channelId}>`, inline: true }
@@ -145,7 +145,7 @@ export async function postAgentComplete(
     const msg = await streamChannel.messages.fetch(activity.streamMessageId);
     const duration = Math.round((Date.now() - activity.startedAt) / 1000);
     const durationStr = duration < 60 ? `${duration}s` : `${Math.floor(duration / 60)}m ${duration % 60}s`;
-    const truncated = result.length > 1800 ? result.slice(0, 1800) + "..." : result;
+    const { text: truncated, overflow } = monitor.truncateForEmbed(result, 1800, "stream:agent-complete");
 
     const embed = new EmbedBuilder()
       .setTitle(`Agent Done`)
@@ -159,7 +159,7 @@ export async function postAgentComplete(
       .setTimestamp();
 
     const files: AttachmentBuilder[] = [];
-    if (result.length > 1800) {
+    if (overflow) {
       files.push(
         new AttachmentBuilder(Buffer.from(result, "utf-8"), {
           name: `result-${activity.agent}-${Date.now()}.md`,
@@ -185,7 +185,7 @@ export async function postAgentError(
 
     const embed = new EmbedBuilder()
       .setTitle(`Agent Error`)
-      .setDescription(error.slice(0, 1800))
+      .setDescription(monitor.truncate(error, 1800, "stream:agent-error"))
       .addFields(
         { name: "Agent", value: activity.agent, inline: true },
         { name: "Channel", value: `<#${activity.channelId}>`, inline: true },

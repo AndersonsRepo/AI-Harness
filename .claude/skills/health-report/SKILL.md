@@ -54,6 +54,13 @@ Parse `$ARGUMENTS` to determine scope. Default is `full` (all checks).
 4. Count entries by status
 5. Report: file counts, any issues found
 
+### Truncation Check (`truncation` or `full`)
+1. Read `context-log/truncation-stats.json` if it exists
+2. Report: events by source, average % lost, critical count
+3. Flag any sources with critical truncation events
+4. Read last 10 lines of `context-log/truncation-events.jsonl` for recent events
+5. Report: worst truncation sources, whether structure damage occurred
+
 ### Quick Check (`quick`)
 Run only: bot process alive? Database exists? Any heartbeat failures? One-line summary.
 
@@ -66,6 +73,7 @@ Bot:       RUNNING (PID 12345)
 Database:  OK (harness.db, 256KB, 5 tables)
 Heartbeat: 2/2 tasks loaded, 0 failures
 Vault:     42 learnings (38 resolved), 0 issues
+Truncation: 15 events, 0 critical, avg 12% lost
 
 Overall: HEALTHY
 ```
