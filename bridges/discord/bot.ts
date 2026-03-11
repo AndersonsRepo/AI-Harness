@@ -501,7 +501,7 @@ async function handleClaude(
   });
 
   // Spawn the task (this creates the process and FileWatcher)
-  const spawnResult = spawnTask(taskId);
+  const spawnResult = await spawnTask(taskId);
 
   if (!spawnResult) {
     pendingTaskContexts.delete(taskId);
@@ -696,7 +696,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
   );
   if (spawnMatch) {
     const [, agentOverride, description] = spawnMatch;
-    const entry = spawnSubagent({
+    const entry = await spawnSubagent({
       channelId,
       description,
       agent: agentOverride,
@@ -935,7 +935,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     if (newTaskId) {
       await message.reply(`Task re-enqueued as \`${newTaskId}\`. It will run automatically.`);
       // Spawn it
-      spawnTask(newTaskId);
+      await spawnTask(newTaskId);
     } else {
       await message.reply(`Dead-letter entry \`${retryMatch[1]}\` not found.`);
     }

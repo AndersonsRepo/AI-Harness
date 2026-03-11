@@ -10,6 +10,7 @@ import {
 } from "./activity-stream.js";
 import { getChannelConfig } from "./channel-config-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
+import { assembleContext } from "./context-assembler.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -62,7 +63,7 @@ export function onSubagentComplete(
   notifyCallback = cb;
 }
 
-export function spawnSubagent(options: SpawnOptions): registry.SubagentEntry | null {
+export async function spawnSubagent(options: SpawnOptions): Promise<registry.SubagentEntry | null> {
   const running = registry.getRunning();
   if (running.length >= MAX_CONCURRENT) {
     return null; // At capacity
@@ -85,6 +86,18 @@ export function spawnSubagent(options: SpawnOptions): registry.SubagentEntry | n
     if (existsSync(agentFile)) {
       args.push("--append-system-prompt", readFileSync(agentFile, "utf-8"));
     }
+  }
+
+  // Context injection (deterministic daemon)
+  const context = await assembleContext({
+    channelId: options.channelId,
+    prompt: options.description,
+    agentName: agentName || "default",
+    sessionKey: options.channelId,
+    taskId: `subagent-${Date.now()}`,
+  });
+  if (context) {
+    args.push("--append-system-prompt", context);
   }
 
   // Permission mode from channel config

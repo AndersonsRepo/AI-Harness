@@ -18,3 +18,4 @@ heartbeat-tasks/*.state.json
 heartbeat-tasks/pending-notifications.jsonl
 heartbeat-tasks/logs/*.log
 projects/lattice/
+context-log/
