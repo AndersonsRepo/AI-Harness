@@ -181,6 +181,10 @@ Skills are Claude Code's mechanism for reusable, structured capabilities. Each s
 | `health-report` | `/health-report` | System health checks (bot, db, heartbeat, vault); `context: fork` + `agent: ops` |
 | `review-changes` | `/review-changes` | Code review for uncommitted changes; `context: fork` + `agent: reviewer` |
 | `digest` | `/digest` | On-demand learning summaries with date ranges; `context: fork` + `model: sonnet` |
+| `github` | `/github` | GitHub PR/issue/repo management via `gh` CLI; `context: fork` + `agent: ops` |
+| `vercel` | `/vercel` | Vercel deployment management for Hey Lexxi; `model: sonnet` |
+| `academics` | `/academics` | Canvas LMS + GoodNotes academic tracking; `context: fork` + `agent: researcher` |
+| `supabase` | `/supabase` | Safe Supabase DB queries with SQL guardrails; `context: fork` + `agent: ops` |
 
 ### Skills v2 Features Used
 
@@ -202,6 +206,17 @@ Hooks live in `.claude/settings.json` (NOT skill-scoped) because they must fire 
 ### Creating New Skills
 
 Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmatter template.
+
+---
+
+## Integrations
+
+| Integration | Skill | Heartbeat | MCP Server | Safety |
+|-------------|-------|-----------|------------|--------|
+| GitHub | `/github` | — | github-server | fork, confirmation for merges |
+| Vercel | `/vercel` | deploy-monitor (30m) | — | confirmation for deploy/rollback |
+| Supabase | `/supabase` | — | supabase (postgres) | fork, SQL whitelist, no DELETEs |
+| Canvas+GoodNotes | `/academics` | assignment-reminder (12h), goodnotes-watch (1h) | canvas | fork, read-only |
 
 ---
 
