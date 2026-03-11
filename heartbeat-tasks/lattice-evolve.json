@@ -1,0 +1,11 @@
+{
+  "name": "lattice-evolve",
+  "description": "Run one Lattice evolution generation — mutate, score, select",
+  "type": "script",
+  "script": "lattice-evolve.py",
+  "schedule": "30m",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "lattice",
+  "timeout": 120
+}
