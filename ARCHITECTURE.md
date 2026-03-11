@@ -1,199 +1,408 @@
 # AI Harness — Architecture
 
-This document explains how each component works and why it was built the way it was.
+A technical deep dive into every component, why it was built the way it was, and how the pieces connect.
+
+---
+
+## System Overview
+
+```
+Discord user
+    |
+    v
+bot.ts (queue + command dispatch)
+    |
+    +---> task-runner.ts (submit -> spawn -> watch -> retry -> dead-letter)
+    |         |
+    |         +---> context-assembler.ts (deterministic context injection)
+    |         |         |
+    |         |         +---> embeddings.ts (Ollama hybrid search)
+    |         |         +---> SQLite (projects, configs, tasks)
+    |         |         +---> vault/ (learnings, knowledge)
+    |         |
+    |         +---> claude-runner.py (clean env, subprocess, atomic write)
+    |         |         |
+    |         |         +---> Claude CLI (claude -p --output-format json)
+    |         |
+    |         +---> file-watcher.ts (event-driven output detection)
+    |
+    +---> handoff-router.ts (inter-agent collaboration chains)
+    |         |
+    |         +---> context-assembler.ts (same daemon)
+    |
+    +---> subagent-manager.ts (background task lifecycle)
+              |
+              +---> context-assembler.ts (same daemon)
+```
+
+Every path through the system goes through the context assembler. The LLM always arrives pre-loaded with relevant knowledge.
 
 ---
 
 ## 1. Discord Bot (`bridges/discord/bot.ts`)
 
-The bot is a TypeScript application using [discord.js](https://discord.js.org/) v14. It connects to Discord, listens for messages, and routes them to Claude.
+The bot is a TypeScript application using discord.js v14. It's the entry point for all user interaction.
 
 ### Message Flow
 
 ```
 Discord Message
-    │
-    ▼
+    |
+    v
 messageCreate listener
-    │
-    ├── Bot message? → ignore
-    ├── Not in ALLOWED_USER_IDS? → ignore
-    ├── "/new" command? → clear session
-    ├── "/status" command? → show session
-    │
-    ▼
-Request Queue (one-at-a-time)
-    │
-    ▼
+    |
+    +-- Bot message? -> ignore
+    +-- Not in ALLOWED_USER_IDS? -> ignore
+    +-- Slash command? -> handle directly
+    |
+    v
+Request Queue (one-at-a-time per channel)
+    |
+    v
 handleClaude()
-    │
-    ├── Show typing indicator
-    ├── Build Claude CLI args (-p, --output-format json, --resume if session exists)
-    ├── Generate unique temp file path
-    ├── Spawn detached Python process (claude-runner.py)
-    │       └── stdio: 'ignore', detached: true
-    │
-    ▼
-Poll for temp file (every 1 second, up to 2 minutes)
-    │
-    ├── File appears → read JSON, parse response, reply in Discord
-    ├── Timeout → reply with timeout message
-    │
-    ▼
-Save session ID for future --resume
+    |
+    +-- Show typing indicator
+    +-- Build Claude CLI args
+    +-- Generate unique temp file path
+    +-- Spawn via task-runner (detached Python process)
+    +-- FileWatcher polls for output
+    |
+    v
+Parse response -> split for Discord limits -> reply
+Save session ID for --resume continuity
 ```
 
 ### Key Design Decisions
 
-**One request at a time**: The bot uses a simple queue (`activeRequest` flag + `requestQueue` array). When Claude is processing a message, new messages get queued and the user sees a hourglass reaction. This prevents resource contention and keeps responses ordered.
+**One request at a time**: A queue per channel prevents resource contention. Queued requests get a hourglass reaction. This is simple and reliable — no need for a job queue system.
 
-**PID file guard**: On startup, the bot writes its PID to `.bot.pid`. If another instance tries to start, it checks if the old PID is still alive and exits if so. This prevents the duplicate-instance problem that caused message spam.
+**PID file guard**: `.bot.pid` prevents duplicate instances. On startup, check if old PID is alive before proceeding.
 
-**Message splitting**: Discord has a 2000-character limit. The `splitMessage()` function breaks long responses at line boundaries and preserves code block formatting (reopening ``` blocks across chunks).
+**Stream-json polling**: For long responses, `stream-poller.ts` progressively parses `stream-json` output files, editing the Discord message with new content as it arrives (every 2 seconds).
 
 ---
 
 ## 2. Claude Runner (`bridges/discord/claude-runner.py`)
 
-This is the critical bridge between Node.js and Claude CLI.
+The critical bridge between Node.js and Claude CLI.
 
 ### The Problem
 
-Claude Code CLI is itself a Node.js/Bun application. When spawned from another Node.js process via `child_process.spawn()`, it hangs indefinitely. This is a [known bug](https://github.com/anthropics/claude-code/issues/771).
-
-Even using Python as an intermediary doesn't fully solve it — Node.js's stdout pipe handling can still stall when reading from the Python process.
+Claude Code CLI is a Node.js application. Spawning it from another Node.js process via `child_process.spawn()` hangs indefinitely — a [known bug](https://github.com/anthropics/claude-code/issues/771). Even with Python as an intermediary, stdout pipes can stall.
 
 ### The Solution
 
 ```
 Node.js Bot                    Python Runner                  Claude CLI
-    │                              │                              │
-    ├── spawn(detached,            │                              │
-    │   stdio:'ignore')            │                              │
-    │   ─────────────────────►     │                              │
-    │                              ├── subprocess.run()           │
-    │                              │   (capture_output=True,      │
-    │                              │    stdin=DEVNULL)             │
-    │                              │   ─────────────────────►     │
-    │                              │                              │
-    │   (polling for file)         │       (waiting)              │   (processing)
-    │                              │                              │
-    │                              │   ◄─────────────────────     │
-    │                              │   (stdout + stderr)          │
-    │                              │                              │
-    │                              ├── Write to .tmp file         │
-    │                              ├── os.rename() → final file   │
-    │                              │                              │
-    │   (file detected!)           │                              │
-    │   ◄──────────────────────    │                              │
-    │   Read file, parse JSON      │                              │
-    │   Reply in Discord           │                              │
+    |                              |                              |
+    +-- spawn(detached,            |                              |
+    |   stdio:'ignore')            |                              |
+    |   ----------------------->   |                              |
+    |                              +-- subprocess.run()           |
+    |                              |   (capture_output=True)      |
+    |                              |   ----------------------->   |
+    |                              |                              |
+    |   (FileWatcher waiting)      |   (blocking wait)            |  (processing)
+    |                              |                              |
+    |                              |   <-----------------------   |
+    |                              |                              |
+    |                              +-- Write JSON to .tmp file    |
+    |                              +-- Atomic rename .tmp -> .out |
+    |                              |                              |
+    |   FileWatcher fires!         |                              |
+    |   <-----------               |                              |
+    |                              |                              |
+    v                              v                              v
+Parse JSON response           Process exits                  Done
 ```
 
-### Clean Environment
+**Three critical rules:**
+1. Strip `CLAUDE*` env vars — prevents "Cannot be launched inside another Claude Code session"
+2. File-based output — no pipes between any processes
+3. Detached + stdio:ignore — parent never blocks on child
 
-Claude CLI uses environment variables (`CLAUDECODE=1`, `CLAUDE_CODE_ENTRYPOINT=cli`) to detect if it's running inside another Claude session. Since our bot runs from within a Claude Code context, these vars would cause a "Cannot be launched inside another Claude Code session" error.
+### Environment Sanitization
 
-The runner builds a minimal clean environment:
-- `HOME` — needed for Claude to find auth tokens in `~/.claude/`
-- `USER`, `PATH`, `SHELL`, `LANG` — standard POSIX vars
-- `TERM=dumb` — no terminal formatting
-- `SSH_AUTH_SOCK` — for git operations if needed
+```python
+clean_env = {k: v for k, v in os.environ.items()
+             if not k.startswith("CLAUDE")}
+```
 
-Everything else (including all `CLAUDE*` vars) is stripped.
-
-### Atomic File Writes
-
-To prevent the bot from reading a half-written file, the runner:
-1. Writes to `<output_file>.tmp`
-2. Uses `os.rename()` to atomically move it to the final path
-
-`os.rename()` is atomic on the same filesystem, so the bot either sees the complete file or doesn't see it at all.
+This preserves authentication (API keys, tokens) while removing the variables that trigger Claude CLI's nested-session detection.
 
 ---
 
-## 3. Session Store (`bridges/discord/session-store.ts`)
+## 3. Context Injection Daemon (`bridges/discord/context-assembler.ts`)
 
-Maps Discord channel IDs to Claude session IDs, enabling multi-turn conversations.
+The daemon that makes the system smart. Purely deterministic — no LLM involved.
 
-```
-sessions.json:
-{
-  "channel_123": {
-    "sessionId": "abc-def-ghi",
-    "createdAt": "2025-03-09T...",
-    "lastUsed": "2025-03-09T..."
-  }
-}
-```
+### How It Works
 
-When a user sends a message in a channel that has an existing session, the bot passes `--resume <sessionId>` to Claude, continuing the conversation. Use `/new` in Discord to clear a channel's session.
+Before every Claude invocation, the daemon:
 
-**Important**: The store path is computed lazily via `getStorePath()` (not a top-level constant) because the `.env` file is loaded by `dotenv.config()` after imports. A top-level constant would capture `HARNESS_ROOT` before it's populated.
+1. Queries SQLite for active project, channel config, task history
+2. Extracts keywords from the user's prompt (stopword-filtered)
+3. Runs hybrid search: 70% cosine similarity + 30% keyword match
+4. Assembles a ~5000 token context block from priority-ordered sections
+5. Injects via `--append-system-prompt`
 
----
+### Why Deterministic?
 
-## 4. Self-Improvement Engine
+The LLM never decides what to remember or look up. This is intentional:
 
-### How Learning Works
+- **Predictable**: Same query always produces same context (modulo vault changes)
+- **Debuggable**: Context logs show exactly what was injected for each invocation
+- **Fast**: No LLM call for retrieval — just SQLite queries and vector math
+- **Reliable**: Fail-open design — if context assembly fails, the spawn proceeds without it
 
-```
-Interaction
-    │
-    ├── UserPromptSubmit hook → activator.sh
-    │   └── Detects: corrections ("no, that's wrong"), feature requests ("I wish you could")
-    │
-    ├── PostToolUse hook → error-detector.sh
-    │   └── Detects: non-zero exit codes, error patterns (Traceback, exception, etc.)
-    │
-    ▼
-Log to learnings/ (LRN/ERR/FEAT entries with timestamps)
-    │
-    ▼
-3+ recurrences across 2+ tasks within 30 days?
-    │
-    ├── Yes → Promote to CLAUDE.md (permanent behavior change)
-    └── No  → Keep in learnings/ for reference
-```
+### Token Budget
 
-### Skill Extraction
-
-When a reusable workflow emerges from the learnings, `extract-skill.sh` scaffolds a new skill:
-
-```bash
-./scripts/extract-skill.sh my-new-skill
-# Creates: .claude/skills/my-new-skill/SKILL.md (with YAML frontmatter template)
-```
+Total: ~20,000 chars (~5,000 tokens). Learnings get 40% of the budget because they're the most valuable.
 
 ---
 
-## 5. Troubleshooting
+## 4. Semantic Search (`bridges/discord/embeddings.ts`)
 
-### Bot sends multiple responses
-Multiple bot instances are running. Kill all and restart:
-```bash
-pkill -9 -f "bot.ts"
-sleep 2
-rm -f bridges/discord/.bot.pid
-npx tsx bot.ts > bot.log 2>&1 &
+### Embedding Pipeline
+
+```
+Vault file created/modified
+    |
+    v
+fs.watch detects change (3s debounce)
+    |
+    v
+Read file, strip YAML frontmatter
+    |
+    v
+Send to Ollama (nomic-embed-text, 768 dimensions)
+    |
+    v
+Normalize vector (unit length for cosine similarity)
+    |
+    v
+Store in vault-embeddings.json
 ```
 
-### "Claude exited with code 1"
-Check the full error in bot.log — look for `[CLAUDE STDERR]` lines. Common causes:
-- Claude CLI not authenticated (`claude --version` to check)
-- Network issues
-- Rate limiting
+### Hybrid Search
 
-### Bot starts but no messages appear in logs
-- Verify Message Content Intent is enabled in [Discord Developer Portal](https://discord.com/developers/applications)
-- Check that `ALLOWED_USER_IDS` in `.env` includes your Discord user ID
-- Enable Developer Mode in Discord (Settings → Advanced) to copy user/channel IDs
-
-### "Bot already running" on startup
-A previous instance didn't clean up its PID file:
-```bash
-rm bridges/discord/.bot.pid
+```
+Query: "why does the bot hang when spawning Claude?"
+    |
+    +---> Semantic: embed query, compute cosine similarity with all vectors
+    +---> Keyword: extract ["bot", "hang", "spawning", "claude"], match against file content
+    |
+    v
+Merge: score = (semantic * 0.7) + (keyword * 0.3)
+    |
+    v
+Filter: score > 0.3
+    |
+    v
+Return top 5 results with match type labels
 ```
 
-### Claude response takes too long
-The default timeout is 2 minutes. For complex prompts, Claude may need more time. The timeout is set in `claude-runner.py` (`timeout=120`).
+### Why Local Embeddings?
+
+- **Free**: No API costs, no rate limits
+- **Fast**: nomic-embed-text runs in ~10ms on Apple Silicon
+- **Private**: Vault content never leaves the machine
+- **Good enough**: 768 dimensions captures semantic meaning well for <1000 documents
+
+### Storage Decision
+
+JSON file with brute-force cosine similarity. For <1000 entries, this takes sub-millisecond. The upgrade path (sqlite-vec) is documented but unnecessary at current scale.
+
+---
+
+## 5. Task Runner (`bridges/discord/task-runner.ts`)
+
+Manages bounded-step execution with retry logic and dead-letter fallback.
+
+### Lifecycle
+
+```
+submitTask() -> INSERT into task_queue (status: pending)
+    |
+    v
+spawnTask() -> spawn claude-runner.py, status: running
+    |
+    v
+FileWatcher detects output
+    |
+    +-- Parse response
+    +-- Check for [CONTINUE] marker
+    |
+    +-- Has [CONTINUE]? -> increment step, spawn next step
+    |
+    +-- No [CONTINUE]? -> status: completed, post to Discord
+    |
+    +-- Error? -> retry with exponential backoff
+    |       (5s, 25s, 125s, max 3 attempts)
+    |
+    +-- Max retries? -> move to dead_letter table, notify channel
+```
+
+### Crash Recovery
+
+On startup, the task runner checks for tasks stuck in `running` or `waiting_continue` status. For each:
+
+1. Check if the PID is still alive
+2. If alive: re-attach FileWatcher
+3. If dead: reset status, attempt retry
+
+---
+
+## 6. Inter-Agent Handoffs (`bridges/discord/handoff-router.ts`)
+
+Agents collaborate by handing off work to each other.
+
+### Handoff Protocol
+
+```
+Agent A completes work, outputs:
+  "Here's my analysis of the problem. [HANDOFF:builder] Please implement this fix."
+    |
+    v
+bot.ts detects [HANDOFF:builder] directive
+    |
+    v
+handoff-router.ts:
+  1. Validate: target agent exists? not self-handoff? under depth limit?
+  2. Build context: last 15 messages + project state
+  3. Inject daemon context
+  4. Spawn target agent with handoff message
+    |
+    v
+Builder agent receives:
+  "researcher has handed off to you with this request: Please implement this fix."
+  + full conversation context
+  + daemon-assembled knowledge
+```
+
+### Safety
+
+- **Depth limit**: Default 5, configurable per project
+- **Self-handoff blocked**: Agent can't hand off to itself
+- **Unknown agents rejected**: Only registered agents can be targets
+- **Session isolation**: Each agent in a chain gets its own session via compound key `channelId:agentName`
+
+---
+
+## 7. Data Layer
+
+### SQLite (`bridges/discord/harness.db`)
+
+All operational state in a single WAL-mode database:
+
+| Table | Purpose | Key Columns |
+|-------|---------|-------------|
+| `sessions` | Channel → session mapping | channelId, sessionId |
+| `channel_configs` | Per-channel settings | channelId, agent, model, permissions, tools |
+| `subagents` | Background task tracking | id, status, PID, agent, startedAt |
+| `projects` | Project channel registration | channelId, name, agents, handoffDepth |
+| `task_queue` | Bounded-step execution | id, channelId, status, stepCount, retryCount |
+| `dead_letter` | Failed tasks | id, channelId, error, attempts |
+
+**Store pattern**: All 4 store modules follow the same design — import `getDb()`, no caching (WAL is fast enough), array fields stored as JSON strings, upserts via `INSERT ... ON CONFLICT DO UPDATE`.
+
+### Obsidian Vault (`vault/`)
+
+Long-term knowledge in human-readable markdown with YAML frontmatter:
+
+```
+vault/
+├── learnings/           # LRN-*, ERR-*, FEAT-* entries
+├── shared/              # Cross-agent knowledge
+│   ├── conventions.md   # Coding standards
+│   ├── tool-gotchas.md  # Known pitfalls
+│   ├── project-knowledge/  # Per-project context
+│   └── scouted/         # Tech evaluation reports
+├── agents/              # Per-agent working memory
+└── daily/               # Daily activity notes
+```
+
+The vault is NOT a database. It's a knowledge base designed for both machine retrieval (semantic search + frontmatter queries) and human browsing (Obsidian graph view, wikilinks).
+
+---
+
+## 8. MCP Vault Server (`mcp-servers/mcp-vault/index.ts`)
+
+A Model Context Protocol server that exposes the vault as structured tools over JSON-RPC via stdio.
+
+### Tools
+
+| Tool | Input | Output |
+|------|-------|--------|
+| `vault_search` | query string, optional keywords | Ranked results with scores and match types |
+| `vault_read` | entry ID | Full file content |
+| `vault_write` | ID, type, title, tags, patternKey, body | Created file path (with dedup) |
+| `vault_list` | optional filters (type, status, tag, area) | Filtered entry list |
+| `vault_promote_candidates` | — | Entries with recurrence >= 3 |
+| `vault_sync_embeddings` | — | Sync stats (added, updated, removed) |
+| `vault_stats` | — | Entry counts, status breakdown |
+
+### Dedup in `vault_write`
+
+Before creating a new entry, the server scans all existing entries for a matching `pattern-key`. If found, it increments `recurrence-count` and updates `last-seen` instead of creating a duplicate. This is the same logic used by the shell hooks (`dedup-learning.sh`).
+
+> **Critical**: Never use `console.log` in an MCP stdio server — it corrupts the JSON-RPC stream. All logging goes through `console.error`.
+
+---
+
+## 9. Truncation Monitor (`bridges/discord/truncation-monitor.ts`)
+
+Every truncation in the system is monitored for data loss.
+
+### Smart Truncation
+
+Instead of hard `text.slice(0, limit)`, the monitor:
+
+1. Identifies a cut zone (last 15% of the limit)
+2. Searches for natural boundaries: paragraph break > heading > sentence end > line break > word boundary
+3. Detects structure damage: unclosed code blocks, broken YAML frontmatter, mid-table cuts
+4. Auto-closes damaged structures (e.g., adds closing ``` for unclosed code blocks)
+5. Logs the event with severity, % lost, and preview of cut content
+
+### Severity Levels
+
+| Level | Threshold | Action |
+|-------|-----------|--------|
+| Benign | < 30% lost | Log only |
+| Significant | 30-60% lost | Log + notify LLM in context |
+| Critical | > 60% lost | Log + stderr warning + notify LLM |
+
+### Discord Integration
+
+- **Messages**: `splitForDiscord()` splits into multiple sends instead of truncating
+- **Embeds**: `truncateForEmbed()` returns overflow for file attachment
+- **Context**: LLM is told when learnings are truncated with guidance to use `vault_read`
+
+---
+
+## 10. File Watching (`bridges/discord/file-watcher.ts`)
+
+Event-driven output detection replaces all polling:
+
+- Watches the **directory** (not the file) because the file doesn't exist when the watcher starts
+- `retryReadMs` delay (50-100ms) after `fs.watch` event — lets atomic `.tmp → rename` complete
+- Fallback poll (2-5s) as safety net for unreliable `fs.watch` (macOS FSEvents edge cases)
+- `trackWatcher()` / `untrackWatcher()` / `stopAllWatchers()` for clean shutdown
+- One watcher per output file (not one global poll)
+
+---
+
+## Common Gotchas
+
+These are hard-won lessons from building the system:
+
+| Gotcha | Impact | Fix |
+|--------|--------|-----|
+| Node.js spawning Node.js (Claude CLI) | Indefinite hang | Use Python subprocess bridge |
+| `CLAUDECODE=1` env var in child process | "Cannot launch inside another session" | Strip all CLAUDE* env vars |
+| `stdout` pipe stalling | Process appears to hang | File-based output with atomic rename |
+| `--append-system-prompt` consuming the prompt | Prompt disappears | Always use `--` separator before the prompt |
+| macOS TCC blocking launchd access to ~/Desktop | "Operation not permitted" | Use symlink from ~/.local/ |
+| `HARNESS_ROOT` not set | Database path resolves wrong | Always set explicitly in env |
+| `console.log` in MCP stdio server | JSON-RPC stream corruption | Use `console.error` for logging |
+| `fs.watch` duplicate events | Double-processing files | Debounce with 3-second window |
