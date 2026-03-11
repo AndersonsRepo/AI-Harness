@@ -22,6 +22,7 @@ WATCHED_REPOS = {
     "AndersonsRepo/Hey-Lexxi-prod": "client-project-prod",
     "tingtingch/mento": "mento",
     "AndersonsRepo/LightRAG": "lightrag",
+    "AndersonsRepo/lattice": "lattice",
 }
 
 
