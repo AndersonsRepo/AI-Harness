@@ -1,21 +1,23 @@
 ---
 name: test-harness
-description: Tests the AI Harness Discord bot after code changes. Runs automated tests for the data layer, then generates a manual test checklist for Discord-dependent features.
+description: Tests the AI Harness Discord bot after code changes.
 user-invocable: true
+argument-hint: "[full|quick|manual-only]"
+allowed-tools:
+  - Read
+  - Bash
+  - Glob
+  - Grep
 ---
 
 # AI Harness Test Skill
 
 You are testing the AI Harness Discord bot. Your job is to verify that changes work correctly by running automated tests and generating a manual checklist for anything that requires a live Discord connection.
 
+## Changed Files
+!`cd $HOME/Desktop/AI-Harness/bridges/discord && git diff --name-only HEAD 2>/dev/null || echo "(no changes detected)"`
+
 ## Step 1: Understand What Changed
-
-Before testing, determine what was modified. Run:
-
-```bash
-cd $HOME/Desktop/AI-Harness/bridges/discord
-git diff --name-only HEAD  # or compare against the last known-good commit
-```
 
 Map each changed file to its test domain:
 

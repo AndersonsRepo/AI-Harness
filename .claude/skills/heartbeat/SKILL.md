@@ -1,12 +1,23 @@
 ---
 name: heartbeat
-description: Creates and manages scheduled background tasks using macOS launchd. Each heartbeat task runs on an interval, executes a Claude prompt, and reports results via Discord or vault.
+description: Creates and manages scheduled background tasks using macOS launchd.
 user-invocable: true
+argument-hint: "<create|list|pause|resume|delete|run|logs> [name] [options]"
+allowed-tools:
+  - Read
+  - Write
+  - Bash
+  - Glob
+  - Grep
+  - Edit
 ---
 
 # Heartbeat — Scheduled Task Manager
 
 Create, list, pause, and delete recurring background tasks that run Claude on a schedule.
+
+## Live LaunchAgent Status
+!`launchctl list | grep com.aiharness.heartbeat 2>/dev/null || echo "(no heartbeat agents loaded)"`
 
 ## Commands
 

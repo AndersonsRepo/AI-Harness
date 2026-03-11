@@ -163,6 +163,47 @@ Run `HARNESS_ROOT=/path/to/AI-Harness npx tsx bridges/discord/test-upgrade.ts` t
 
 ---
 
+## Skills System (v2)
+
+Skills are Claude Code's mechanism for reusable, structured capabilities. Each skill lives at `.claude/skills/<name>/SKILL.md` with YAML frontmatter.
+
+### Available Skills
+
+| Skill | Invocable | Key Features |
+|-------|-----------|-------------|
+| `self-improve` | No (auto-triggered) | Logs learnings/errors/features to vault; inline execution (needs conversation context) |
+| `heartbeat` | `/heartbeat` | LaunchAgent management; `!command` injects live launchd status |
+| `find-skill` | `/find-skill` | Skill/vault search; `context: fork` + `agent: researcher` (read-only) |
+| `doc-on-success` | No (auto-triggered) | Doc updates after confirmed changes; `model: sonnet`; `!command` injects git diff/log |
+| `test-harness` | `/test-harness` | Automated + manual test checklist; `!command` injects changed files |
+| `vault-query` | `/vault-query` | CLI vault search (stats, promotions, by-tag, free-form); `context: fork` + `model: sonnet` |
+| `health-report` | `/health-report` | System health checks (bot, db, heartbeat, vault); `context: fork` + `agent: ops` |
+| `review-changes` | `/review-changes` | Code review for uncommitted changes; `context: fork` + `agent: reviewer` |
+| `digest` | `/digest` | On-demand learning summaries with date ranges; `context: fork` + `model: sonnet` |
+
+### Skills v2 Features Used
+
+- **`allowed-tools`** — restricts which tools a skill can use
+- **`context: fork`** — runs skill in isolated subagent (used by read-only skills: find-skill, vault-query, health-report, review-changes, digest)
+- **`agent`** — routes to a specific agent type (researcher, ops, reviewer)
+- **`model: sonnet`** — cheaper model for formulaic tasks (doc updates, vault queries, health checks)
+- **`!command`** — live shell data injection (launchd status, git diff, changed files, process list)
+- **`argument-hint`** — shows usage hint in skill list
+- **`disable-model-invocation`** — prevents auto-triggering (review-changes)
+- **Supporting files** — templates in `self-improve/templates/`, hook scripts in `self-improve/scripts/`
+
+### Hook Scripts (Global)
+
+Hooks live in `.claude/settings.json` (NOT skill-scoped) because they must fire on every interaction:
+- `UserPromptSubmit` → `.claude/skills/self-improve/scripts/activator.sh` (detects corrections, feature requests)
+- `PostToolUse[Bash]` → `.claude/skills/self-improve/scripts/error-detector.sh` (detects command failures)
+
+### Creating New Skills
+
+Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmatter template.
+
+---
+
 ## Promoted Learnings
 
 <!-- Learnings that recur 3+ times get added here automatically -->
