@@ -6,6 +6,7 @@ import {
   TextChannel,
   ChannelType,
   PermissionFlagsBits,
+  EmbedBuilder,
 } from "discord.js";
 import { spawn } from "child_process";
 import { config } from "dotenv";
@@ -1049,8 +1050,21 @@ async function drainNotifications(): Promise<void> {
           continue;
         }
 
-        const msg = `**Heartbeat: ${task}** (${ts})\n${summary.slice(0, 1800)}`;
-        await targetChannel.send(msg);
+        // Pick embed color by task type
+        const color = task.includes("fail") || task.includes("error") ? 0xED4245
+          : task.includes("reminder") || task.includes("assignment") ? 0xFEE75C
+          : task.includes("goodnotes") || task.includes("notes") ? 0x57F287
+          : task.includes("deploy") ? 0x5865F2
+          : 0x2B2D31;
+
+        const embed = new EmbedBuilder()
+          .setTitle(task.replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase()))
+          .setDescription(summary.slice(0, 4000))
+          .setColor(color)
+          .setTimestamp(new Date(notif.timestamp || Date.now()))
+          .setFooter({ text: "AI Harness Heartbeat" });
+
+        await targetChannel.send({ embeds: [embed] });
         console.log(`[NOTIFY] Sent '${task}' to #${channelName}`);
       } catch (err: any) {
         console.error(`[NOTIFY] Failed to process: ${err.message}`);
@@ -1072,7 +1086,7 @@ async function drainNotifications(): Promise<void> {
 
 // --- Bot Events ---
 
-client.on("clientReady", () => {
+client.on("clientReady", async () => {
   console.log(`AI Harness bot online as ${client.user?.tag}`);
   console.log(`Allowed users: ${ALLOWED_USER_IDS.join(", ")}`);
   console.log(`Working directory: ${HARNESS_ROOT}`);
@@ -1119,6 +1133,51 @@ client.on("clientReady", () => {
       console.error(`[SUBAGENT] Failed to notify channel: ${err.message}`);
     }
   });
+
+  // Ensure "School" category + "calendar" channel exist
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      let schoolCat = guild.channels.cache.find(
+        (c) => c.type === ChannelType.GuildCategory && c.name.toLowerCase() === "school"
+      );
+      if (!schoolCat) {
+        schoolCat = await guild.channels.create({
+          name: "School",
+          type: ChannelType.GuildCategory,
+          reason: "AI Harness school integration",
+        });
+        console.log(`[SCHOOL] Created "School" category in ${guild.name}`);
+      }
+      const calendarCh = guild.channels.cache.find(
+        (c) => c.name === "calendar" && c.parentId === schoolCat!.id
+      );
+      if (!calendarCh) {
+        await guild.channels.create({
+          name: "calendar",
+          type: ChannelType.GuildText,
+          parent: schoolCat.id,
+          topic: "Canvas iCal feed — assignments, events, and due dates",
+          reason: "AI Harness Canvas calendar integration",
+        });
+        console.log(`[SCHOOL] Created #calendar channel in ${guild.name}`);
+      }
+      const goodnotesCh = guild.channels.cache.find(
+        (c) => c.name === "goodnotes" && c.parentId === schoolCat!.id
+      );
+      if (!goodnotesCh) {
+        await guild.channels.create({
+          name: "goodnotes",
+          type: ChannelType.GuildText,
+          parent: schoolCat.id,
+          topic: "GoodNotes PDF export notifications",
+          reason: "AI Harness GoodNotes integration",
+        });
+        console.log(`[SCHOOL] Created #goodnotes channel in ${guild.name}`);
+      }
+    } catch (err: any) {
+      console.error(`[SCHOOL] Failed to create school channels: ${err.message}`);
+    }
+  }
 
   // Start notification drain polling (keep as-is)
   setInterval(drainNotifications, NOTIFY_POLL_MS);

@@ -10,7 +10,12 @@ HARNESS_ROOT = os.environ.get("HARNESS_ROOT", "$HOME/.local/ai-harness")
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 STATE_FILE = os.path.join(TASKS_DIR, "goodnotes-watch.state-files.json")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
-EXPORT_DIR = os.path.expanduser("~/Documents/GoodNotes-Export")
+EXPORT_DIR = os.path.join(
+    os.path.expanduser("~/Library/CloudStorage/GoogleDrive-REDACTED@example.com"),
+    "My Drive", "GoodNotes",
+)
+# Fallback: manual exports
+MANUAL_EXPORT_DIR = os.path.expanduser("~/Documents/GoodNotes-Export")
 
 
 def load_known_files():
@@ -38,22 +43,53 @@ def notify(message):
         f.write(json.dumps(notification) + "\n")
 
 
-def main():
-    if not os.path.isdir(EXPORT_DIR):
-        print(f"Export directory does not exist: {EXPORT_DIR}")
-        return
+def scan_dir(directory):
+    """Return set of PDF basenames in a directory (recursively)."""
+    files = set()
+    if not os.path.isdir(directory):
+        return files
+    for root, _, filenames in os.walk(directory):
+        for f in filenames:
+            if f.lower().endswith(".pdf"):
+                # Include relative path from base dir for uniqueness
+                rel = os.path.relpath(os.path.join(root, f), directory)
+                files.add(rel)
+    return files
 
-    current_files = set(
-        os.path.basename(p) for p in glob.glob(os.path.join(EXPORT_DIR, "*.pdf"))
-    )
+
+def main():
+    current_files = set()
+    current_files |= scan_dir(EXPORT_DIR)
+    current_files |= scan_dir(MANUAL_EXPORT_DIR)
+
+    if not current_files:
+        dirs = f"{EXPORT_DIR}, {MANUAL_EXPORT_DIR}"
+        print(f"No PDFs found in: {dirs}")
+
     known_files = load_known_files()
 
     new_files = current_files - known_files
     if new_files:
         for f in sorted(new_files):
             print(f"New export detected: {f}")
-        names = ", ".join(sorted(new_files))
-        notify(f"New GoodNotes export(s): {names}")
+
+        # Group by folder for clean display
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for f in sorted(new_files):
+            folder = os.path.dirname(f) or "Root"
+            name = os.path.basename(f)
+            grouped[folder].append(name)
+
+        lines = [f"**{len(new_files)} new export(s) detected**\n"]
+        for folder, files in sorted(grouped.items()):
+            if folder != "Root":
+                lines.append(f"**{folder}/**")
+            for name in files:
+                lines.append(f"  \u2022 {name}")
+            lines.append("")  # blank line between groups
+
+        notify("\n".join(lines).strip())
     else:
         print("No new exports detected")
 
