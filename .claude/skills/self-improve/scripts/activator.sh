@@ -47,6 +47,24 @@ elif echo "$PROMPT" | grep -qiE "(is (broken|not working|down|failing|crashing)|
   CATEGORY="user_reported_bug"
   TAGS="[auto-captured, bug-report, user-reported]"
 
+# --- 7. Root cause / debugging insights ---
+elif echo "$PROMPT" | grep -qiE "(the (root cause|problem|issue|bug) (is|was)|it (turns out|was because)|the reason (is|was)|found (the|a) bug|figured out why|it.?s (because|due to)|that.?s (why|what.?s causing)|the fix (is|was)|solved it)"; then
+  TYPE="LRN"
+  CATEGORY="discovery"
+  TAGS="[auto-captured, debugging, root-cause]"
+
+# --- 8. TIL / surprising discoveries ---
+elif echo "$PROMPT" | grep -qiE "(I didn.?t know|TIL|turns out|apparently|I just (found|learned|discovered|realized)|did you know|interesting.*(that|how)|huh.*(so|it)|who knew|I was surprised)"; then
+  TYPE="LRN"
+  CATEGORY="discovery"
+  TAGS="[auto-captured, discovery, til]"
+
+# --- 9. Workflow / process notes ---
+elif echo "$PROMPT" | grep -qiE "(the (way|trick|key) (to|is)|make sure (to|you)|don.?t forget to|the (workflow|process|steps?) (is|are)|you have to|important:? (that|to)|heads up|watch out for|be careful (with|about)|gotcha)"; then
+  TYPE="LRN"
+  CATEGORY="gotcha"
+  TAGS="[auto-captured, workflow, gotcha]"
+
 else
   # No special pattern -- silent exit
   exit 0

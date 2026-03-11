@@ -6,6 +6,6 @@
   "schedule": "1h",
   "enabled": true,
   "notify": "discord",
-  "discord_channel": "general",
+  "discord_channel": "goodnotes",
   "timeout": 30
 }

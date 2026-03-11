@@ -69,7 +69,7 @@ def save_state(task_name, state):
 
 def run_claude(prompt, allowed_tools=None, timeout=300, env_passthrough=None):
     """Run claude -p with the given prompt. Returns (success, output_text)."""
-    claude_args = ["-p", "--output-format", "json"]
+    claude_args = ["-p", "--dangerously-skip-permissions", "--output-format", "json"]
     if allowed_tools:
         claude_args.extend(["--allowedTools", ",".join(allowed_tools)])
     # Use -- to separate options from the prompt positional arg
@@ -83,6 +83,7 @@ def run_claude(prompt, allowed_tools=None, timeout=300, env_passthrough=None):
         "SHELL": os.environ.get("SHELL", "/bin/zsh"),
         "LANG": os.environ.get("LANG", "en_US.UTF-8"),
         "TERM": "dumb",
+        "HARNESS_ROOT": HARNESS_ROOT,
     }
     # Remove CLAUDECODE to avoid nested session detection
     clean_env.pop("CLAUDECODE", None)
@@ -232,7 +233,10 @@ def run_task(task_name):
         log(task_name, f"Running claude with prompt: {prompt[:100]}...")
         success, output = run_claude(prompt, allowed_tools, timeout, env_passthrough)
 
-    # Update state
+    # Re-load state after execution — scripts may have updated the state file
+    # (e.g. github-watch.py saves SHAs). We merge runner metadata on top.
+    state = load_state(task_name)
+
     now = datetime.datetime.now().isoformat()
     state["last_run"] = now
     state["total_runs"] = state.get("total_runs", 0) + 1
