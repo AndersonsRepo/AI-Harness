@@ -6,6 +6,6 @@
   "schedule": "30m",
   "enabled": true,
   "notify": "discord",
-  "discord_channel": "general",
+  "discord_channel": "notifications",
   "timeout": 60
 }
