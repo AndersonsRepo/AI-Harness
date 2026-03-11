@@ -19,3 +19,4 @@ heartbeat-tasks/pending-notifications.jsonl
 heartbeat-tasks/logs/*.log
 projects/lattice/
 context-log/
+vault/vault-embeddings.json

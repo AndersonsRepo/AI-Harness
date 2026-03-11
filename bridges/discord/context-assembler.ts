@@ -16,6 +16,8 @@ import { join, basename } from "path";
 import { getDb } from "./db.js";
 import { getProject, type ProjectConfig } from "./project-manager.js";
 import { getChannelConfig, type ChannelConfig } from "./channel-config-store.js";
+import { hybridSearch, type SearchResult } from "./embeddings.js";
+import { monitor } from "./truncation-monitor.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const VAULT_DIR = join(HARNESS_ROOT, "vault");
@@ -25,18 +27,19 @@ const PROJECT_KNOWLEDGE_DIR = join(SHARED_DIR, "project-knowledge");
 const HEARTBEAT_DIR = join(HARNESS_ROOT, "heartbeat-tasks");
 const NOTIFICATIONS_FILE = join(HEARTBEAT_DIR, "pending-notifications.jsonl");
 
-// Token budget: target ~1000-2000 tokens. Each section has a max char limit.
-const MAX_TOTAL_CHARS = 6000; // ~1500 tokens
+// Token budget: ~4000-5000 tokens. Cost is negligible on Max subscription.
+// Learnings get the lion's share — that's the whole point of the system.
+const MAX_TOTAL_CHARS = 20000; // ~5000 tokens
 const SECTION_LIMITS: Record<string, number> = {
-  project: 400,
-  channelState: 300,
-  learnings: 1500,
-  projectKnowledge: 800,
-  taskHistory: 600,
-  conventions: 600,
-  gotchas: 600,
-  heartbeats: 400,
-  pendingWork: 300,
+  project: 600,
+  channelState: 400,
+  learnings: 8000,
+  projectKnowledge: 3000,
+  taskHistory: 1200,
+  conventions: 2000,
+  gotchas: 2000,
+  heartbeats: 800,
+  pendingWork: 600,
 };
 
 // Common English stopwords for keyword extraction
@@ -94,12 +97,23 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       totalChars += projectSection.length;
     }
 
-    // Priority 2: Relevant learnings (keyword match)
+    // Priority 2: Relevant learnings (hybrid: semantic + keyword)
     if (totalChars < MAX_TOTAL_CHARS) {
-      const learningsSection = buildLearningsSection(keywords);
+      const learningsSection = await buildLearningsSection(params.prompt, keywords);
       if (learningsSection) {
-        sections.push(truncate(learningsSection, SECTION_LIMITS.learnings));
-        totalChars += Math.min(learningsSection.length, SECTION_LIMITS.learnings);
+        let finalLearnings = monitor.truncate(learningsSection, SECTION_LIMITS.learnings, "context:learnings");
+
+        // Check if any learnings were significantly truncated and notify the LLM
+        const truncationEvents = monitor.drainRecentEvents("context:learnings");
+        if (truncationEvents.length > 0) {
+          const significantCount = truncationEvents.filter((e) => e.severity === "significant" || e.severity === "critical").length;
+          if (significantCount > 0) {
+            finalLearnings += `\n\n> ⚠ ${significantCount} learning(s) were significantly truncated (>30% content lost). Use vault_read to fetch full content for any entry you need details from.`;
+          }
+        }
+
+        sections.push(finalLearnings);
+        totalChars += finalLearnings.length;
       }
     }
 
@@ -107,7 +121,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     if (totalChars < MAX_TOTAL_CHARS && project) {
       const knowledgeSection = buildProjectKnowledgeSection(project.name);
       if (knowledgeSection) {
-        sections.push(truncate(knowledgeSection, SECTION_LIMITS.projectKnowledge));
+        sections.push(monitor.truncate(knowledgeSection, SECTION_LIMITS.projectKnowledge, "context:project-knowledge"));
         totalChars += Math.min(knowledgeSection.length, SECTION_LIMITS.projectKnowledge);
       }
     }
@@ -116,7 +130,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     if (totalChars < MAX_TOTAL_CHARS) {
       const taskSection = buildTaskHistorySection(params.channelId);
       if (taskSection) {
-        sections.push(truncate(taskSection, SECTION_LIMITS.taskHistory));
+        sections.push(monitor.truncate(taskSection, SECTION_LIMITS.taskHistory, "context:task-history"));
         totalChars += Math.min(taskSection.length, SECTION_LIMITS.taskHistory);
       }
     }
@@ -125,7 +139,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     if (totalChars < MAX_TOTAL_CHARS) {
       const conventionsSection = buildConventionsSection();
       if (conventionsSection) {
-        sections.push(truncate(conventionsSection, SECTION_LIMITS.conventions));
+        sections.push(monitor.truncate(conventionsSection, SECTION_LIMITS.conventions, "context:conventions"));
         totalChars += Math.min(conventionsSection.length, SECTION_LIMITS.conventions);
       }
     }
@@ -133,7 +147,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     if (totalChars < MAX_TOTAL_CHARS) {
       const gotchasSection = buildGotchasSection();
       if (gotchasSection) {
-        sections.push(truncate(gotchasSection, SECTION_LIMITS.gotchas));
+        sections.push(monitor.truncate(gotchasSection, SECTION_LIMITS.gotchas, "context:gotchas"));
         totalChars += Math.min(gotchasSection.length, SECTION_LIMITS.gotchas);
       }
     }
@@ -142,7 +156,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     if (totalChars < MAX_TOTAL_CHARS) {
       const heartbeatSection = buildHeartbeatSection();
       if (heartbeatSection) {
-        sections.push(truncate(heartbeatSection, SECTION_LIMITS.heartbeats));
+        sections.push(monitor.truncate(heartbeatSection, SECTION_LIMITS.heartbeats, "context:heartbeats"));
         totalChars += Math.min(heartbeatSection.length, SECTION_LIMITS.heartbeats);
       }
     }
@@ -151,7 +165,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     if (totalChars < MAX_TOTAL_CHARS) {
       const pendingSection = buildPendingWorkSection(params.channelId);
       if (pendingSection) {
-        sections.push(truncate(pendingSection, SECTION_LIMITS.pendingWork));
+        sections.push(monitor.truncate(pendingSection, SECTION_LIMITS.pendingWork, "context:pending-work"));
         totalChars += Math.min(pendingSection.length, SECTION_LIMITS.pendingWork);
       }
     }
@@ -202,17 +216,46 @@ function buildProjectSection(
   return lines.join("\n");
 }
 
-function buildLearningsSection(keywords: string[]): string | null {
-  if (!existsSync(LEARNINGS_DIR)) return null;
+async function buildLearningsSection(prompt: string, keywords: string[]): Promise<string | null> {
+  // Try hybrid search (semantic + keyword) first, fall back to keyword-only
+  let results: SearchResult[] = [];
+  try {
+    results = await hybridSearch(prompt, keywords, 5);
+  } catch {
+    // Ollama unavailable — fall back to keyword-only via old searchVault
+    const entries = searchVault(keywords, 5);
+    if (entries.length === 0) return null;
+    const lines: string[] = ["## Relevant Knowledge"];
+    for (const entry of entries) {
+      lines.push(`- [${entry.id}] ${entry.summary}`);
+    }
+    return lines.join("\n");
+  }
 
-  const entries = searchVault(keywords, 5);
-  if (entries.length === 0) return null;
+  // Filter to results with meaningful similarity (threshold: 0.3)
+  const relevant = results.filter((r) => r.score > 0.3);
+  if (relevant.length === 0) return null;
 
   const lines: string[] = ["## Relevant Knowledge"];
-  for (const entry of entries) {
-    lines.push(`- [${entry.id}] ${entry.summary}`);
-    if (entry.tags.length > 0) {
-      lines.push(`  Tags: ${entry.tags.join(", ")}`);
+  for (const r of relevant) {
+    const fileName = r.path.split("/").pop()?.replace(".md", "") || r.path;
+    const matchTag = r.matchType === "hybrid" ? " [hybrid]" : r.matchType === "semantic" ? " [semantic]" : "";
+
+    // Load full file content for high-relevance results
+    const fullPath = join(VAULT_DIR, r.path);
+    let body = "";
+    try {
+      if (existsSync(fullPath)) {
+        body = stripFrontmatter(readFileSync(fullPath, "utf-8")).trim();
+      }
+    } catch {}
+
+    if (body && body.length > 40) {
+      // Include the full learning content, monitored truncation per entry
+      lines.push(`### [${fileName}]${matchTag} (score: ${r.score.toFixed(2)})`);
+      lines.push(monitor.truncate(body, 1200, "context:learnings"));
+    } else {
+      lines.push(`- [${fileName}] ${r.text.slice(0, 200)}${matchTag}`);
     }
   }
 
@@ -456,13 +499,6 @@ function parseFrontmatter(content: string): Record<string, any> | null {
 
 function stripFrontmatter(content: string): string {
   return content.replace(/^---\n[\s\S]*?\n---\n*/, "");
-}
-
-// ─── Utilities ───────────────────────────────────────────────────────
-
-function truncate(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  return text.slice(0, maxChars - 3) + "...";
 }
 
 // ─── Logging ─────────────────────────────────────────────────────────

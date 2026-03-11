@@ -85,6 +85,7 @@ import {
   type TaskRecord,
   type DeadLetterRecord,
 } from "./task-runner.js";
+import { syncEmbeddings, watchVaultForEmbeddings } from "./embeddings.js";
 
 config();
 
@@ -1114,6 +1115,16 @@ client.on("clientReady", async () => {
   // Prune old dead-letter entries
   const pruned = pruneDeadLetters(7);
   if (pruned > 0) console.log(`[TASK] Pruned ${pruned} old dead-letter entries`);
+
+  // Sync vault embeddings (non-blocking — runs in background)
+  syncEmbeddings().then((stats) => {
+    console.log(`[EMBEDDINGS] Vault sync: +${stats.added} ~${stats.updated} -${stats.removed}`);
+  }).catch((err) => {
+    console.error(`[EMBEDDINGS] Sync failed (non-fatal): ${err.message}`);
+  });
+
+  // Watch vault for new/changed files → auto-embed
+  watchVaultForEmbeddings();
 
   // Set up subagent completion notifications
   onSubagentComplete(async (entry, result) => {

@@ -46,13 +46,20 @@ def get_latest_deployment():
     """Get the latest deployment status from Vercel."""
     try:
         result = subprocess.run(
-            ["vercel", "list", "--cwd", PROJECT_DIR, "--json"],
+            ["vercel", "list", "--cwd", PROJECT_DIR, "-F", "json"],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
             return None, None
 
-        data = json.loads(result.stdout)
+        # vercel outputs status text before JSON — find the JSON object
+        stdout = result.stdout
+        json_start = stdout.find("{")
+        if json_start == -1:
+            json_start = stdout.find("[")
+        if json_start == -1:
+            return None, None
+        data = json.loads(stdout[json_start:])
         deployments = data if isinstance(data, list) else data.get("deployments", [])
         if not deployments:
             return None, None
