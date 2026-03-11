@@ -1,5 +1,3 @@
-import { readFileSync, writeFileSync, existsSync } from "fs";
-import { join } from "path";
 import {
   Guild,
   TextChannel,
@@ -7,6 +5,7 @@ import {
   CategoryChannel,
 } from "discord.js";
 import { setChannelConfig } from "./channel-config-store.js";
+import { getDb } from "./db.js";
 
 export interface ProjectConfig {
   channelId: string;
@@ -21,69 +20,79 @@ export interface ProjectConfig {
   createdAt: string;
 }
 
-type ProjectMap = Record<string, ProjectConfig>;
-
 const PROJECTS_CATEGORY_NAME = "Projects";
 const DEFAULT_AGENTS = ["researcher", "reviewer", "builder", "ops"];
 const DEFAULT_MAX_DEPTH = 5;
 
-function getStorePath(): string {
-  return join(
-    process.env.HARNESS_ROOT || ".",
-    "bridges",
-    "discord",
-    "projects.json"
-  );
-}
-
-function load(): ProjectMap {
-  if (!existsSync(getStorePath())) return {};
-  try {
-    return JSON.parse(readFileSync(getStorePath(), "utf-8"));
-  } catch {
-    return {};
-  }
-}
-
-function save(map: ProjectMap): void {
-  writeFileSync(getStorePath(), JSON.stringify(map, null, 2));
+function rowToProject(row: any): ProjectConfig {
+  return {
+    channelId: row.channel_id,
+    categoryId: row.category_id,
+    guildId: row.guild_id,
+    name: row.name,
+    description: row.description,
+    agents: JSON.parse(row.agents),
+    activeAgent: row.active_agent || undefined,
+    handoffDepth: row.handoff_depth,
+    maxHandoffDepth: row.max_handoff_depth,
+    createdAt: row.created_at,
+  };
 }
 
 export function getProject(channelId: string): ProjectConfig | null {
-  const map = load();
-  return map[channelId] || null;
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM projects WHERE channel_id = ?").get(channelId);
+  return row ? rowToProject(row) : null;
 }
 
 export function getProjectByName(name: string): ProjectConfig | null {
-  const map = load();
-  return Object.values(map).find((p) => p.name === name) || null;
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM projects WHERE name = ?").get(name);
+  return row ? rowToProject(row) : null;
 }
 
 export function listProjects(): ProjectConfig[] {
-  return Object.values(load());
+  const db = getDb();
+  const rows = db.prepare("SELECT * FROM projects").all();
+  return rows.map(rowToProject);
 }
 
 export function updateProject(
   channelId: string,
   updates: Partial<ProjectConfig>
 ): ProjectConfig | null {
-  const map = load();
-  if (!map[channelId]) return null;
-  Object.assign(map[channelId], updates);
-  save(map);
-  return map[channelId];
+  const db = getDb();
+  const existing = db.prepare("SELECT * FROM projects WHERE channel_id = ?").get(channelId);
+  if (!existing) return null;
+
+  const fields: string[] = [];
+  const values: any[] = [];
+
+  if (updates.categoryId !== undefined) { fields.push("category_id = ?"); values.push(updates.categoryId); }
+  if (updates.guildId !== undefined) { fields.push("guild_id = ?"); values.push(updates.guildId); }
+  if (updates.name !== undefined) { fields.push("name = ?"); values.push(updates.name); }
+  if (updates.description !== undefined) { fields.push("description = ?"); values.push(updates.description); }
+  if (updates.agents !== undefined) { fields.push("agents = ?"); values.push(JSON.stringify(updates.agents)); }
+  if (updates.activeAgent !== undefined) { fields.push("active_agent = ?"); values.push(updates.activeAgent); }
+  if (updates.handoffDepth !== undefined) { fields.push("handoff_depth = ?"); values.push(updates.handoffDepth); }
+  if (updates.maxHandoffDepth !== undefined) { fields.push("max_handoff_depth = ?"); values.push(updates.maxHandoffDepth); }
+
+  if (fields.length === 0) return rowToProject(existing);
+
+  values.push(channelId);
+  db.prepare(`UPDATE projects SET ${fields.join(", ")} WHERE channel_id = ?`).run(...values);
+
+  const updated = db.prepare("SELECT * FROM projects WHERE channel_id = ?").get(channelId);
+  return updated ? rowToProject(updated) : null;
 }
 
 export function deleteProject(channelId: string): boolean {
-  const map = load();
-  if (!map[channelId]) return false;
-  delete map[channelId];
-  save(map);
-  return true;
+  const db = getDb();
+  const result = db.prepare("DELETE FROM projects WHERE channel_id = ?").run(channelId);
+  return result.changes > 0;
 }
 
 async function findOrCreateCategory(guild: Guild): Promise<CategoryChannel> {
-  // Look for existing "Projects" category
   const existing = guild.channels.cache.find(
     (c) =>
       c.type === ChannelType.GuildCategory &&
@@ -91,7 +100,6 @@ async function findOrCreateCategory(guild: Guild): Promise<CategoryChannel> {
   );
   if (existing) return existing as CategoryChannel;
 
-  // Create the category
   return guild.channels.create({
     name: PROJECTS_CATEGORY_NAME,
     type: ChannelType.GuildCategory,
@@ -107,7 +115,6 @@ export async function createProject(
 ): Promise<ProjectConfig> {
   const category = await findOrCreateCategory(guild);
 
-  // Create the channel under the Projects category
   const channel = await guild.channels.create({
     name: `proj-${name}`,
     type: ChannelType.GuildText,
@@ -130,15 +137,23 @@ export async function createProject(
     createdAt: new Date().toISOString(),
   };
 
-  // Save to store
-  const map = load();
-  map[channel.id] = project;
-  save(map);
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO projects (channel_id, category_id, guild_id, name, description, agents, handoff_depth, max_handoff_depth, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    project.channelId,
+    project.categoryId,
+    project.guildId,
+    project.name,
+    project.description,
+    JSON.stringify(project.agents),
+    project.handoffDepth,
+    project.maxHandoffDepth,
+    project.createdAt
+  );
 
-  // Also set channel config so the bot recognizes this as a project channel
-  setChannelConfig(channel.id, {
-    agent: projectAgents[0], // Default to first agent
-  });
+  setChannelConfig(channel.id, { agent: projectAgents[0] });
 
   return project;
 }
@@ -153,10 +168,9 @@ export async function closeProject(
   try {
     const channel = guild.channels.cache.get(channelId);
     if (channel) {
-      // Move to an "Archived" prefix rather than deleting
       await channel.edit({
         name: `archived-${project.name}`,
-        parent: null, // Remove from category
+        parent: null,
         reason: "Project closed",
       });
     }
@@ -167,47 +181,30 @@ export async function closeProject(
 }
 
 export function resetHandoffDepth(channelId: string): void {
-  const map = load();
-  if (map[channelId]) {
-    map[channelId].handoffDepth = 0;
-    save(map);
-  }
+  const db = getDb();
+  db.prepare("UPDATE projects SET handoff_depth = 0 WHERE channel_id = ?").run(channelId);
 }
 
 export function incrementHandoffDepth(channelId: string): number {
-  const map = load();
-  if (!map[channelId]) return 0;
-  map[channelId].handoffDepth++;
-  save(map);
-  return map[channelId].handoffDepth;
+  const db = getDb();
+  db.prepare("UPDATE projects SET handoff_depth = handoff_depth + 1 WHERE channel_id = ?").run(channelId);
+  const row = db.prepare("SELECT handoff_depth FROM projects WHERE channel_id = ?").get(channelId) as { handoff_depth: number } | undefined;
+  return row?.handoff_depth ?? 0;
 }
 
 export function isProjectChannel(channelId: string): boolean {
   return getProject(channelId) !== null;
 }
 
-/**
- * Auto-adopt a channel as a project if it's under the Projects category
- * but not yet registered. Returns the new project config or null.
- */
 export function autoAdoptIfInCategory(
   channelId: string,
   channelName: string,
   parentId: string | null,
   guildId: string
 ): ProjectConfig | null {
-  // Already registered
   if (getProject(channelId)) return null;
-  // No parent category
   if (!parentId) return null;
 
-  // Check if the parent category is "Projects" by looking at existing projects
-  // or by matching the parentId against known category IDs
-  const existing = listProjects();
-  const knownCategoryIds = new Set(existing.map((p) => p.categoryId));
-
-  // If we have no projects yet, we can't match by ID — caller must check category name
-  // This function is called with verified category info from bot.ts
   const name = channelName.replace(/^proj-/, "");
 
   const project: ProjectConfig = {
@@ -222,18 +219,27 @@ export function autoAdoptIfInCategory(
     createdAt: new Date().toISOString(),
   };
 
-  const map = load();
-  map[channelId] = project;
-  save(map);
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO projects (channel_id, category_id, guild_id, name, description, agents, handoff_depth, max_handoff_depth, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    project.channelId,
+    project.categoryId,
+    project.guildId,
+    project.name,
+    project.description,
+    JSON.stringify(project.agents),
+    project.handoffDepth,
+    project.maxHandoffDepth,
+    project.createdAt
+  );
 
   setChannelConfig(channelId, { agent: DEFAULT_AGENTS[0] });
 
   return project;
 }
 
-/**
- * Adopt an existing channel as a project (for /project adopt command).
- */
 export function adoptChannel(
   channelId: string,
   channelName: string,
@@ -257,18 +263,27 @@ export function adoptChannel(
     createdAt: new Date().toISOString(),
   };
 
-  const map = load();
-  map[channelId] = project;
-  save(map);
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO projects (channel_id, category_id, guild_id, name, description, agents, handoff_depth, max_handoff_depth, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    project.channelId,
+    project.categoryId,
+    project.guildId,
+    project.name,
+    project.description,
+    JSON.stringify(project.agents),
+    project.handoffDepth,
+    project.maxHandoffDepth,
+    project.createdAt
+  );
 
   setChannelConfig(channelId, { agent: projectAgents[0] });
 
   return project;
 }
 
-/**
- * Get the category ID for "Projects" in a guild, if it exists.
- */
 export function getProjectsCategoryName(): string {
   return PROJECTS_CATEGORY_NAME;
 }

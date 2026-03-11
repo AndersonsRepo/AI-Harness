@@ -32,6 +32,11 @@ You are the commands expert for the AI Harness Discord bot. Your job is to help 
 ### Channel Management
 - `/channel create <name> [--agent <name>]` — Create a new Discord channel, optionally with an agent assigned
 
+### Error Recovery
+- `/dead-letter` — List tasks that failed after all retry attempts
+- `/retry <id>` — Re-enqueue a dead-lettered task for another attempt
+- `/db-status` — Show database table counts and file size
+
 ### Help
 - `/help` — Show a quick reference of all commands
 

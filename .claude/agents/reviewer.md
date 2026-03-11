@@ -21,6 +21,9 @@ Structure reviews as:
 3. **Suggestions** — Nice to have improvements
 4. **Summary** — Overall assessment
 
+## Continuation
+If your work is not complete and you need to continue, end your response with [CONTINUE]. If you are done, do not include this marker.
+
 ## Inter-Agent Communication
 When working on a project channel with other agents, you can hand off work to another agent.
 

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, mkdirSync } from "fs";
+import { existsSync, readdirSync, readFileSync, mkdirSync, watch, FSWatcher } from "fs";
 import { join } from "path";
 
 export interface StreamEvent {
@@ -14,7 +14,8 @@ export type StreamCallback = (text: string, toolInfo?: string) => void;
 export class StreamPoller {
   private streamDir: string;
   private lastChunk: number = 0;
-  private interval: ReturnType<typeof setInterval> | null = null;
+  private watcher: FSWatcher | null = null;
+  private fallbackInterval: ReturnType<typeof setInterval> | null = null;
   private accumulatedText: string = "";
   private callback: StreamCallback;
   private lastCallbackTime: number = 0;
@@ -35,14 +36,34 @@ export class StreamPoller {
   }
 
   start(): void {
-    if (this.interval) return;
-    this.interval = setInterval(() => this.poll(), 500);
+    if (this.watcher || this.fallbackInterval) return;
+
+    // Primary: fs.watch on the stream directory
+    try {
+      this.watcher = watch(this.streamDir, (eventType, filename) => {
+        if (filename && filename.startsWith("chunk-") && filename.endsWith(".json")) {
+          this.poll();
+        }
+      });
+      this.watcher.on("error", () => {
+        // Watcher error — fallback handles it
+      });
+    } catch {
+      // Directory might not exist yet
+    }
+
+    // Fallback poll at 2s (safety net)
+    this.fallbackInterval = setInterval(() => this.poll(), 2000);
   }
 
   stop(): void {
-    if (this.interval) {
-      clearInterval(this.interval);
-      this.interval = null;
+    if (this.watcher) {
+      this.watcher.close();
+      this.watcher = null;
+    }
+    if (this.fallbackInterval) {
+      clearInterval(this.fallbackInterval);
+      this.fallbackInterval = null;
     }
     // Final flush
     if (this.accumulatedText) {

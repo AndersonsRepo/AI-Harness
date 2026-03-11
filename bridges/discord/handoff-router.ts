@@ -9,6 +9,7 @@ import {
   resetHandoffDepth,
 } from "./project-manager.js";
 import { getSession, setSession } from "./session-store.js";
+import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -54,7 +55,6 @@ export function parseCreateChannel(output: string): CreateChannelDirective | nul
 }
 
 export function parseHandoff(output: string): HandoffDirective | null {
-  // Match [HANDOFF:agent_name] message (case-insensitive, optional whitespace)
   const match = output.match(
     /\[(?:HANDOFF|handoff)\s*:\s*(\w+)\]\s*([\s\S]*?)$/
   );
@@ -260,19 +260,19 @@ export async function executeHandoff(
     // Show typing
     channel.sendTyping().catch(() => {});
 
-    const startTime = Date.now();
-    const TIMEOUT = 180_000;
-    const POLL_INTERVAL = 1_000;
+    // Use FileWatcher instead of polling
+    const watcher = new FileWatcher({
+      filePath: outputFile,
+      onFile: async (content: string) => {
+        untrackWatcher(watcher);
 
-    const poll = async (): Promise<void> => {
-      channel.sendTyping().catch(() => {});
-
-      if (existsSync(outputFile)) {
         try {
-          const raw = readFileSync(outputFile, "utf-8");
-          unlinkSync(outputFile);
+          // Clean up
+          if (existsSync(outputFile)) {
+            unlinkSync(outputFile);
+          }
 
-          const result = JSON.parse(raw);
+          const result = JSON.parse(content);
           const { stdout, stderr, returncode } = result;
 
           if (returncode !== 0) {
@@ -311,21 +311,29 @@ export async function executeHandoff(
           console.error(`[HANDOFF] Error reading output: ${err.message}`);
           resolve(null);
         }
-        return;
-      }
-
-      if (Date.now() - startTime > TIMEOUT) {
+      },
+      onTimeout: async () => {
+        untrackWatcher(watcher);
         await channel.send(
           `**${capitalize(toAgent)}:** Timed out after 3 minutes.`
         );
         resolve(null);
+      },
+      timeoutMs: 180_000,
+      fallbackPollMs: 2000,
+      retryReadMs: 100,
+    });
+    trackWatcher(watcher);
+    watcher.start();
+
+    // Keep typing indicator alive
+    const typingInterval = setInterval(() => {
+      if (watcher.isStopped()) {
+        clearInterval(typingInterval);
         return;
       }
-
-      setTimeout(poll, POLL_INTERVAL);
-    };
-
-    setTimeout(poll, POLL_INTERVAL);
+      channel.sendTyping().catch(() => {});
+    }, 8000);
   });
 }
 

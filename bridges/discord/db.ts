@@ -1,0 +1,268 @@
+import Database from "better-sqlite3";
+import { existsSync, readFileSync, renameSync } from "fs";
+import { join } from "path";
+
+const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
+const DB_PATH = join(HARNESS_ROOT, "bridges", "discord", "harness.db");
+
+let db: Database.Database | null = null;
+
+export function getDb(): Database.Database {
+  if (db) return db;
+
+  db = new Database(DB_PATH);
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.pragma("synchronous = NORMAL");
+  db.pragma("foreign_keys = ON");
+
+  runMigrations(db);
+  return db;
+}
+
+export function closeDb(): void {
+  if (db) {
+    db.close();
+    db = null;
+  }
+}
+
+function runMigrations(database: Database.Database): void {
+  // Create schema versioning table
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS schema_version (
+      version INTEGER PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  const currentVersion = database
+    .prepare("SELECT MAX(version) as v FROM schema_version")
+    .get() as { v: number | null };
+
+  const version = currentVersion?.v ?? 0;
+
+  if (version < 1) {
+    applyV1(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(1);
+    console.log("[DB] Applied schema v1");
+
+    // Auto-migrate from JSON files
+    migrateFromJson(database);
+  }
+}
+
+function applyV1(database: Database.Database): void {
+  database.exec(`
+    -- Sessions (replaces sessions.json)
+    CREATE TABLE IF NOT EXISTS sessions (
+      channel_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Channel configs (replaces channel-config.json)
+    CREATE TABLE IF NOT EXISTS channel_configs (
+      channel_id       TEXT PRIMARY KEY,
+      agent            TEXT,
+      permission_mode  TEXT,
+      allowed_tools    TEXT,
+      disallowed_tools TEXT,
+      model            TEXT,
+      updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Subagents (replaces subagents.json)
+    CREATE TABLE IF NOT EXISTS subagents (
+      id                TEXT PRIMARY KEY,
+      parent_channel_id TEXT NOT NULL,
+      description       TEXT NOT NULL,
+      agent             TEXT,
+      output_file       TEXT NOT NULL,
+      pid               INTEGER NOT NULL,
+      status            TEXT NOT NULL CHECK (status IN ('running','completed','failed','cancelled')),
+      started_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at      TEXT,
+      stream_message_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_subagents_status ON subagents(status);
+    CREATE INDEX IF NOT EXISTS idx_subagents_channel ON subagents(parent_channel_id);
+
+    -- Projects (replaces projects.json)
+    CREATE TABLE IF NOT EXISTS projects (
+      channel_id        TEXT PRIMARY KEY,
+      category_id       TEXT NOT NULL,
+      guild_id          TEXT NOT NULL,
+      name              TEXT NOT NULL UNIQUE,
+      description       TEXT NOT NULL,
+      agents            TEXT NOT NULL,
+      active_agent      TEXT,
+      handoff_depth     INTEGER NOT NULL DEFAULT 0,
+      max_handoff_depth INTEGER NOT NULL DEFAULT 5,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
+
+    -- Task queue (for bounded-step + retry)
+    CREATE TABLE IF NOT EXISTS task_queue (
+      id            TEXT PRIMARY KEY,
+      channel_id    TEXT NOT NULL,
+      prompt        TEXT NOT NULL,
+      agent         TEXT,
+      session_key   TEXT,
+      status        TEXT NOT NULL CHECK (status IN ('pending','running','waiting_continue','completed','failed','dead')),
+      step_count    INTEGER NOT NULL DEFAULT 0,
+      max_steps     INTEGER NOT NULL DEFAULT 10,
+      attempt       INTEGER NOT NULL DEFAULT 0,
+      max_attempts  INTEGER NOT NULL DEFAULT 3,
+      last_error    TEXT,
+      output_file   TEXT,
+      pid           INTEGER,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      next_retry_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_queue_status ON task_queue(status);
+    CREATE INDEX IF NOT EXISTS idx_task_queue_channel ON task_queue(channel_id);
+
+    -- Dead-letter (failed tasks after all retries exhausted)
+    CREATE TABLE IF NOT EXISTS dead_letter (
+      id         TEXT PRIMARY KEY,
+      task_id    TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      prompt     TEXT NOT NULL,
+      agent      TEXT,
+      error      TEXT NOT NULL,
+      attempts   INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_dead_letter_channel ON dead_letter(channel_id);
+  `);
+}
+
+function migrateFromJson(database: Database.Database): void {
+  const discordDir = join(HARNESS_ROOT, "bridges", "discord");
+
+  // Migrate sessions.json
+  const sessionsPath = join(discordDir, "sessions.json");
+  if (existsSync(sessionsPath)) {
+    const count = database.prepare("SELECT COUNT(*) as c FROM sessions").get() as { c: number };
+    if (count.c === 0) {
+      try {
+        const data = JSON.parse(readFileSync(sessionsPath, "utf-8"));
+        const insert = database.prepare(
+          "INSERT INTO sessions (channel_id, session_id, created_at, last_used) VALUES (?, ?, ?, ?)"
+        );
+        let migrated = 0;
+        for (const [channelId, entry] of Object.entries(data) as [string, any][]) {
+          insert.run(channelId, entry.sessionId, entry.createdAt, entry.lastUsed);
+          migrated++;
+        }
+        renameSync(sessionsPath, sessionsPath + ".bak");
+        console.log(`[DB] Migrated ${migrated} sessions from JSON`);
+      } catch (err: any) {
+        console.error(`[DB] Failed to migrate sessions.json: ${err.message}`);
+      }
+    }
+  }
+
+  // Migrate channel-config.json
+  const configPath = join(discordDir, "channel-config.json");
+  if (existsSync(configPath)) {
+    const count = database.prepare("SELECT COUNT(*) as c FROM channel_configs").get() as { c: number };
+    if (count.c === 0) {
+      try {
+        const data = JSON.parse(readFileSync(configPath, "utf-8"));
+        const insert = database.prepare(
+          "INSERT INTO channel_configs (channel_id, agent, permission_mode, allowed_tools, disallowed_tools, model, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        );
+        let migrated = 0;
+        for (const [channelId, entry] of Object.entries(data) as [string, any][]) {
+          insert.run(
+            channelId,
+            entry.agent || null,
+            entry.permissionMode || null,
+            entry.allowedTools ? JSON.stringify(entry.allowedTools) : null,
+            entry.disallowedTools ? JSON.stringify(entry.disallowedTools) : null,
+            entry.model || null,
+            entry.updatedAt || new Date().toISOString()
+          );
+          migrated++;
+        }
+        renameSync(configPath, configPath + ".bak");
+        console.log(`[DB] Migrated ${migrated} channel configs from JSON`);
+      } catch (err: any) {
+        console.error(`[DB] Failed to migrate channel-config.json: ${err.message}`);
+      }
+    }
+  }
+
+  // Migrate subagents.json
+  const subagentsPath = join(discordDir, "subagents.json");
+  if (existsSync(subagentsPath)) {
+    const count = database.prepare("SELECT COUNT(*) as c FROM subagents").get() as { c: number };
+    if (count.c === 0) {
+      try {
+        const data = JSON.parse(readFileSync(subagentsPath, "utf-8"));
+        const insert = database.prepare(
+          "INSERT INTO subagents (id, parent_channel_id, description, agent, output_file, pid, status, started_at, completed_at, stream_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        let migrated = 0;
+        for (const [, entry] of Object.entries(data) as [string, any][]) {
+          insert.run(
+            entry.id,
+            entry.parentChannelId,
+            entry.description,
+            entry.agent || null,
+            entry.outputFile,
+            entry.pid,
+            entry.status,
+            entry.startedAt,
+            entry.completedAt || null,
+            entry.streamMessageId || null
+          );
+          migrated++;
+        }
+        renameSync(subagentsPath, subagentsPath + ".bak");
+        console.log(`[DB] Migrated ${migrated} subagents from JSON`);
+      } catch (err: any) {
+        console.error(`[DB] Failed to migrate subagents.json: ${err.message}`);
+      }
+    }
+  }
+
+  // Migrate projects.json
+  const projectsPath = join(discordDir, "projects.json");
+  if (existsSync(projectsPath)) {
+    const count = database.prepare("SELECT COUNT(*) as c FROM projects").get() as { c: number };
+    if (count.c === 0) {
+      try {
+        const data = JSON.parse(readFileSync(projectsPath, "utf-8"));
+        const insert = database.prepare(
+          "INSERT INTO projects (channel_id, category_id, guild_id, name, description, agents, active_agent, handoff_depth, max_handoff_depth, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        let migrated = 0;
+        for (const [, entry] of Object.entries(data) as [string, any][]) {
+          insert.run(
+            entry.channelId,
+            entry.categoryId,
+            entry.guildId,
+            entry.name,
+            entry.description,
+            JSON.stringify(entry.agents),
+            entry.activeAgent || null,
+            entry.handoffDepth || 0,
+            entry.maxHandoffDepth || 5,
+            entry.createdAt || new Date().toISOString()
+          );
+          migrated++;
+        }
+        renameSync(projectsPath, projectsPath + ".bak");
+        console.log(`[DB] Migrated ${migrated} projects from JSON`);
+      } catch (err: any) {
+        console.error(`[DB] Failed to migrate projects.json: ${err.message}`);
+      }
+    }
+  }
+}

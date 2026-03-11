@@ -58,6 +58,27 @@ import {
   readdirSync,
 } from "fs";
 import { join } from "path";
+import { getDb, closeDb } from "./db.js";
+import { FileWatcher, trackWatcher, untrackWatcher, stopAllWatchers } from "./file-watcher.js";
+import {
+  submitTask,
+  spawnTask,
+  getTask,
+  getGlobalRunningCount,
+  getRunningCountForChannel,
+  getTaskPidForChannel,
+  cancelChannelTasks,
+  onTaskOutput,
+  onTaskDeadLetter,
+  recoverCrashedTasks,
+  pruneDeadLetters,
+  listDeadLetters,
+  retryDeadLetter,
+  extractResponse,
+  extractSessionId,
+  type TaskRecord,
+  type DeadLetterRecord,
+} from "./task-runner.js";
 
 config();
 
@@ -79,36 +100,12 @@ try {
     try {
       unlinkSync(PID_FILE);
     } catch {}
+    stopAllWatchers();
+    closeDb();
   });
   process.on("SIGINT", () => process.exit(0));
   process.on("SIGTERM", () => process.exit(0));
 } catch {}
-
-// Extract the human-readable response from Claude's JSON output
-function extractResponse(output: string): string | null {
-  try {
-    const jsonStart = output.indexOf('{"type"');
-    if (jsonStart !== -1) {
-      const jsonEnd = output.lastIndexOf("}") + 1;
-      const parsed = JSON.parse(output.slice(jsonStart, jsonEnd));
-      if (parsed.is_error) return `Error: ${parsed.result || "Unknown error"}`;
-      const text = parsed.result || parsed.text || parsed.content;
-      return text ? text.trim() : null;
-    }
-  } catch {}
-
-  const match = output.match(/"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  if (match) {
-    return match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').trim();
-  }
-
-  return null;
-}
-
-function extractSessionId(output: string): string | null {
-  const match = output.match(/"session_id"\s*:\s*"([^"]+)"/);
-  return match ? match[1] : null;
-}
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "")
@@ -118,16 +115,6 @@ const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "")
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const MAX_DISCORD_LENGTH = 1900;
 const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_PROCESSES || "5", 10);
-
-// Global safety guardrails for all Claude invocations
-const GLOBAL_DISALLOWED_TOOLS = [
-  "Bash(rm -rf:*)",
-  "Bash(git push --force:*)",
-  "Bash(git reset --hard:*)",
-  "Bash(DROP:*)",
-  "Bash(DELETE FROM:*)",
-  "Bash(kill -9:*)",
-].join(",");
 
 if (!DISCORD_TOKEN) {
   console.error("DISCORD_TOKEN is required in .env");
@@ -149,7 +136,7 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message],
 });
 
-// --- Per-Channel Queue System ---
+// --- Per-Channel Queue System (backed by task_queue) ---
 interface QueuedTask {
   execute: () => void;
   message: Message;
@@ -157,27 +144,26 @@ interface QueuedTask {
 
 const channelQueues: Map<string, QueuedTask[]> = new Map();
 const activeChannels: Set<string> = new Set();
-const activeProcesses: Map<string, number> = new Map(); // channelId → PID
-let globalRunningCount = 0;
+
+// Track stream pollers and stream messages for active tasks
+const activeStreamPollers: Map<string, StreamPoller> = new Map(); // taskId → StreamPoller
+const activeStreamMessages: Map<string, Message> = new Map(); // taskId → Discord stream message
 
 function processChannelQueue(channelId: string): void {
   if (activeChannels.has(channelId)) return;
-  if (globalRunningCount >= MAX_CONCURRENT) return;
+  if (getGlobalRunningCount() >= MAX_CONCURRENT) return;
 
   const queue = channelQueues.get(channelId);
   if (!queue || queue.length === 0) return;
 
   const task = queue.shift()!;
   activeChannels.add(channelId);
-  globalRunningCount++;
 
   task.execute();
 }
 
 function releaseChannel(channelId: string): void {
   activeChannels.delete(channelId);
-  activeProcesses.delete(channelId);
-  globalRunningCount--;
   // Try to process this channel's next task
   processChannelQueue(channelId);
   // Try to unblock other channels that were waiting on global capacity
@@ -193,7 +179,7 @@ function enqueueTask(channelId: string, task: QueuedTask): boolean {
     channelQueues.set(channelId, []);
   }
 
-  const isQueued = activeChannels.has(channelId) || globalRunningCount >= MAX_CONCURRENT;
+  const isQueued = activeChannels.has(channelId) || getGlobalRunningCount() >= MAX_CONCURRENT;
   channelQueues.get(channelId)!.push(task);
   processChannelQueue(channelId);
   return isQueued;
@@ -272,6 +258,185 @@ try {
   mkdirSync(STREAM_DIR, { recursive: true });
 } catch {}
 
+// --- Task Runner Output Handler ---
+// This is called by task-runner.ts when a task completes or fails
+// We need to map task IDs back to Discord messages
+
+interface PendingTaskContext {
+  message: Message;
+  channelId: string;
+  userText: string;
+  agentName?: string;
+  streamDir: string;
+  isRetry: boolean;
+  activity: AgentActivity;
+}
+
+const pendingTaskContexts: Map<string, PendingTaskContext> = new Map();
+
+onTaskOutput(async (taskId, response, error, sessionId, raw) => {
+  const ctx = pendingTaskContexts.get(taskId);
+  if (!ctx) return;
+
+  const task = getTask(taskId);
+  const isComplete = task?.status === "completed" || task?.status === "dead";
+  const isContinuation = task && task.step_count > 1 && !isComplete;
+
+  // Stop stream poller if task is done
+  if (isComplete) {
+    const poller = activeStreamPollers.get(taskId);
+    if (poller) {
+      poller.stop();
+      activeStreamPollers.delete(taskId);
+    }
+  }
+
+  // For continuation steps, just update the stream message and let it keep going
+  if (isContinuation && response) {
+    const streamMessage = activeStreamMessages.get(taskId);
+    if (streamMessage) {
+      const truncated = response.length > MAX_DISCORD_LENGTH
+        ? response.slice(-MAX_DISCORD_LENGTH)
+        : response;
+      try { await streamMessage.edit(`${truncated}\n\n*Continuing... (step ${task!.step_count})*`); } catch {}
+    }
+    return;
+  }
+
+  // Task is finished (completed or dead)
+  pendingTaskContexts.delete(taskId);
+  const streamMessage = activeStreamMessages.get(taskId);
+  activeStreamMessages.delete(taskId);
+
+  // Clean up stream directory
+  try {
+    const files = readdirSync(ctx.streamDir);
+    for (const f of files) unlinkSync(join(ctx.streamDir, f));
+    unlinkSync(ctx.streamDir);
+  } catch {}
+
+  if (error && !response) {
+    const errorReply = `Something went wrong:\n\`\`\`\n${error.slice(0, 500)}\n\`\`\``;
+    postAgentError(ctx.activity, error).catch(() => {});
+    if (streamMessage) {
+      await streamMessage.edit(errorReply);
+    } else {
+      await ctx.message.reply(errorReply);
+    }
+    releaseChannel(ctx.channelId);
+    return;
+  }
+
+  if (response) {
+    const { message, channelId } = ctx;
+    const project = getProject(channelId);
+    const agentName = ctx.agentName;
+    const channel = message.channel;
+
+    // Check for [CREATE_CHANNEL:name] directive
+    const createDir = parseCreateChannel(response);
+    if (createDir && message.guild) {
+      try {
+        const newProject = await createProject(
+          message.guild,
+          createDir.channelName,
+          createDir.description || `Created by ${agentName || "agent"}`,
+          createDir.agent ? [createDir.agent, ...["researcher", "reviewer", "builder", "ops"].filter(a => a !== createDir.agent)] : undefined
+        );
+        const cleanResponse = response.replace(
+          /\[CREATE_CHANNEL\s*:\s*[\w-]+(?:\s+--agent\s+\w+)?(?:\s+"[^"]*")?\]/i,
+          `*(Created project channel <#${newProject.channelId}>)*`
+        );
+        const chunks = splitMessage(cleanResponse);
+        if (streamMessage) {
+          await streamMessage.edit(chunks[0]);
+          for (let i = 1; i < chunks.length; i++) {
+            await message.reply(chunks[i]);
+          }
+        } else {
+          for (const chunk of chunks) {
+            await message.reply(chunk);
+          }
+        }
+        postAgentComplete(ctx.activity, response).catch(() => {});
+        releaseChannel(channelId);
+        return;
+      } catch (err: any) {
+        console.error(`[CREATE_CHANNEL] Failed: ${err.message}`);
+      }
+    }
+
+    // Check for handoff in project channels
+    if (project && agentName && parseHandoff(response)) {
+      const handoff = parseHandoff(response)!;
+      if (handoff.preHandoffText) {
+        const preChunks = splitMessage(
+          `**${agentName.charAt(0).toUpperCase() + agentName.slice(1)}:** ${handoff.preHandoffText}`
+        );
+        if (streamMessage) {
+          await streamMessage.edit(preChunks[0]);
+          for (let i = 1; i < preChunks.length; i++) {
+            await (channel as TextChannel).send(preChunks[i]);
+          }
+        } else {
+          for (const chunk of preChunks) {
+            await (channel as TextChannel).send(chunk);
+          }
+        }
+      } else if (streamMessage) {
+        await streamMessage.delete().catch(() => {});
+      }
+      releaseChannel(channelId);
+      await runHandoffChain(
+        channel as TextChannel,
+        agentName,
+        response
+      );
+      postAgentComplete(ctx.activity, response).catch(() => {});
+      return;
+    }
+
+    // Normal response
+    const chunks = splitMessage(response);
+    if (streamMessage) {
+      await streamMessage.edit(chunks[0]);
+      for (let i = 1; i < chunks.length; i++) {
+        await message.reply(chunks[i]);
+      }
+    } else {
+      for (const chunk of chunks) {
+        await message.reply(chunk);
+      }
+    }
+
+    postAgentComplete(ctx.activity, response).catch(() => {});
+  } else {
+    console.error("[PARSE ERROR] No response text from task output");
+    const errMsg = "Got a response but couldn't parse it. Check logs.";
+    if (streamMessage) {
+      await streamMessage.edit(errMsg);
+    } else {
+      await ctx.message.reply(errMsg);
+    }
+    postAgentError(ctx.activity, "Parse error").catch(() => {});
+  }
+
+  releaseChannel(ctx.channelId);
+});
+
+onTaskDeadLetter(async (record: DeadLetterRecord) => {
+  try {
+    const ch = client.channels.cache.get(record.channel_id);
+    if (ch && ch.isTextBased()) {
+      await (ch as TextChannel).send(
+        `**Task failed permanently** after ${record.attempts} attempts.\nError: \`${record.error.slice(0, 300)}\`\nTask ID: \`${record.task_id}\`\nUse \`/retry ${record.id}\` to re-enqueue.`
+      );
+    }
+  } catch (err: any) {
+    console.error(`[DEAD-LETTER] Failed to notify channel: ${err.message}`);
+  }
+});
+
 async function handleClaude(
   message: Message,
   userText: string,
@@ -285,83 +450,27 @@ async function handleClaude(
     await (channel as TextChannel).sendTyping();
   }
 
-  // Unique ID for this request (used for temp files)
-  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-  // Build claude command args
-  const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
-
-  // Apply channel config
+  // Determine agent and session key
   const channelConfig = getChannelConfig(channelId);
-
-  // Agent personality — pass as system prompt append
   const agentName = channelConfig?.agent;
-  if (agentName) {
-    const agentPrompt = readAgentPrompt(agentName);
-    if (agentPrompt) {
-      args.push("--append-system-prompt", agentPrompt);
-    }
-  }
 
-  // Permission mode
-  if (channelConfig?.permissionMode) {
-    args.push("--permission-mode", channelConfig.permissionMode);
-  }
-
-  // Model override
-  if (channelConfig?.model) {
-    args.push("--model", channelConfig.model);
-  }
-
-  // Global safety guardrails
-  args.push("--disallowedTools", GLOBAL_DISALLOWED_TOOLS);
-
-  // Channel-specific allowed tools
-  if (channelConfig?.allowedTools?.length) {
-    args.push("--allowedTools", channelConfig.allowedTools.join(","));
-  }
-
-  // Channel-specific disallowed tools (append to global)
-  if (channelConfig?.disallowedTools?.length) {
-    args.push("--disallowedTools", channelConfig.disallowedTools.join(","));
-  }
-
-  // Check for existing session to resume
-  // Project channels use compound keys (channelId:agentName)
   const project = getProject(channelId);
   const sessionKey =
     project && agentName
       ? getProjectSessionKey(channelId, agentName)
       : channelId;
-  const existingSession = getSession(sessionKey);
-  if (existingSession) {
-    args.push("--resume", existingSession);
-  }
 
-  // Add the user's message (-- separator prevents flags from consuming it)
-  args.push("--", userText);
-
-  // Streaming: set up stream directory for this request
-  const streamDir = join(STREAM_DIR, requestId);
-  const outputFile = join(TEMP_DIR, `response-${requestId}.json`);
-
-  const pythonArgs = [
-    `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
-    outputFile,
-    "--stream-dir",
-    streamDir,
-    ...args,
-  ];
-
-  const proc = spawn("python3", pythonArgs, {
-    cwd: HARNESS_ROOT,
-    env: { ...process.env, HARNESS_ROOT },
-    detached: true,
-    stdio: "ignore",
+  // Submit task to the task runner
+  const taskId = submitTask({
+    channelId,
+    prompt: userText,
+    agent: agentName || undefined,
+    sessionKey,
   });
-  proc.unref();
 
-  console.log(`[CLAUDE] Spawned PID ${proc.pid}, channel: ${channelId}, agent: ${agentName || "default"}`);
+  // Set up streaming
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const streamDir = join(STREAM_DIR, requestId);
 
   // Post to activity stream
   const activity: AgentActivity = {
@@ -374,11 +483,32 @@ async function handleClaude(
     if (msgId) activity.streamMessageId = msgId;
   });
 
-  // Set up streaming message updates
+  // Store context for the task output handler
+  pendingTaskContexts.set(taskId, {
+    message,
+    channelId,
+    userText,
+    agentName: agentName || undefined,
+    streamDir,
+    isRetry,
+    activity,
+  });
+
+  // Spawn the task (this creates the process and FileWatcher)
+  const spawnResult = spawnTask(taskId);
+
+  if (!spawnResult) {
+    pendingTaskContexts.delete(taskId);
+    await message.reply("Failed to spawn Claude process.");
+    releaseChannel(channelId);
+    return;
+  }
+
+  // Set up streaming message updates using the task's stream dir
   let streamMessage: Message | null = null;
   let lastStreamText = "";
 
-  const streamPoller = new StreamPoller(streamDir, async (text, toolInfo) => {
+  const streamPoller = new StreamPoller(spawnResult.streamDir, async (text, toolInfo) => {
     try {
       const displayText = toolInfo
         ? `${text}\n\n*${toolInfo}*`
@@ -393,6 +523,7 @@ async function handleClaude(
 
       if (!streamMessage) {
         streamMessage = await message.reply(truncated || "Thinking...");
+        activeStreamMessages.set(taskId, streamMessage);
       } else {
         await streamMessage.edit(truncated);
       }
@@ -401,179 +532,20 @@ async function handleClaude(
     }
   });
 
+  activeStreamPollers.set(taskId, streamPoller);
   streamPoller.start();
 
-  // Track active process for /stop command
-  activeProcesses.set(channelId, proc.pid!);
-
-  // Poll for the output file (no timeout — use /stop to cancel)
-  const POLL_INTERVAL = 1_000;
-
-  const poll = async (): Promise<void> => {
+  // Keep typing indicator alive
+  const typingInterval = setInterval(() => {
+    const task = getTask(taskId);
+    if (!task || task.status === "completed" || task.status === "dead" || task.status === "failed") {
+      clearInterval(typingInterval);
+      return;
+    }
     if ("sendTyping" in channel) {
       (channel as TextChannel).sendTyping().catch(() => {});
     }
-
-    if (existsSync(outputFile)) {
-      streamPoller.stop();
-
-      try {
-        const raw = readFileSync(outputFile, "utf-8");
-        unlinkSync(outputFile);
-
-        const result = JSON.parse(raw);
-        const { stdout, stderr, returncode } = result;
-
-        console.log(
-          `[CLAUDE] returncode: ${returncode}, stdout length: ${(stdout || "").length}`
-        );
-        if (stderr) console.error(`[CLAUDE STDERR] ${stderr.slice(0, 500)}`);
-
-        // Check for stale session error and retry
-        if (
-          returncode !== 0 &&
-          !isRetry &&
-          stderr?.includes("session") &&
-          (stderr?.includes("not found") || stderr?.includes("expired"))
-        ) {
-          console.log(`[CLAUDE] Stale session detected, clearing and retrying`);
-          validateSession(sessionKey);
-          releaseChannel(channelId);
-          await handleClaude(message, userText, true);
-          return;
-        }
-
-        if (returncode !== 0) {
-          const errorMsg =
-            stderr?.trim() || `Claude exited with code ${returncode}`;
-          const errorReply = `Something went wrong:\n\`\`\`\n${errorMsg.slice(0, 500)}\n\`\`\``;
-          postAgentError(activity, errorMsg).catch(() => {});
-          if (streamMessage) {
-            await streamMessage.edit(errorReply);
-          } else {
-            await message.reply(errorReply);
-          }
-        } else {
-          const responseText = extractResponse(stdout);
-          const sessionId = extractSessionId(stdout);
-
-          if (sessionId) {
-            setSession(sessionKey, sessionId);
-          }
-
-          if (responseText) {
-            // Check for [CREATE_CHANNEL:name] directive in agent output
-            const createDir = parseCreateChannel(responseText);
-            if (createDir && message.guild) {
-              try {
-                const newProject = await createProject(
-                  message.guild,
-                  createDir.channelName,
-                  createDir.description || `Created by ${agentName || "agent"}`,
-                  createDir.agent ? [createDir.agent, ...["researcher", "reviewer", "builder", "ops"].filter(a => a !== createDir.agent)] : undefined
-                );
-                // Strip the directive from the response before posting
-                const cleanResponse = responseText.replace(
-                  /\[CREATE_CHANNEL\s*:\s*[\w-]+(?:\s+--agent\s+\w+)?(?:\s+"[^"]*")?\]/i,
-                  `*(Created project channel <#${newProject.channelId}>)*`
-                );
-                const chunks = splitMessage(cleanResponse);
-                if (streamMessage) {
-                  await streamMessage.edit(chunks[0]);
-                  for (let i = 1; i < chunks.length; i++) {
-                    await message.reply(chunks[i]);
-                  }
-                } else {
-                  for (const chunk of chunks) {
-                    await message.reply(chunk);
-                  }
-                }
-                releaseChannel(channelId);
-                return;
-              } catch (err: any) {
-                console.error(`[CREATE_CHANNEL] Failed: ${err.message}`);
-                // Fall through to normal response handling
-              }
-            }
-
-            // Check for handoff in project channels
-            if (project && agentName && parseHandoff(responseText)) {
-              // Post the pre-handoff text, then run the handoff chain
-              const handoff = parseHandoff(responseText)!;
-              if (handoff.preHandoffText) {
-                const preChunks = splitMessage(
-                  `**${agentName.charAt(0).toUpperCase() + agentName.slice(1)}:** ${handoff.preHandoffText}`
-                );
-                if (streamMessage) {
-                  await streamMessage.edit(preChunks[0]);
-                  for (let i = 1; i < preChunks.length; i++) {
-                    await (channel as TextChannel).send(preChunks[i]);
-                  }
-                } else {
-                  for (const chunk of preChunks) {
-                    await (channel as TextChannel).send(chunk);
-                  }
-                }
-              } else if (streamMessage) {
-                await streamMessage.delete().catch(() => {});
-              }
-              // Release channel before handoff chain (it manages its own spawns)
-              releaseChannel(channelId);
-              await runHandoffChain(
-                channel as TextChannel,
-                agentName,
-                responseText
-              );
-              return;
-            }
-
-            const chunks = splitMessage(responseText);
-            if (streamMessage) {
-              // Edit the streaming message with the first chunk
-              await streamMessage.edit(chunks[0]);
-              for (let i = 1; i < chunks.length; i++) {
-                await message.reply(chunks[i]);
-              }
-            } else {
-              for (const chunk of chunks) {
-                await message.reply(chunk);
-              }
-            }
-          } else {
-            console.error("[PARSE ERROR] Raw stdout:", stdout.slice(0, 500));
-            const errMsg = "Got a response but couldn't parse it. Check logs.";
-            if (streamMessage) {
-              await streamMessage.edit(errMsg);
-            } else {
-              await message.reply(errMsg);
-            }
-          }
-        }
-
-        // Post completion to activity stream
-        const streamResult = extractResponse(stdout || "") || "Completed";
-        postAgentComplete(activity, streamResult).catch(() => {});
-      } catch (err: any) {
-        console.error("[FILE READ ERROR]", err.message);
-        await message.reply("Error reading Claude's response. Check logs.");
-        postAgentError(activity, err.message || "File read error").catch(() => {});
-      }
-
-      // Clean up stream directory
-      try {
-        const files = readdirSync(streamDir);
-        for (const f of files) unlinkSync(join(streamDir, f));
-        unlinkSync(streamDir);
-      } catch {}
-
-      releaseChannel(channelId);
-      return;
-    }
-
-    setTimeout(poll, POLL_INTERVAL);
-  };
-
-  setTimeout(poll, POLL_INTERVAL);
+  }, 8000);
 }
 
 // --- Command Handler ---
@@ -581,9 +553,9 @@ async function handleClaude(
 async function handleCommand(message: Message, content: string): Promise<boolean> {
   const channelId = message.channel.id;
 
-  // /stop — kill the active Claude process in this channel
+  // /stop — kill the active task in this channel
   if (content === "/stop") {
-    const pid = activeProcesses.get(channelId);
+    const pid = getTaskPidForChannel(channelId);
     if (!pid) {
       await message.reply("Nothing running in this channel.");
       return true;
@@ -591,7 +563,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     try {
       process.kill(pid, "SIGTERM");
     } catch {}
-    activeProcesses.delete(channelId);
+    cancelChannelTasks(channelId);
     releaseChannel(channelId);
     await message.reply("Stopped the active request.");
     return true;
@@ -659,7 +631,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
       await message.reply(`Agent \`${name}\` already exists.`);
       return true;
     }
-    const template = `# ${name.charAt(0).toUpperCase() + name.slice(1)} Agent\n\n${description}\n\n## Behavior\n- Follow the description above\n- Be thorough and precise\n\n## Default Tools\nAll tools available. Destructive Bash commands are blocked by guardrails.\n`;
+    const template = `# ${name.charAt(0).toUpperCase() + name.slice(1)} Agent\n\n${description}\n\n## Behavior\n- Follow the description above\n- Be thorough and precise\n- If your work is not complete and you need to continue, end your response with [CONTINUE]. If you are done, do not include this marker.\n\n## Default Tools\nAll tools available. Destructive Bash commands are blocked by guardrails.\n`;
     writeFileSync(agentFile, template);
     await message.reply(`Agent \`${name}\` created.`);
     return true;
@@ -895,6 +867,62 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     return true;
   }
 
+  // /dead-letter — list dead-lettered tasks
+  if (content === "/dead-letter") {
+    const deadLetters = listDeadLetters();
+    if (deadLetters.length === 0) {
+      await message.reply("No dead-lettered tasks.");
+    } else {
+      const lines = deadLetters.slice(0, 10).map(
+        (dl) =>
+          `• \`${dl.id}\` — <#${dl.channel_id}> — ${dl.error.slice(0, 80)} (${dl.attempts} attempts, ${dl.created_at.slice(0, 16)})`
+      );
+      await message.reply(
+        `**Dead-lettered tasks (${deadLetters.length}):**\n${lines.join("\n")}${deadLetters.length > 10 ? `\n... and ${deadLetters.length - 10} more` : ""}`
+      );
+    }
+    return true;
+  }
+
+  // /retry <id> — re-enqueue a dead-lettered task
+  const retryMatch = content.match(/^\/retry\s+(\S+)$/);
+  if (retryMatch) {
+    const newTaskId = retryDeadLetter(retryMatch[1]);
+    if (newTaskId) {
+      await message.reply(`Task re-enqueued as \`${newTaskId}\`. It will run automatically.`);
+      // Spawn it
+      spawnTask(newTaskId);
+    } else {
+      await message.reply(`Dead-letter entry \`${retryMatch[1]}\` not found.`);
+    }
+    return true;
+  }
+
+  // /db-status — show database stats
+  if (content === "/db-status") {
+    const db = getDb();
+    const tables = ["sessions", "channel_configs", "subagents", "projects", "task_queue", "dead_letter"];
+    const counts: string[] = [];
+    for (const table of tables) {
+      const row = db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get() as { c: number };
+      counts.push(`• ${table}: ${row.c} rows`);
+    }
+
+    // DB file size
+    const dbPath = join(HARNESS_ROOT, "bridges", "discord", "harness.db");
+    let sizeStr = "unknown";
+    try {
+      const stats = readFileSync(dbPath);
+      const sizeKb = Math.round(stats.length / 1024);
+      sizeStr = sizeKb < 1024 ? `${sizeKb} KB` : `${(sizeKb / 1024).toFixed(1)} MB`;
+    } catch {}
+
+    await message.reply(
+      `**Database Status:**\nFile size: ${sizeStr}\n${counts.join("\n")}`
+    );
+    return true;
+  }
+
   // /help — list all commands
   if (content === "/help") {
     await message.reply(
@@ -917,6 +945,9 @@ async function handleCommand(message: Message, content: string): Promise<boolean
 • \`/project list\` — List active projects
 • \`/project agents <a1,a2,...>\` — Set project agents
 • \`/project close\` — Archive project channel
+• \`/dead-letter\` — List failed tasks (dead-letter queue)
+• \`/retry <id>\` — Re-enqueue a dead-lettered task
+• \`/db-status\` — Show database table counts and file size
 *Channels under the Projects category are auto-adopted on first message.*
 *Agents can create channels with \`[CREATE_CHANNEL:name]\` in their output.*
 • \`/help\` — Show this help message`
@@ -1001,15 +1032,28 @@ client.on("clientReady", () => {
   console.log(`Working directory: ${HARNESS_ROOT}`);
   console.log(`Max concurrent processes: ${MAX_CONCURRENT}`);
 
+  // Initialize SQLite database (lazy init happens on first getDb() call)
+  console.log("[DB] Initializing SQLite database...");
+  getDb(); // Force init on startup
+  console.log("[DB] Database ready");
+
   // Initialize activity stream
   initActivityStream(client);
 
-  // Start subagent polling
+  // Start subagent watching (now event-driven via FileWatcher)
   startSubagentPolling();
 
   // Clean up stale subagents from previous runs
   const cleaned = cleanupStale();
   if (cleaned > 0) console.log(`[SUBAGENT] Cleaned up ${cleaned} stale entries`);
+
+  // Recover crashed tasks from previous run
+  const recovered = recoverCrashedTasks();
+  if (recovered > 0) console.log(`[TASK] Recovered ${recovered} crashed tasks`);
+
+  // Prune old dead-letter entries
+  const pruned = pruneDeadLetters(7);
+  if (pruned > 0) console.log(`[TASK] Pruned ${pruned} old dead-letter entries`);
 
   // Set up subagent completion notifications
   onSubagentComplete(async (entry, result) => {
@@ -1030,7 +1074,7 @@ client.on("clientReady", () => {
     }
   });
 
-  // Start notification drain polling
+  // Start notification drain polling (keep as-is)
   setInterval(drainNotifications, NOTIFY_POLL_MS);
   console.log(`[NOTIFY] Polling every ${NOTIFY_POLL_MS / 1000}s`);
 });
@@ -1113,7 +1157,7 @@ client.on("messageCreate", async (message: Message) => {
 
   const wasQueued = enqueueTask(channelId, task);
   if (wasQueued) {
-    await message.react("⏳");
+    await message.react("\u23f3");
   }
 });
 

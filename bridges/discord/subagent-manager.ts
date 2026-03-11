@@ -9,6 +9,7 @@ import {
   postError,
 } from "./activity-stream.js";
 import { getChannelConfig } from "./channel-config-store.js";
+import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -143,65 +144,85 @@ export function spawnSubagent(options: SpawnOptions): registry.SubagentEntry | n
     }
   });
 
+  // Set up FileWatcher instead of polling
+  const watcher = new FileWatcher({
+    filePath: outputFile,
+    onFile: (content: string) => {
+      untrackWatcher(watcher);
+      handleSubagentOutput(entry, content).catch((err) =>
+        console.error(`[SUBAGENT] Output handler error for ${id}: ${err.message}`)
+      );
+    },
+    onTimeout: () => {
+      untrackWatcher(watcher);
+      console.log(`[SUBAGENT] ${id} timed out after ${SUBAGENT_TIMEOUT}s`);
+      registry.update(id, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+      });
+      postError(entry, `Timed out after ${SUBAGENT_TIMEOUT}s`).catch(() => {});
+      if (notifyCallback) {
+        notifyCallback({ ...entry, status: "failed" }, `Timed out after ${SUBAGENT_TIMEOUT}s`);
+      }
+    },
+    timeoutMs: SUBAGENT_TIMEOUT * 1000,
+    fallbackPollMs: 3000,
+    retryReadMs: 100,
+  });
+  trackWatcher(watcher);
+  watcher.start();
+
   console.log(`[SUBAGENT] Spawned ${id}: "${options.description}" (PID ${proc.pid})`);
   return entry;
 }
 
-let pollInterval: ReturnType<typeof setInterval> | null = null;
+async function handleSubagentOutput(entry: registry.SubagentEntry, content: string): Promise<void> {
+  try {
+    // Clean up the output file
+    if (existsSync(entry.outputFile)) {
+      unlinkSync(entry.outputFile);
+    }
 
+    const result = JSON.parse(content);
+    const { stdout, stderr, returncode } = result;
+
+    if (returncode !== 0) {
+      const errorMsg = stderr?.trim() || `Exited with code ${returncode}`;
+      registry.update(entry.id, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+      });
+      await postError(entry, errorMsg);
+      if (notifyCallback) {
+        notifyCallback(
+          { ...entry, status: "failed" },
+          `Failed: ${errorMsg}`
+        );
+      }
+    } else {
+      const responseText = extractResponse(stdout) || "No response parsed";
+      registry.update(entry.id, {
+        status: "completed",
+        completedAt: new Date().toISOString(),
+      });
+      await postComplete(entry, responseText);
+      if (notifyCallback) {
+        notifyCallback({ ...entry, status: "completed" }, responseText);
+      }
+    }
+  } catch (err: any) {
+    console.error(`[SUBAGENT] Error processing ${entry.id}: ${err.message}`);
+  }
+}
+
+// startPolling and stopPolling are now no-ops — kept for backward compatibility
+// FileWatcher handles per-subagent output detection
 export function startPolling(): void {
-  if (pollInterval) return;
-  pollInterval = setInterval(pollSubagents, 3000);
-  console.log("[SUBAGENT] Polling started (every 3s)");
+  console.log("[SUBAGENT] Using event-driven file watching (FileWatcher per subagent)");
 }
 
 export function stopPolling(): void {
-  if (pollInterval) {
-    clearInterval(pollInterval);
-    pollInterval = null;
-  }
-}
-
-async function pollSubagents(): Promise<void> {
-  const running = registry.getRunning();
-  for (const entry of running) {
-    if (!existsSync(entry.outputFile)) continue;
-
-    try {
-      const raw = readFileSync(entry.outputFile, "utf-8");
-      unlinkSync(entry.outputFile);
-
-      const result = JSON.parse(raw);
-      const { stdout, stderr, returncode } = result;
-
-      if (returncode !== 0) {
-        const errorMsg = stderr?.trim() || `Exited with code ${returncode}`;
-        registry.update(entry.id, {
-          status: "failed",
-          completedAt: new Date().toISOString(),
-        });
-        await postError(entry, errorMsg);
-        if (notifyCallback) {
-          notifyCallback(
-            { ...entry, status: "failed" },
-            `Failed: ${errorMsg}`
-          );
-        }
-      } else {
-        const responseText = extractResponse(stdout) || "No response parsed";
-        registry.update(entry.id, {
-          status: "completed",
-          completedAt: new Date().toISOString(),
-        });
-        await postComplete(entry, responseText);
-        if (notifyCallback) {
-          notifyCallback({ ...entry, status: "completed" }, responseText);
-        }
-      }
-    } catch (err: any) {
-      console.error(`[SUBAGENT] Error processing ${entry.id}: ${err.message}`);
-    }
-  }
+  // No-op — watchers are cleaned up individually or via stopAllWatchers()
 }
 
 export function cancelSubagent(id: string): boolean {

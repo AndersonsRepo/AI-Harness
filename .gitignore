@@ -9,6 +9,10 @@ build/
 .claude/heartbeat-state/
 .tmp/
 .bot.pid
+harness.db
+harness.db-wal
+harness.db-shm
+*.json.bak
 vault/.obsidian/
 heartbeat-tasks/*.state.json
 heartbeat-tasks/pending-notifications.jsonl
