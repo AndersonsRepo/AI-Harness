@@ -58,6 +58,11 @@ import {
   readdirSync,
 } from "fs";
 import { join } from "path";
+import {
+  approveLearning,
+  rejectLearning,
+  getVaultStats,
+} from "./promotion-handler.js";
 import { getDb, closeDb } from "./db.js";
 import { FileWatcher, trackWatcher, untrackWatcher, stopAllWatchers } from "./file-watcher.js";
 import {
@@ -867,6 +872,44 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     return true;
   }
 
+  // /approve <id> — approve a vault learning for promotion
+  const approveMatch = content.match(/^\/approve\s+(\S+)$/);
+  if (approveMatch) {
+    const result = approveLearning(approveMatch[1]);
+    await message.reply(result.message);
+    return true;
+  }
+
+  // /reject <id> — reject a vault learning for promotion
+  const rejectMatch = content.match(/^\/reject\s+(\S+)$/);
+  if (rejectMatch) {
+    const result = rejectLearning(rejectMatch[1]);
+    await message.reply(result.message);
+    return true;
+  }
+
+  // /vault-status — show vault learning stats
+  if (content === "/vault-status") {
+    const stats = getVaultStats();
+    const statusLines = Object.entries(stats.byStatus)
+      .map(([k, v]) => `  ${k}: ${v}`)
+      .join("\n");
+    const typeLines = Object.entries(stats.byType)
+      .map(([k, v]) => `  ${k}: ${v}`)
+      .join("\n");
+    const recentLines = stats.recentLearnings
+      .map((l) => `  • ${l.id}: ${l.title} (×${l.recurrence})`)
+      .join("\n");
+    await message.reply(
+      `**Vault Status** (${stats.total} learnings)\n` +
+        `**By status:**\n${statusLines || "  (none)"}\n` +
+        `**By type:**\n${typeLines || "  (none)"}\n` +
+        `**Promotion candidates:** ${stats.promotionCandidates}\n` +
+        `**Top learnings:**\n${recentLines || "  (none)"}`
+    );
+    return true;
+  }
+
   // /dead-letter — list dead-lettered tasks
   if (content === "/dead-letter") {
     const deadLetters = listDeadLetters();
@@ -945,6 +988,9 @@ async function handleCommand(message: Message, content: string): Promise<boolean
 • \`/project list\` — List active projects
 • \`/project agents <a1,a2,...>\` — Set project agents
 • \`/project close\` — Archive project channel
+• \`/approve <id>\` — Approve a vault learning for promotion to CLAUDE.md
+• \`/reject <id>\` — Reject a vault learning promotion
+• \`/vault-status\` — Show vault learning stats and promotion candidates
 • \`/dead-letter\` — List failed tasks (dead-letter queue)
 • \`/retry <id>\` — Re-enqueue a dead-lettered task
 • \`/db-status\` — Show database table counts and file size
