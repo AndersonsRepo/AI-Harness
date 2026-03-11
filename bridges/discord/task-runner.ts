@@ -7,6 +7,7 @@ import { getChannelConfig } from "./channel-config-store.js";
 import { getProject } from "./project-manager.js";
 import { getProjectSessionKey } from "./handoff-router.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
+import { assembleContext } from "./context-assembler.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -205,7 +206,7 @@ function readAgentPrompt(name: string): string | null {
   return readFileSync(agentFile, "utf-8");
 }
 
-export function spawnTask(taskId: string): { pid: number; outputFile: string; streamDir: string } | null {
+export async function spawnTask(taskId: string): Promise<{ pid: number; outputFile: string; streamDir: string } | null> {
   const task = getTask(taskId);
   if (!task) return null;
 
@@ -229,6 +230,18 @@ export function spawnTask(taskId: string): { pid: number; outputFile: string; st
     if (agentPrompt) {
       args.push("--append-system-prompt", agentPrompt);
     }
+  }
+
+  // Context injection (deterministic daemon)
+  const context = await assembleContext({
+    channelId: task.channel_id,
+    prompt: task.prompt,
+    agentName: agentName || "default",
+    sessionKey: task.session_key || task.channel_id,
+    taskId: task.id,
+  });
+  if (context) {
+    args.push("--append-system-prompt", context);
   }
 
   // Permission mode
@@ -343,7 +356,7 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
       validateSession(sessionKey);
       // Immediate retry (counts as attempt 1)
       updateTask(taskId, { attempt: 1, status: "pending", last_error: "Stale session - retrying" });
-      spawnTask(taskId);
+      await spawnTask(taskId);
       return;
     }
 
@@ -377,7 +390,7 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
       }
 
       // Spawn next step
-      spawnTask(taskId);
+      await spawnTask(taskId);
       return;
     }
 
@@ -445,11 +458,11 @@ async function handleFailure(taskId: string, error: string): Promise<void> {
   });
 
   // Schedule the retry
-  setTimeout(() => {
+  setTimeout(async () => {
     const current = getTask(taskId);
     if (current && current.status === "failed") {
       updateTask(taskId, { status: "pending", step_count: 0 });
-      spawnTask(taskId);
+      await spawnTask(taskId);
     }
   }, backoffSeconds * 1000);
 }

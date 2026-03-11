@@ -10,6 +10,7 @@ import {
 } from "./project-manager.js";
 import { getSession, setSession } from "./session-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
+import { assembleContext } from "./context-assembler.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -221,6 +222,18 @@ export async function executeHandoff(
   const agentPrompt = readAgentPrompt(toAgent);
   if (agentPrompt) {
     args.push("--append-system-prompt", agentPrompt);
+  }
+
+  // Context injection (deterministic daemon)
+  const daemonContext = await assembleContext({
+    channelId: channel.id,
+    prompt: handoffMessage,
+    agentName: toAgent,
+    sessionKey: getProjectSessionKey(channel.id, toAgent),
+    taskId: "handoff",
+  });
+  if (daemonContext) {
+    args.push("--append-system-prompt", daemonContext);
   }
 
   // Safety guardrails
