@@ -78,7 +78,7 @@ def run_claude(prompt, allowed_tools=None, timeout=300, env_passthrough=None):
 
     clean_env = {
         "HOME": os.environ.get("HOME", ""),
-        "USER": os.environ.get("USER", "user"),
+        "USER": os.environ.get("USER", ""),
         "PATH": os.path.join(os.environ.get("HOME", ""), ".local", "bin") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "SHELL": os.environ.get("SHELL", "/bin/zsh"),
         "LANG": os.environ.get("LANG", "en_US.UTF-8"),
