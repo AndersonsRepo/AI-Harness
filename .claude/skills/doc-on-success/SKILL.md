@@ -1,12 +1,24 @@
 ---
 name: doc-on-success
-description: After a feature is implemented or a bug is fixed, confirm success with the user and then update project documentation. Triggers when work is completed and verified.
+description: After a feature is implemented or a bug is fixed, confirm success with the user and then update project documentation.
 user-invocable: false
+allowed-tools:
+  - Read
+  - Write
+  - Edit
+  - Glob
+  - Grep
+  - Bash
+model: sonnet
 ---
 
 # Document on Success
 
 After completing a feature implementation or bug fix, follow this process **every time**.
+
+## Recent Changes
+!`git diff --stat HEAD~3 2>/dev/null || echo "(no git history)"`
+!`git log --oneline -5 2>/dev/null || echo "(no git history)"`
 
 ## Step 1: Confirm Success with the User
 

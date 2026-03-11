@@ -2,6 +2,12 @@
 name: self-improve
 description: Captures learnings, errors, and corrections to enable continuous improvement. Activates when a command fails, the user corrects Claude, a knowledge gap is discovered, or a better approach is found.
 user-invocable: false
+allowed-tools:
+  - Read
+  - Write
+  - Glob
+  - Grep
+  - Edit
 ---
 
 # Self-Improvement Engine
@@ -41,115 +47,12 @@ Each entry is an **individual markdown file** in `vault/learnings/` with YAML fr
 
 To determine the next sequence number (XXX), list existing files in `vault/learnings/` matching today's date and the entry type prefix, then increment.
 
-### Learning Entry (LRN)
+### Templates
 
-```markdown
----
-id: LRN-YYYYMMDD-XXX
-logged: YYYY-MM-DDTHH:MM:SS
-type: learning
-priority: low | medium | high | critical
-status: new | resolved | promoted
-category: correction | knowledge_gap | best_practice
-area: frontend | backend | infra | tools | docs | config | general
-agent: main | researcher | discord | reviewer
-project: ai-harness | mento | client-project | general
-pattern-key: short-kebab-case-identifier
-recurrence-count: 1
-first-seen: YYYY-MM-DD
-last-seen: YYYY-MM-DD
-tags: [tag1, tag2, tag3]
-related:
-  - "[[LRN-YYYYMMDD-XXX]]"
-  - "[[ERR-YYYYMMDD-XXX]]"
----
-
-# Title of the learning
-
-## What happened
-Description of the situation.
-
-## What was learned
-The actual insight or correction.
-
-## Why it matters
-Impact or consequence of not knowing this.
-```
-
-### Error Entry (ERR)
-
-```markdown
----
-id: ERR-YYYYMMDD-XXX
-logged: YYYY-MM-DDTHH:MM:SS
-type: error
-severity: low | medium | high | critical
-status: new | investigating | resolved | wont_fix
-category: tool_failure | config_error | api_error | runtime_error
-area: frontend | backend | infra | tools | docs | config | general
-agent: main | researcher | discord | reviewer
-project: ai-harness | mento | client-project | general
-pattern-key: short-kebab-case-identifier
-recurrence-count: 1
-first-seen: YYYY-MM-DD
-last-seen: YYYY-MM-DD
-tags: [tag1, tag2, tag3]
-related:
-  - "[[ERR-YYYYMMDD-XXX]]"
----
-
-# Title of the error
-
-## Command
-The command or operation that failed.
-
-## Error
-Actual error message or output.
-
-## Environment
-Relevant context (OS, tool version, project).
-
-## Root Cause
-What went wrong (fill in when resolved).
-
-## Fix
-How it was fixed (fill in when resolved).
-```
-
-### Feature Request Entry (FEAT)
-
-```markdown
----
-id: FEAT-YYYYMMDD-XXX
-logged: YYYY-MM-DDTHH:MM:SS
-type: feature
-status: requested | in_progress | built | wont_build
-complexity: simple | medium | complex
-area: frontend | backend | infra | tools | docs | config | general
-agent: main | researcher | discord | reviewer
-project: ai-harness | mento | client-project | general
-pattern-key: short-kebab-case-identifier
-recurrence-count: 1
-first-seen: YYYY-MM-DD
-last-seen: YYYY-MM-DD
-tags: [tag1, tag2, tag3]
-related: []
----
-
-# Title of the feature request
-
-## Requested capability
-What the user wants.
-
-## User context
-Why they want it.
-
-## Suggested implementation
-How it could be built.
-
-## Skill candidate
-Yes | No — could this become a reusable skill?
-```
+See template files for the full frontmatter and body format:
+- [templates/learning.md](templates/learning.md) — LRN template
+- [templates/error.md](templates/error.md) — ERR template
+- [templates/feature.md](templates/feature.md) — FEAT template
 
 ## Recurring Pattern Detection
 

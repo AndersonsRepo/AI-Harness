@@ -1,12 +1,19 @@
 ---
 name: find-skill
-description: Discovers existing skills or creates new ones when the user asks for capabilities that don't exist. Triggers on "how do I", "is there a skill", "can you", "I wish you could", "is there a way to".
+description: Discovers existing skills or creates new ones when the user asks for capabilities that don't exist.
 user-invocable: true
+argument-hint: "<search query>"
+context: fork
+agent: researcher
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
 ---
 
-# Skill Discovery & Auto-Generation
+# Skill Discovery
 
-When the user asks for a capability, search for it before saying "I can't". If nothing exists, offer to build it.
+When the user asks for a capability, search for it before saying "I can't".
 
 ## Usage
 
@@ -54,50 +61,9 @@ Check if there's an existing heartbeat task that addresses the need:
 1. Use `Glob` to list `heartbeat-tasks/*.json` files
 2. Read configs and check if any task's `prompt` or `name` relates to the query
 
-### Step 5: Offer to Build a New Skill
+### If No Match Found
 
-If no matches found in any of the above:
-
-1. Tell the user:
-   > "I don't have a skill for that yet. Want me to create one?"
-
-2. If the user agrees, scaffold a new SKILL.md:
-
-```markdown
----
-name: <kebab-case-name>
-description: <one-line description of what the skill does>
-user-invocable: true
----
-
-# <Skill Name>
-
-## What it does
-<Description of the capability>
-
-## Steps
-1. <Step-by-step instructions for the skill>
-
-## Example usage
-`/skill-name <args>`
-```
-
-3. Write the file to `.claude/skills/<name>/SKILL.md`
-4. Also log a FEAT entry in `vault/learnings/` using the self-improve format:
-   - `type: feature`
-   - `status: built`
-   - Link to the new skill in the body
-
-### Step 6: Log Feature Request (if user declines)
-
-If the user doesn't want a skill built right now:
-
-1. Log a FEAT entry in `vault/learnings/` with:
-   - `status: requested`
-   - The user's original query as the "Requested capability"
-   - `tags` extracted from the query for future searchability
-
-This ensures the request is discoverable if someone asks for something similar later.
+If no matches found in any of the above, report your findings and suggest the user run `./scripts/extract-skill.sh <name>` to scaffold a new skill, or ask Claude to build it in the main conversation.
 
 ## Search Tips
 
