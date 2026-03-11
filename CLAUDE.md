@@ -160,6 +160,7 @@ Run `HARNESS_ROOT=/path/to/AI-Harness npx tsx bridges/discord/test-upgrade.ts` t
 - **`--verbose` for stream-json**: `claude -p --output-format stream-json` requires `--verbose`. The `claude-runner.py` handles this.
 - **LaunchAgent + TCC**: macOS blocks launchd-spawned processes from `~/Desktop`. Use symlink `~/.local/ai-harness → ~/Desktop/AI-Harness`.
 - **Clean env ≠ no auth**: `env -i` strips Claude auth. Pass full env minus CLAUDE* vars instead.
+- **HARNESS_ROOT required**: Always set `HARNESS_ROOT=/path/to/AI-Harness` when starting the bot. Without it, `db.ts` resolves `./bridges/discord/harness.db` relative to cwd, which fails if cwd is `bridges/discord/`.
 
 ---
 
