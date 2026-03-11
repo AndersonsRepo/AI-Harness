@@ -1,10 +1,10 @@
 {
   "name": "session-cleanup",
-  "prompt": "Read bridges/discord/sessions.json. For each session, check if the 'lastActivity' timestamp is older than 7 days from now. Remove any stale sessions and write the cleaned file back. Report how many sessions were removed.",
+  "prompt": "Open the SQLite database at bridges/discord/harness.db using the Bash tool with: sqlite3 bridges/discord/harness.db. Delete sessions older than 7 days: DELETE FROM sessions WHERE last_used < datetime('now', '-7 days'); Report how many were removed using: SELECT changes();",
   "interval_minutes": 1440,
   "notify": null,
   "discord_channel": null,
-  "allowed_tools": ["Read", "Write"],
+  "allowed_tools": ["Bash"],
   "enabled": true,
   "timeout": 120,
   "created": "2025-03-10T00:00:00"

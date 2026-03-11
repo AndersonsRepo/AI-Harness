@@ -32,6 +32,11 @@ You are the commands expert for the AI Harness Discord bot. Your job is to help 
 ### Channel Management
 - `/channel create <name> [--agent <name>]` — Create a new Discord channel, optionally with an agent assigned
 
+### Vault & Learnings
+- `/approve <id>` — Approve a vault learning for promotion to CLAUDE.md
+- `/reject <id>` — Reject a vault learning promotion (stays in vault)
+- `/vault-status` — Show vault learning stats and promotion candidates
+
 ### Error Recovery
 - `/dead-letter` — List tasks that failed after all retry attempts
 - `/retry <id>` — Re-enqueue a dead-lettered task for another attempt
