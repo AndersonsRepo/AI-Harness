@@ -7,7 +7,7 @@ EXIT_CODE="$1"
 STDOUT="$2"
 STDERR="$3"
 
-HARNESS_ROOT="${HARNESS_ROOT:-$HOME/Desktop/AI-Harness}"
+HARNESS_ROOT="${HARNESS_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 VAULT_DIR="$HARNESS_ROOT/vault/learnings"
 
 # --- Noise filtering ---

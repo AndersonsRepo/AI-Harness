@@ -7,5 +7,5 @@ unset CLAUDE_CODE_ENTRYPOINT
 
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
-cd $HOME/Desktop/AI-Harness/bridges/discord
+cd "$HOME/Desktop/AI-Harness/bridges/discord"
 exec /opt/homebrew/bin/npx tsx bot.ts

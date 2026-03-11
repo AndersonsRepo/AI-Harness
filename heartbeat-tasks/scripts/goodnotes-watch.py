@@ -6,12 +6,15 @@ import json
 import datetime
 import glob
 
-HARNESS_ROOT = os.environ.get("HARNESS_ROOT", "$HOME/.local/ai-harness")
+HARNESS_ROOT = os.environ.get(
+    "HARNESS_ROOT",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 STATE_FILE = os.path.join(TASKS_DIR, "goodnotes-watch.state-files.json")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 EXPORT_DIR = os.path.join(
-    os.path.expanduser("~/Library/CloudStorage/GoogleDrive-REDACTED@example.com"),
+    os.path.expanduser("~/Library/CloudStorage/GoogleDrive-" + os.environ.get("GOOGLE_DRIVE_ACCOUNT", "")),
     "My Drive", "GoodNotes",
 )
 # Fallback: manual exports

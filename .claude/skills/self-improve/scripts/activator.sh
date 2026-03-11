@@ -4,7 +4,7 @@
 # preferences, and external knowledge to vault/learnings/
 
 PROMPT="$1"
-HARNESS_ROOT="${HARNESS_ROOT:-$HOME/Desktop/AI-Harness}"
+HARNESS_ROOT="${HARNESS_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 VAULT_DIR="$HARNESS_ROOT/vault/learnings"
 
 TYPE=""

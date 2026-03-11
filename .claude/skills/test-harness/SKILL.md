@@ -15,7 +15,7 @@ allowed-tools:
 You are testing the AI Harness Discord bot. Your job is to verify that changes work correctly by running automated tests and generating a manual checklist for anything that requires a live Discord connection.
 
 ## Changed Files
-!`cd $HOME/Desktop/AI-Harness/bridges/discord && git diff --name-only HEAD 2>/dev/null || echo "(no changes detected)"`
+!`cd $HARNESS_ROOT/bridges/discord && git diff --name-only HEAD 2>/dev/null || echo "(no changes detected)"`
 
 ## Step 1: Understand What Changed
 
@@ -43,7 +43,7 @@ Map each changed file to its test domain:
 ### 2a. TypeScript Compilation
 
 ```bash
-cd $HOME/Desktop/AI-Harness/bridges/discord
+cd $HARNESS_ROOT/bridges/discord
 npx tsc --noEmit
 ```
 
@@ -60,8 +60,8 @@ node -e "require('better-sqlite3')" 2>&1; echo "EXIT: $?"
 ### 2c. Integration Test Suite
 
 ```bash
-cd $HOME/Desktop/AI-Harness/bridges/discord
-HARNESS_ROOT=$HOME/Desktop/AI-Harness npx tsx test-upgrade.ts
+cd $HARNESS_ROOT/bridges/discord
+npx tsx test-upgrade.ts
 ```
 
 **Expected**: All tests pass. The test suite covers:
@@ -81,7 +81,7 @@ If a test fails, read the assertion name — it tells you exactly what broke.
 Verify no broken imports by checking the module graph:
 
 ```bash
-cd $HOME/Desktop/AI-Harness/bridges/discord
+cd $HARNESS_ROOT/bridges/discord
 # Check that all .ts files can be parsed as modules
 for f in *.ts; do
   echo -n "$f: "
