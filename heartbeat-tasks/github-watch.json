@@ -1,0 +1,11 @@
+{
+  "name": "github-watch",
+  "description": "Poll GitHub repos for new pushes, PRs, and issues",
+  "type": "script",
+  "script": "github-watch.py",
+  "schedule": "15m",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "hey-lexxi-prod",
+  "timeout": 60
+}

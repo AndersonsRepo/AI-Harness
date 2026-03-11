@@ -1,0 +1,13 @@
+{
+  "name": "assignment-reminder",
+  "description": "Check Canvas for assignments due in the next 3 days",
+  "type": "claude",
+  "prompt": "Check Canvas LMS for any assignments due in the next 3 days across all courses. For each upcoming assignment, include: course name, assignment name, due date/time, and points possible. If nothing is due, say so. Format as a concise bullet list.",
+  "schedule": "12h",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "general",
+  "timeout": 120,
+  "env_passthrough": ["CANVAS_API_TOKEN"],
+  "allowed_tools": ["Read", "Bash", "WebFetch"]
+}

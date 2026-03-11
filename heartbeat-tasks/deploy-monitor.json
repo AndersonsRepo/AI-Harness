@@ -1,0 +1,11 @@
+{
+  "name": "deploy-monitor",
+  "description": "Monitor Hey Lexxi Vercel deployments for failures",
+  "type": "script",
+  "script": "deploy-monitor.py",
+  "schedule": "30m",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "general",
+  "timeout": 60
+}

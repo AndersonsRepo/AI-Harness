@@ -67,7 +67,7 @@ def save_state(task_name, state):
     os.rename(tmp, state_path)
 
 
-def run_claude(prompt, allowed_tools=None, timeout=300):
+def run_claude(prompt, allowed_tools=None, timeout=300, env_passthrough=None):
     """Run claude -p with the given prompt. Returns (success, output_text)."""
     claude_args = ["-p", "--output-format", "json"]
     if allowed_tools:
@@ -86,6 +86,13 @@ def run_claude(prompt, allowed_tools=None, timeout=300):
     }
     # Remove CLAUDECODE to avoid nested session detection
     clean_env.pop("CLAUDECODE", None)
+
+    # Pass through integration env vars from task config
+    if env_passthrough:
+        for var in env_passthrough:
+            val = os.environ.get(var)
+            if val:
+                clean_env[var] = val
 
     try:
         result = subprocess.run(
@@ -221,8 +228,9 @@ def run_task(task_name):
     else:
         prompt = config["prompt"]
         allowed_tools = config.get("allowed_tools")
+        env_passthrough = config.get("env_passthrough")
         log(task_name, f"Running claude with prompt: {prompt[:100]}...")
-        success, output = run_claude(prompt, allowed_tools, timeout)
+        success, output = run_claude(prompt, allowed_tools, timeout, env_passthrough)
 
     # Update state
     now = datetime.datetime.now().isoformat()

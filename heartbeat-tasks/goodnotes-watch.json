@@ -1,0 +1,11 @@
+{
+  "name": "goodnotes-watch",
+  "description": "Detect new GoodNotes PDF exports",
+  "type": "script",
+  "script": "goodnotes-watch.py",
+  "schedule": "1h",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "general",
+  "timeout": 30
+}
