@@ -13,10 +13,21 @@ HARNESS_ROOT = os.environ.get(
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 STATE_FILE = os.path.join(TASKS_DIR, "goodnotes-watch.state-files.json")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
-EXPORT_DIR = os.path.join(
-    os.path.expanduser("~/Library/CloudStorage/GoogleDrive-" + os.environ.get("GOOGLE_DRIVE_ACCOUNT", "")),
-    "My Drive", "GoodNotes",
-)
+def _find_google_drive():
+    """Auto-detect the Google Drive CloudStorage mount."""
+    cloud_dir = os.path.expanduser("~/Library/CloudStorage")
+    if os.path.isdir(cloud_dir):
+        for entry in os.listdir(cloud_dir):
+            if entry.startswith("GoogleDrive-"):
+                return os.path.join(cloud_dir, entry, "My Drive", "GoodNotes")
+    # Fallback to env var
+    account = os.environ.get("GOOGLE_DRIVE_ACCOUNT", "")
+    return os.path.join(
+        os.path.expanduser("~/Library/CloudStorage/GoogleDrive-" + account),
+        "My Drive", "GoodNotes",
+    )
+
+EXPORT_DIR = _find_google_drive()
 # Fallback: manual exports
 MANUAL_EXPORT_DIR = os.path.expanduser("~/Documents/GoodNotes-Export")
 
@@ -38,7 +49,7 @@ def save_known_files(files):
 def notify(message):
     notification = {
         "task": "goodnotes-watch",
-        "channel": "general",
+        "channel": "goodnotes",
         "summary": message,
         "timestamp": datetime.datetime.now().isoformat(),
     }

@@ -7,5 +7,5 @@
   "enabled": true,
   "notify": "discord",
   "discord_channel": "goodnotes",
-  "timeout": 30
+  "timeout": 120
 }

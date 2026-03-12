@@ -23,7 +23,7 @@ if not ICAL_URL:
 def notify(message):
     notification = {
         "task": "assignment-reminder",
-        "channel": "general",
+        "channel": "calendar",
         "summary": message,
         "timestamp": datetime.datetime.now().isoformat(),
     }
