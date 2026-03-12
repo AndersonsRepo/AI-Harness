@@ -8,6 +8,7 @@ import { getProject } from "./project-manager.js";
 import { getProjectSessionKey } from "./handoff-router.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
+import { readAgentPrompt, getToolRestrictionArgs } from "./agent-loader.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -200,12 +201,6 @@ function updateTask(id: string, updates: Partial<TaskRecord>): void {
 
 // --- Spawn & execute ---
 
-function readAgentPrompt(name: string): string | null {
-  const agentFile = join(HARNESS_ROOT, ".claude", "agents", `${name}.md`);
-  if (!existsSync(agentFile)) return null;
-  return readFileSync(agentFile, "utf-8");
-}
-
 export async function spawnTask(taskId: string): Promise<{ pid: number; outputFile: string; streamDir: string } | null> {
   const task = getTask(taskId);
   if (!task) return null;
@@ -256,6 +251,12 @@ export async function spawnTask(taskId: string): Promise<{ pid: number; outputFi
 
   // Safety guardrails
   args.push("--disallowedTools", GLOBAL_DISALLOWED_TOOLS);
+
+  // Agent-specific tool restrictions (deterministic, enforced at CLI level)
+  if (agentName) {
+    const restrictionArgs = getToolRestrictionArgs(agentName);
+    args.push(...restrictionArgs);
+  }
 
   // Channel-specific allowed tools
   if (channelConfig?.allowedTools?.length) {

@@ -35,7 +35,7 @@ If the knowledge file and your assumptions conflict, trust the knowledge file.
 If your work is not complete, end your response with [CONTINUE]. If done, do not include this marker.
 
 ## Inter-Agent Communication
-Available agents: researcher, reviewer, builder, ops, project, commands
+Available agents: orchestrator, researcher, reviewer, builder, ops, project, commands
 
 To hand off: complete your work first, then on the last line:
     [HANDOFF:agent_name] Clear description of what you need them to do

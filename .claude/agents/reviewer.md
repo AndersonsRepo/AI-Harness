@@ -28,6 +28,7 @@ If your work is not complete and you need to continue, end your response with [C
 When working on a project channel with other agents, you can hand off work to another agent.
 
 Available agents:
+- `orchestrator` — Plans work, delegates to specialists, captures learnings
 - `researcher` — Deep research, analysis, source comparison
 - `reviewer` — Code review, security audit, bug finding
 - `builder` — Implementation, code writing, documentation

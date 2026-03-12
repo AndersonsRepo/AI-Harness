@@ -142,7 +142,7 @@ All managed via macOS launchd (`~/Library/LaunchAgents/`):
 | assignment-reminder | 12 hr | Canvas LMS due date alerts |
 | daily-digest | 24 hr | Learning summary |
 | promotion-check | 24 hr | Surface learnings ready for promotion |
-| github-watch | Periodic | Monitor repo activity (disabled — replaced by webhooks + repo-scanner) |
+| github-watch | Disabled | Replaced by native GitHub→Discord webhooks + repo-scanner |
 | repo-scanner | 6 hr | Security/hygiene scan: secrets, debug artifacts, .env, large files, npm audit |
 | session-debrief | 3 hr | Extract knowledge from Claude Code transcripts (hybrid LLM + deterministic dedup) |
 | learning-pruner | 7 days | Clean low-value learnings |
@@ -259,6 +259,8 @@ HARNESS_ROOT=/path/to/AI-Harness npx tsx bot.ts
 | `HARNESS_ROOT` | Yes | Absolute path to AI-Harness root |
 | `STREAM_CHANNEL_ID` | No | Discord channel for agent activity stream |
 | `OLLAMA_URL` | No | Ollama API URL (default: `http://localhost:11434`) |
+| `CANVAS_ICAL_URL` | No | Canvas LMS iCal feed URL (enables assignment reminders) |
+| `CLAUDE_TRANSCRIPTS_DIR` | No | Claude Code transcripts directory (for session-debrief) |
 
 ### Load Heartbeat Tasks
 

@@ -12,6 +12,7 @@ import { getSession, setSession } from "./session-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
 import { monitor } from "./truncation-monitor.js";
+import { readAgentPrompt, getToolRestrictionArgs } from "./agent-loader.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -72,33 +73,62 @@ export function parseHandoff(output: string): HandoffDirective | null {
 export async function buildProjectContext(
   channel: TextChannel,
   agentName: string,
-  project: { name: string; description: string; agents: string[] }
+  project: { name: string; description: string; agents: string[] },
+  chainContext?: { completedPhases: ChainEntry[]; currentTask: string }
 ): Promise<string> {
-  const messages = await channel.messages.fetch({ limit: MAX_CONTEXT_MESSAGES });
-  const sorted = [...messages.values()].reverse(); // Oldest first
-
   const contextLines: string[] = [
     `[Project: ${project.name}]`,
     `Description: ${project.description}`,
     `Participating agents: ${project.agents.join(", ")}`,
     `You are the ${agentName} agent.`,
     "",
-    "--- Recent conversation ---",
   ];
 
-  for (const msg of sorted) {
-    const author = msg.author.bot ? extractAgentName(msg.content) : msg.author.username;
-    const content =
-      msg.content.length > MAX_MSG_LENGTH
-        ? msg.content.slice(0, MAX_MSG_LENGTH) + "..."
-        : msg.content;
-    const timeAgo = getTimeAgo(msg.createdTimestamp);
-    contextLines.push(`${author} (${timeAgo}): ${content}`);
+  // If chain context exists, use it instead of raw Discord scraping
+  if (chainContext && chainContext.completedPhases.length > 0) {
+    contextLines.push("--- Completed phases ---");
+    for (const entry of chainContext.completedPhases) {
+      const truncated = entry.response.length > 300
+        ? entry.response.slice(0, 300) + "..."
+        : entry.response;
+      contextLines.push(`[${entry.agent}]: ${truncated}`);
+    }
+    contextLines.push("--- End ---");
+    contextLines.push("");
+
+    // Abbreviated recent messages as fallback context (last 5, 300 chars each)
+    const messages = await channel.messages.fetch({ limit: 5 });
+    const sorted = [...messages.values()].reverse();
+    if (sorted.length > 0) {
+      contextLines.push("--- Recent messages (abbreviated) ---");
+      for (const msg of sorted) {
+        const author = msg.author.bot ? extractAgentName(msg.content) : msg.author.username;
+        const content = msg.content.length > 300
+          ? msg.content.slice(0, 300) + "..."
+          : msg.content;
+        contextLines.push(`${author}: ${content}`);
+      }
+      contextLines.push("--- End ---");
+    }
+  } else {
+    // No chain context — use full Discord message history
+    const messages = await channel.messages.fetch({ limit: MAX_CONTEXT_MESSAGES });
+    const sorted = [...messages.values()].reverse();
+
+    contextLines.push("--- Recent conversation ---");
+    for (const msg of sorted) {
+      const author = msg.author.bot ? extractAgentName(msg.content) : msg.author.username;
+      const content =
+        msg.content.length > MAX_MSG_LENGTH
+          ? msg.content.slice(0, MAX_MSG_LENGTH) + "..."
+          : msg.content;
+      const timeAgo = getTimeAgo(msg.createdTimestamp);
+      contextLines.push(`${author} (${timeAgo}): ${content}`);
+    }
+    contextLines.push("--- End of conversation ---");
   }
 
   contextLines.push(
-    "",
-    "--- End of conversation ---",
     "",
     `Respond as the ${agentName} agent. When you need another agent's expertise, use [HANDOFF:agent_name] followed by what you need them to do.`,
     `Available agents: ${project.agents.join(", ")}`,
@@ -144,18 +174,32 @@ function extractSessionId(output: string): string | null {
   return match ? match[1] : null;
 }
 
-function readAgentPrompt(name: string): string | null {
-  const agentFile = join(HARNESS_ROOT, ".claude", "agents", `${name}.md`);
-  if (!existsSync(agentFile)) return null;
-  return readFileSync(agentFile, "utf-8");
-}
-
 export function getProjectSessionKey(
   channelId: string,
   agentName: string
 ): string {
   return `${channelId}:${agentName}`;
 }
+
+// --- Chain Log Types ---
+
+export interface ChainEntry {
+  agent: string;
+  response: string; // truncated to ~2000 chars for debrief context
+  timestamp: number;
+}
+
+export interface ChainResult {
+  entries: ChainEntry[];
+  originAgent: string;
+}
+
+// --- Review Gate (deterministic) ---
+// After chain terminates, if the final agent is in this map and the target
+// reviewer hasn't already participated, a review is auto-injected.
+const REVIEW_GATE: Record<string, string> = {
+  builder: "reviewer",
+};
 
 export interface HandoffResult {
   agentName: string;
@@ -168,7 +212,8 @@ export async function executeHandoff(
   fromAgent: string,
   toAgent: string,
   handoffMessage: string,
-  preHandoffText: string
+  preHandoffText: string,
+  chainContext?: { completedPhases: ChainEntry[]; currentTask: string }
 ): Promise<HandoffResult | null> {
   const project = getProject(channel.id);
   if (!project) return null;
@@ -214,7 +259,7 @@ export async function executeHandoff(
   updateProject(channel.id, { activeAgent: toAgent });
 
   // Build context and spawn target agent
-  const context = await buildProjectContext(channel, toAgent, project);
+  const context = await buildProjectContext(channel, toAgent, project, chainContext);
   const prompt = `${context}\n\n${capitalize(fromAgent)} has handed off to you with this request:\n${handoffMessage}`;
 
   // Build claude args
@@ -240,6 +285,10 @@ export async function executeHandoff(
 
   // Safety guardrails
   args.push("--disallowedTools", GLOBAL_DISALLOWED_TOOLS);
+
+  // Agent-specific tool restrictions (deterministic, enforced at CLI level)
+  const restrictionArgs = getToolRestrictionArgs(toAgent);
+  args.push(...restrictionArgs);
 
   // Session resume with compound key
   const sessionKey = getProjectSessionKey(channel.id, toAgent);
@@ -355,8 +404,19 @@ export async function executeHandoff(
 export async function runHandoffChain(
   channel: TextChannel,
   initialAgent: string,
-  initialResponse: string
-): Promise<void> {
+  initialResponse: string,
+  options?: { originAgent?: string }
+): Promise<ChainResult> {
+  const chainEntries: ChainEntry[] = [];
+  const originAgent = options?.originAgent || initialAgent;
+
+  // Record the initial agent's response in the chain log
+  chainEntries.push({
+    agent: initialAgent,
+    response: initialResponse.slice(0, 2000),
+    timestamp: Date.now(),
+  });
+
   let handoff = parseHandoff(initialResponse);
   let fromAgent = initialAgent;
 
@@ -366,10 +426,18 @@ export async function runHandoffChain(
       fromAgent,
       handoff.targetAgent,
       handoff.message,
-      handoff.preHandoffText
+      handoff.preHandoffText,
+      { completedPhases: chainEntries, currentTask: handoff.message }
     );
 
     if (!result) break; // Chain ended (error, depth limit, or invalid agent)
+
+    // Record this agent's response in the chain log
+    chainEntries.push({
+      agent: result.agentName,
+      response: result.response.slice(0, 2000),
+      timestamp: Date.now(),
+    });
 
     // Post the responding agent's non-handoff text
     if (result.nextHandoff) {
@@ -390,6 +458,47 @@ export async function runHandoffChain(
     fromAgent = result.agentName;
     handoff = result.nextHandoff;
   }
+
+  // --- Review Gate (deterministic) ---
+  // If the final agent is in REVIEW_GATE and the reviewer hasn't participated, auto-inject
+  const finalAgent = chainEntries[chainEntries.length - 1]?.agent;
+  const reviewerAgent = finalAgent ? REVIEW_GATE[finalAgent] : undefined;
+
+  if (reviewerAgent) {
+    const reviewerAlreadyParticipated = chainEntries.some((e) => e.agent === reviewerAgent);
+    const project = getProject(channel.id);
+
+    if (!reviewerAlreadyParticipated && project && project.agents.includes(reviewerAgent)) {
+      const lastEntry = chainEntries[chainEntries.length - 1];
+      const reviewPrompt = `Review the following ${finalAgent} output for quality, correctness, and potential issues:\n\n${lastEntry.response}`;
+
+      await channel.send(`*Auto-review: ${capitalize(finalAgent)} output → ${capitalize(reviewerAgent)}*`);
+
+      const reviewResult = await executeHandoff(
+        channel,
+        finalAgent,
+        reviewerAgent,
+        reviewPrompt,
+        "" // no pre-handoff text
+      );
+
+      if (reviewResult) {
+        chainEntries.push({
+          agent: reviewResult.agentName,
+          response: reviewResult.response.slice(0, 2000),
+          timestamp: Date.now(),
+        });
+
+        // Post review output
+        const chunks = monitor.splitForDiscord(
+          `**${capitalize(reviewResult.agentName)}:** ${reviewResult.response}`, 1900, "handoff:review-gate"
+        );
+        for (const chunk of chunks) await channel.send(chunk);
+      }
+    }
+  }
+
+  return { entries: chainEntries, originAgent };
 }
 
 function capitalize(s: string): string {
