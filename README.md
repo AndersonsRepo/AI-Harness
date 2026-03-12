@@ -16,7 +16,7 @@ Claude Code is powerful, but it forgets everything between sessions. Every conve
 - **Mistakes that stick** — Errors and corrections auto-logged, deduplicated, and promoted to permanent instructions after recurring 3+ times
 - **Skills that grow** — Reusable workflows extracted into standalone skill files
 - **Agents that collaborate** — Specialized personalities (builder, researcher, reviewer, ops) that hand off work to each other
-- **Background autonomy** — 12 scheduled tasks running via macOS launchd: deployment monitoring, assignment reminders, vault maintenance, and more
+- **Background autonomy** — 13 scheduled tasks running via macOS launchd: deployment monitoring, assignment reminders, vault maintenance, and more
 
 The core philosophy: **the LLM handles language; deterministic infrastructure handles everything else** — memory retrieval, context assembly, routing, scheduling, and state management.
 
@@ -50,8 +50,11 @@ The core philosophy: **the LLM handles language; deterministic infrastructure ha
               |   agent memory, daily)    |
               +---------------------------+
                             |
-                    MCP Vault Server
-                  (7 tools via JSON-RPC)
+              +---------------------------+
+              |       MCP Servers         |
+              |  mcp-vault (7 tools)      |
+              |  mcp-harness (9 tools)    |
+              +---------------------------+
 ```
 
 ### The Self-Improvement Loop
@@ -127,7 +130,7 @@ Specialized personalities that hand off work to each other:
 
 Agents communicate via `[HANDOFF:agent_name]` directives with depth limits and safety checks.
 
-### Background Tasks (12 Heartbeat Jobs)
+### Background Tasks (13 Heartbeat Jobs)
 All managed via macOS launchd (`~/Library/LaunchAgents/`):
 
 | Task | Interval | Purpose |
@@ -152,7 +155,9 @@ All managed via macOS launchd (`~/Library/LaunchAgents/`):
 - **Storage**: JSON file (brute-force cosine similarity is sub-millisecond for <1000 entries)
 - **Upgrade path**: sqlite-vec when vault exceeds 500 files
 
-### MCP Vault Server
+### MCP Servers (2 Custom)
+
+#### MCP Vault Server (`mcp-vault`)
 Custom Model Context Protocol server exposing the vault as 7 tools:
 
 | Tool | Purpose |
@@ -164,6 +169,21 @@ Custom Model Context Protocol server exposing the vault as 7 tools:
 | `vault_promote_candidates` | Find learnings ready for promotion |
 | `vault_sync_embeddings` | Full re-index of vault embeddings |
 | `vault_stats` | Vault analytics |
+
+#### MCP Harness Server (`mcp-harness`)
+Infrastructure observability server exposing 9 tools for system health and diagnostics:
+
+| Tool | Purpose |
+|------|---------|
+| `harness_health` | System health: bot PID, DB tables, heartbeat states, vault stats, truncation metrics |
+| `harness_digest` | Learning summaries by date range with category breakdown |
+| `harness_heartbeat_list` | All tasks with config, state, and launchd status |
+| `harness_heartbeat_toggle` | Enable/disable a heartbeat task |
+| `harness_heartbeat_run` | Manually execute a script-type task |
+| `harness_context_preview` | Keyword extraction + vault search preview for a prompt |
+| `harness_skills` | List all skills with frontmatter metadata |
+| `harness_agents` | List all agents with descriptions and skill routing |
+| `harness_truncation_report` | Detailed truncation stats and recent events |
 
 ### Truncation Monitor
 All truncation operations are wrapped with observability:
@@ -261,8 +281,11 @@ AI-Harness/
 │   ├── activity-stream.ts     # Discord embeds for #agent-stream
 │   └── promotion-handler.ts   # Learning -> CLAUDE.md promotion
 │
-├── mcp-servers/mcp-vault/     # MCP server for vault operations
-│   └── index.ts               # 7 tools: search, read, write, list, promote, sync, stats
+├── mcp-servers/
+│   ├── mcp-vault/             # MCP server for vault operations
+│   │   └── index.ts           # 7 tools: search, read, write, list, promote, sync, stats
+│   └── mcp-harness/           # MCP server for infrastructure observability
+│       └── index.ts           # 9 tools: health, digest, heartbeat, context, skills, agents, truncation
 │
 ├── .claude/
 │   ├── skills/                # 15 skill definitions (SKILL.md + supporting scripts)
@@ -332,7 +355,7 @@ Most AI agent frameworks focus on prompt chaining or tool use. AI Harness focuse
 
 4. **Observable truncation** — Every truncation in the system is monitored, logged, and reported. When content is cut, the LLM is told explicitly and given tools to fetch the full version.
 
-5. **Background autonomy** — 12 scheduled tasks run independently: monitoring deployments, checking assignments, pruning the vault, draining notifications. The system works while you sleep.
+5. **Background autonomy** — 13 scheduled tasks run independently: monitoring deployments, checking assignments, pruning the vault, draining notifications. The system works while you sleep.
 
 ---
 

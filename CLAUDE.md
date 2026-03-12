@@ -53,7 +53,7 @@ This section contains verified knowledge about how this project works. If you're
 
 ### Context Injection Daemon
 
-Every Claude invocation gets a deterministic context block injected via `--append-system-prompt` **before the LLM sees the prompt**. The assembler queries SQLite + vault and builds a ~1500-token context window.
+Every Claude invocation gets a deterministic context block injected via `--append-system-prompt` **before the LLM sees the prompt**. The assembler queries SQLite + vault and builds a ~5000-token context window (~20,000 chars).
 
 **Module**: `bridges/discord/context-assembler.ts`
 **Injected at**: `task-runner.ts` (spawnTask), `handoff-router.ts` (executeHandoff), `subagent-manager.ts` (spawnSubagent)
@@ -70,6 +70,8 @@ Priority-ordered sections (trimmed if over budget):
 **Semantic Search**: `bridges/discord/embeddings.ts` — Ollama + nomic-embed-text (768d, local, free). Embeddings stored in `vault/vault-embeddings.json`. Synced on bot startup and when files are written via MCP.
 
 **MCP Vault Server**: `mcp-servers/mcp-vault/` — Registered as `vault` in `~/.claude/Config/mcp-config.json`. Tools: `vault_search`, `vault_read`, `vault_write`, `vault_list`, `vault_promote_candidates`, `vault_sync_embeddings`, `vault_stats`.
+
+**MCP Harness Server**: `mcp-servers/mcp-harness/` — Registered as `harness` in `~/.claude/Config/mcp-config.json`. Tools: `harness_health`, `harness_digest`, `harness_heartbeat_list`, `harness_heartbeat_toggle`, `harness_heartbeat_run`, `harness_context_preview`, `harness_skills`, `harness_agents`, `harness_truncation_report`.
 
 ### System Overview
 
@@ -120,6 +122,7 @@ Discord user → bot.ts (queue + command dispatch)
 | `bridges/discord/context-assembler.ts` | Deterministic context injection daemon |
 | `bridges/discord/embeddings.ts` | Ollama embedding pipeline + hybrid search |
 | `mcp-servers/mcp-vault/index.ts` | MCP server for vault CRUD + semantic search |
+| `mcp-servers/mcp-harness/index.ts` | MCP server for infrastructure observability (9 tools) |
 | `.claude/agents/*.md` | Agent personalities (researcher, reviewer, builder, ops, commands) |
 
 ### Critical: Claude CLI Spawning Rules

@@ -350,7 +350,34 @@ Before creating a new entry, the server scans all existing entries for a matchin
 
 ---
 
-## 9. Truncation Monitor (`bridges/discord/truncation-monitor.ts`)
+## 9. MCP Harness Server (`mcp-servers/mcp-harness/index.ts`)
+
+An infrastructure observability MCP server that exposes the harness internals as 9 JSON-RPC tools. While `mcp-vault` handles knowledge CRUD, `mcp-harness` handles system diagnostics.
+
+### Tools
+
+| Tool | Input | Output |
+|------|-------|--------|
+| `harness_health` | — | Bot PID liveness, DB table counts/sizes, heartbeat states, vault stats, truncation metrics |
+| `harness_digest` | date range | Learning summaries with category breakdown |
+| `harness_heartbeat_list` | — | All task configs with state files and launchd plist status |
+| `harness_heartbeat_toggle` | task name, enabled | Updates task config `enabled` flag |
+| `harness_heartbeat_run` | task name | Executes a script-type task immediately, returns stdout |
+| `harness_context_preview` | prompt text | Keyword extraction + vault search results (what would be injected) |
+| `harness_skills` | — | All skill SKILL.md files with parsed frontmatter |
+| `harness_agents` | — | All agent .md files with descriptions and skill routing |
+| `harness_truncation_report` | — | Stats from truncation-stats.json + recent events from JSONL log |
+
+### Design
+
+- Registered as `harness` in `~/.claude/Config/mcp-config.json`
+- Uses `HARNESS_ROOT` env var to locate all files
+- Read-only operations only (except `heartbeat_toggle` and `heartbeat_run`)
+- No vault writes — that's `mcp-vault`'s job
+
+---
+
+## 10. Truncation Monitor (`bridges/discord/truncation-monitor.ts`)
 
 Every truncation in the system is monitored for data loss.
 
@@ -380,7 +407,7 @@ Instead of hard `text.slice(0, limit)`, the monitor:
 
 ---
 
-## 10. File Watching (`bridges/discord/file-watcher.ts`)
+## 11. File Watching (`bridges/discord/file-watcher.ts`)
 
 Event-driven output detection replaces all polling:
 
