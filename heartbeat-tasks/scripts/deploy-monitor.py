@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Monitor Hey Lexxi Vercel deployments for failures."""
+"""Monitor Vercel deployments for failures.
+
+Reads project list from heartbeat-tasks/projects.json and checks
+all projects with vercel_project: true.
+"""
 
 import subprocess
 import json
@@ -14,14 +18,34 @@ HARNESS_ROOT = os.environ.get(
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 STATE_FILE = os.path.join(TASKS_DIR, "deploy-monitor.vercel-state.json")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
-PROJECT_DIR = os.environ.get("HEY_LEXXI_DIR", os.path.join(os.environ.get("HOME", ""), "Desktop", "Hey-Lexxi-prod"))
+PROJECTS_FILE = os.path.join(TASKS_DIR, "projects.json")
+
+
+def load_projects():
+    """Load projects with vercel_project: true from projects.json."""
+    if not os.path.exists(PROJECTS_FILE):
+        print("No projects.json found. Copy projects.example.json and configure.", file=sys.stderr)
+        return {}
+    with open(PROJECTS_FILE) as f:
+        data = json.load(f)
+    return {
+        name: cfg for name, cfg in data.get("projects", {}).items()
+        if cfg.get("vercel_project")
+    }
+
+
+def resolve_path(path_str):
+    """Resolve $HOME and $HARNESS_ROOT in path strings."""
+    path_str = path_str.replace("$HOME", os.environ.get("HOME", ""))
+    path_str = path_str.replace("$HARNESS_ROOT", HARNESS_ROOT)
+    return path_str
 
 
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
             return json.load(f)
-    return {"last_status": None, "last_url": None}
+    return {}
 
 
 def save_state(state):
@@ -42,11 +66,11 @@ def notify(message):
         f.write(json.dumps(notification) + "\n")
 
 
-def get_latest_deployment():
+def get_latest_deployment(project_dir):
     """Get the latest deployment status from Vercel."""
     try:
         result = subprocess.run(
-            ["vercel", "list", "--cwd", PROJECT_DIR, "-F", "json"],
+            ["vercel", "list", "--cwd", project_dir, "-F", "json"],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
@@ -74,28 +98,40 @@ def get_latest_deployment():
 
 
 def main():
-    prev = load_state()
-    status, url = get_latest_deployment()
-
-    if status is None:
-        print("Could not fetch deployment status")
+    projects = load_projects()
+    if not projects:
+        print("No Vercel projects configured.")
         return
 
-    print(f"Latest deployment: {url} — status: {status}")
+    state = load_state()
 
-    prev_status = prev.get("last_status")
+    for name, cfg in projects.items():
+        project_dir = resolve_path(cfg["path"])
+        print(f"Checking {name} ({project_dir})...")
 
-    # Notify on failure
-    if status in ("ERROR", "FAILED", "CANCELED") and prev_status != status:
-        notify(f"Hey Lexxi deployment FAILED: {url} (status: {status})")
-        print("ALERT: Deployment failure detected, notification sent")
+        status, url = get_latest_deployment(project_dir)
+        if status is None:
+            print(f"  Could not fetch deployment status for {name}")
+            continue
 
-    # Notify on recovery
-    if status == "READY" and prev_status in ("ERROR", "FAILED", "CANCELED"):
-        notify(f"Hey Lexxi deployment recovered: {url} is now READY")
-        print("RECOVERY: Deployment recovered, notification sent")
+        print(f"  Latest: {url} — status: {status}")
 
-    save_state({"last_status": status, "last_url": url})
+        proj_state = state.get(name, {})
+        prev_status = proj_state.get("last_status")
+
+        # Notify on failure
+        if status in ("ERROR", "FAILED", "CANCELED") and prev_status != status:
+            notify(f"{name} deployment FAILED: {url} (status: {status})")
+            print("  ALERT: Deployment failure detected, notification sent")
+
+        # Notify on recovery
+        if status == "READY" and prev_status in ("ERROR", "FAILED", "CANCELED"):
+            notify(f"{name} deployment recovered: {url} is now READY")
+            print("  RECOVERY: Deployment recovered, notification sent")
+
+        state[name] = {"last_status": status, "last_url": url}
+
+    save_state(state)
 
 
 if __name__ == "__main__":

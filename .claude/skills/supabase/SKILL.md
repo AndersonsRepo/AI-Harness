@@ -1,6 +1,6 @@
 ---
 name: supabase
-description: Query the Hey Lexxi Supabase database with safety guardrails.
+description: Query a Supabase/PostgreSQL database with safety guardrails.
 user-invocable: true
 argument-hint: "<query|tables|users|analytics> [args]"
 context: fork
@@ -12,7 +12,7 @@ allowed-tools:
   - Grep
 ---
 
-# Supabase Database — Hey Lexxi Production
+# Supabase Database — Safe Query Interface
 
 ## SAFETY RULES (MANDATORY)
 
@@ -23,7 +23,7 @@ allowed-tools:
 
 **ALLOWED:**
 - `SELECT` on any table (always safe, read-only)
-- `INSERT` on non-critical tables only: `user_preferences`, `feedback`, `support_tickets`
+- `INSERT` on non-critical tables only (user must specify which are safe)
 - `UPDATE` on non-critical tables only, **with a WHERE clause**
 
 **REQUIRED — Before any write operation:**
@@ -65,7 +65,7 @@ GROUP BY 1 ORDER BY 1;
 
 ## Notes
 
-- This is the **production** Hey Lexxi database — treat with extreme caution
+- This is a **production database** — treat with extreme caution
 - The MCP supabase server connects via `$SUPABASE_DB_URL` (wrapper script, no plaintext passwords in config)
-- Future: a read-only `aiharness_reader` Postgres role will provide defense-in-depth
+- Future: a read-only Postgres role provides defense-in-depth
 - `context: fork` ensures queries run in an isolated subagent

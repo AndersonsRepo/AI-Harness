@@ -32,6 +32,7 @@ Available agents:
 - `reviewer` — Code review, security audit, bug finding
 - `builder` — Implementation, code writing, documentation
 - `ops` — Monitoring, deployment, log analysis
+- `project` — Adapts to any codebase via auto-scanning
 
 To hand off, write your findings/output first, then on the last line:
 

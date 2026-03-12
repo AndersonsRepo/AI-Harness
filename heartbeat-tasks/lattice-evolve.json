@@ -1,12 +1,12 @@
 {
   "name": "lattice-evolve",
-  "description": "Lattice agent autonomously develops the generative art system",
+  "description": "Example: autonomous agent task (disabled by default)",
   "type": "claude",
-  "prompt": "You are the Lattice agent. Your project lives at $HARNESS_ROOT/projects/lattice.\n\nDo ONE of the following (pick what feels most impactful right now):\n\n1. **Run evolution** — Run `npx tsx src/evolve.ts` to advance a generation. Report the results.\n2. **Improve the system** — Read the current code, pick one thing to improve, implement it, test it. Ideas: new genome types (reaction-diffusion, Voronoi, wave function collapse), better scoring (fractal dimension, information density), crossover breeding, animated output, a CLI gallery viewer, README with sample output.\n3. **Refactor** — If the code is getting messy, clean it up. Keep it elegant.\n4. **Experiment** — Try something weird. New palettes, 3D projections, music-inspired patterns, emoji art, whatever sounds fun.\n\nAfter making changes:\n- Test with `npx tsx src/evolve.ts` (this also updates docs/gallery.json for the live site)\n- Commit with a descriptive message (include docs/gallery.json)\n- Push to origin (this auto-deploys to https://andersonsrepo.github.io/lattice/)\n- Write a brief summary of what you did and why\n\nDo NOT spend money on any APIs. Pure local computation only.\nKeep changes focused — one meaningful improvement per run, not five half-finished ones.",
+  "prompt": "You are running an autonomous development cycle. Check the project at $HARNESS_ROOT/projects/lattice, run one evolution generation with `npx tsx src/evolve.ts`, report results. Commit and push if interesting changes occurred.",
   "schedule": "1h",
-  "enabled": true,
+  "enabled": false,
   "notify": "discord",
-  "discord_channel": "lattice",
+  "discord_channel": "notifications",
   "allowed_tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
   "timeout": 600
 }

@@ -1,6 +1,6 @@
 {
   "name": "deploy-monitor",
-  "description": "Monitor Hey Lexxi Vercel deployments for failures",
+  "description": "Monitor Vercel deployments for failures (reads from projects.json)",
   "type": "script",
   "script": "deploy-monitor.py",
   "schedule": "30m",

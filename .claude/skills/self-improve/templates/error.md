@@ -8,7 +8,7 @@ status: new | investigating | resolved | wont_fix
 category: tool_failure | config_error | api_error | runtime_error
 area: frontend | backend | infra | tools | docs | config | general
 agent: main | researcher | discord | reviewer
-project: ai-harness | mento | hey-lexxi | general
+project: <project-name or general>
 pattern-key: short-kebab-case-identifier
 recurrence-count: 1
 first-seen: YYYY-MM-DD

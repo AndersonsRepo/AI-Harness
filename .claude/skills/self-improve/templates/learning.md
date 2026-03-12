@@ -8,7 +8,7 @@ status: new | resolved | promoted
 category: correction | knowledge_gap | best_practice
 area: frontend | backend | infra | tools | docs | config | general
 agent: main | researcher | discord | reviewer
-project: ai-harness | mento | hey-lexxi | general
+project: <project-name or general>
 pattern-key: short-kebab-case-identifier
 recurrence-count: 1
 first-seen: YYYY-MM-DD

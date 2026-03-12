@@ -152,7 +152,35 @@ curl -s http://localhost:11434/api/tags | python3 -c "import sys,json; tags=json
 
 ---
 
-## Step 5: Start the Bot
+## Step 5: Register Your Projects (Optional)
+
+Configure which projects the harness should monitor and manage:
+
+```bash
+cp heartbeat-tasks/projects.example.json heartbeat-tasks/projects.json
+```
+
+Edit `heartbeat-tasks/projects.json` with your repos:
+
+```json
+{
+  "projects": {
+    "my-app": {
+      "path": "$HOME/code/my-app",
+      "repo": "myorg/my-app",
+      "discord_channel": "my-app",
+      "vercel_project": true,
+      "description": "My production web app"
+    }
+  }
+}
+```
+
+This file is gitignored — your project list stays local. The deploy-monitor and github-watch heartbeat tasks read from it automatically. The Project agent will also auto-generate `vault/shared/project-knowledge/<name>.md` files when it first interacts with a codebase.
+
+---
+
+## Step 6: Start the Bot
 
 ```bash
 cd bridges/discord
@@ -216,7 +244,7 @@ launchctl load ~/Library/LaunchAgents/com.aiharness.discord-bot.plist
 
 ---
 
-## Step 6: Set Up Heartbeat Tasks (Optional)
+## Step 7: Set Up Heartbeat Tasks (Optional)
 
 Heartbeat tasks are background jobs that run on a schedule via macOS launchd.
 
@@ -257,7 +285,7 @@ launchctl list | grep com.aiharness
 
 ---
 
-## Step 7: Verify Everything Works
+## Step 8: Verify Everything Works
 
 ### Quick Health Check
 

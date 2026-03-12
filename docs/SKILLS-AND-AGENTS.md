@@ -142,8 +142,13 @@ Agents are specialized personalities defined in `.claude/agents/<name>.md`. They
 - Provides usage examples
 - Suggests relevant skills for user's needs
 
-#### Project-Specific Agents
-**Hey-Lexxi**, **Mento**, **LightRAG**, **Lattice** — each has deep context about their respective projects: tech stack, file structure, deployment process, common issues.
+#### Project
+**Focus**: Adapting to any codebase. Auto-configures on first invocation.
+- Scans `package.json` / `pyproject.toml` / `Cargo.toml` for stack detection
+- Reads directory structure, README, CLAUDE.md, git history
+- Writes a `vault/shared/project-knowledge/<name>.md` file for future reference
+- On subsequent invocations, loads existing project-knowledge instead of re-scanning
+- Replaces the need for manually-written project-specific agents
 
 ### Inter-Agent Handoffs
 

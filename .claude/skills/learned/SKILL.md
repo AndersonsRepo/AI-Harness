@@ -28,7 +28,7 @@ Log something you or the user discovered during the current conversation to the 
 1. **Parse the argument** — extract what was learned and the type. Default type is `discovery`.
 
 2. **Determine metadata** from conversation context:
-   - Which project does this relate to? (`ai-harness`, `hey-lexxi`, `mento`, `lightrag`, `lattice`, or `general`)
+   - Which project does this relate to? (check `vault/shared/project-knowledge/` for registered projects, or `general`)
    - What area? (`architecture`, `debugging`, `deployment`, `api`, `database`, `tooling`, `workflow`, etc.)
    - Severity/priority: `high` if it caused a bug or could cause one again, `medium` for useful knowledge, `low` for nice-to-know
 
