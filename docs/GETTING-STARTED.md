@@ -57,10 +57,16 @@ cd bridges/discord
 npm install
 ```
 
-### MCP Vault Server
+### MCP Servers
 
 ```bash
+# Vault server (knowledge CRUD + semantic search)
 cd ../../mcp-servers/mcp-vault
+npm install
+npx tsc
+
+# Harness server (infrastructure observability)
+cd ../mcp-harness
 npm install
 npx tsc
 ```
