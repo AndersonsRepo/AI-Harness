@@ -58,7 +58,7 @@ def save_state(state):
 def notify(message):
     notification = {
         "task": "deploy-monitor",
-        "channel": "general",
+        "channel": "notifications",
         "summary": message,
         "timestamp": datetime.datetime.now().isoformat(),
     }
