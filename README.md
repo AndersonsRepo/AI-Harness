@@ -115,7 +115,7 @@ Skills are reusable, structured capabilities with YAML frontmatter:
 | `self-improve` | Auto-triggered on errors and corrections | Hook-driven |
 | `doc-on-success` | Auto-update docs after confirmed changes | Git-diff aware |
 
-### Agent System (6 Core Agents)
+### Agent System (6 Core + Custom)
 Specialized personalities that hand off work to each other:
 
 - **Builder** — Implementation-focused, writes production code
@@ -123,9 +123,9 @@ Specialized personalities that hand off work to each other:
 - **Reviewer** — Code review with security and quality focus
 - **Ops** — Infrastructure, deployment, database operations
 - **Commands** — Helps users navigate bot capabilities
-- **Project** — Auto-configures for any codebase by scanning its structure, stack, and conventions on first invocation
+- **Project** — Auto-configures for any codebase via MCP tools + living knowledge files
 
-The Project agent replaces the need for manually-written project-specific agents. Point it at any repo and it scans `package.json`/`pyproject.toml`/`Cargo.toml`, directory structure, README, and git history to build working context — then writes a `vault/shared/project-knowledge/<name>.md` file for future reference.
+The Project agent reads from `vault/shared/project-knowledge/<name>.md` — a living document updated by `project_scan` (initial scan) and `session-debrief` (ongoing learnings). Each knowledge file has a **Conventions** section where recurring project-specific patterns are promoted automatically. Custom agents only exist for projects with compliance/safety requirements (e.g., Hey Lexxi for HIPAA).
 
 Agents communicate via `[HANDOFF:agent_name]` directives with depth limits and safety checks.
 
@@ -142,7 +142,9 @@ All managed via macOS launchd (`~/Library/LaunchAgents/`):
 | assignment-reminder | 12 hr | Canvas LMS due date alerts |
 | daily-digest | 24 hr | Learning summary |
 | promotion-check | 24 hr | Surface learnings ready for promotion |
-| github-watch | Periodic | Monitor repo activity |
+| github-watch | Periodic | Monitor repo activity (disabled — replaced by webhooks + repo-scanner) |
+| repo-scanner | 6 hr | Security/hygiene scan: secrets, debug artifacts, .env, large files, npm audit |
+| session-debrief | 3 hr | Extract knowledge from Claude Code transcripts (hybrid LLM + deterministic dedup) |
 | learning-pruner | 7 days | Clean low-value learnings |
 | vault-backup | Periodic | Vault integrity backup |
 | lattice-evolve | Periodic | Generative art evolution |
@@ -154,7 +156,7 @@ All managed via macOS launchd (`~/Library/LaunchAgents/`):
 - **Storage**: JSON file (brute-force cosine similarity is sub-millisecond for <1000 entries)
 - **Upgrade path**: sqlite-vec when vault exceeds 500 files
 
-### MCP Servers (2 Custom)
+### MCP Servers (3 Custom)
 
 #### MCP Vault Server (`mcp-vault`)
 Custom Model Context Protocol server exposing the vault as 7 tools:
@@ -183,6 +185,18 @@ Infrastructure observability server exposing 9 tools for system health and diagn
 | `harness_skills` | List all skills with frontmatter metadata |
 | `harness_agents` | List all agents with descriptions and skill routing |
 | `harness_truncation_report` | Detailed truncation stats and recent events |
+
+#### MCP Projects Server (`mcp-projects`)
+Centralized project management server exposing 6 tools:
+
+| Tool | Purpose |
+|------|---------|
+| `project_list` | List all registered projects with metadata |
+| `project_register` | Add/update a project in the registry |
+| `project_scan` | Auto-scan a project directory and generate knowledge file |
+| `project_context` | Get combined registry + knowledge data for context injection |
+| `project_remove` | Unregister a project (keeps knowledge file) |
+| `project_scan_security` | Run repo security scanner — checks for secrets, debug artifacts, .env files, large files, npm vulnerabilities |
 
 ### Truncation Monitor
 All truncation operations are wrapped with observability:
@@ -283,12 +297,14 @@ AI-Harness/
 ├── mcp-servers/
 │   ├── mcp-vault/             # MCP server for vault operations
 │   │   └── index.ts           # 7 tools: search, read, write, list, promote, sync, stats
-│   └── mcp-harness/           # MCP server for infrastructure observability
-│       └── index.ts           # 9 tools: health, digest, heartbeat, context, skills, agents, truncation
+│   ├── mcp-harness/           # MCP server for infrastructure observability
+│   │   └── index.ts           # 9 tools: health, digest, heartbeat, context, skills, agents, truncation
+│   └── mcp-projects/          # MCP server for project management
+│       └── index.ts           # 6 tools: list, register, scan, context, remove, scan_security
 │
 ├── .claude/
 │   ├── skills/                # 15 skill definitions (SKILL.md + supporting scripts)
-│   ├── agents/                # 6 core agent personalities (+ user-created project agents)
+│   ├── agents/                # 6 core + 1 custom (hey-lexxi for HIPAA). Project knowledge lives in vault.
 │   └── settings.json          # Hook configuration (activator + error-detector)
 │
 ├── heartbeat-tasks/           # Background task definitions + scripts

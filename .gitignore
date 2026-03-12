@@ -26,11 +26,16 @@ heartbeat-tasks/projects.json
 projects/
 context-log/
 vault/vault-embeddings.json
+__pycache__/
 
-# Project-specific agent files (user creates locally, not tracked)
-# The generic project.md agent is tracked instead
-# Project-specific agent files (user creates locally, not tracked)
-# The generic project.md agent is tracked instead
+# Vault entries contain personal session data
+vault/learnings/*
+!vault/learnings/.gitkeep
+vault/shared/scouted/*
+!vault/shared/scouted/.gitkeep
+vault/agents/*
+!vault/agents/.gitkeep
+
 .claude/agents/hey-lexxi.md
 .claude/agents/mento.md
 .claude/agents/lightrag.md

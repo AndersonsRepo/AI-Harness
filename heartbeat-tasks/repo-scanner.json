@@ -1,0 +1,11 @@
+{
+  "name": "repo-scanner",
+  "description": "Scan registered repos for secrets, debug artifacts, large files, and dependency vulnerabilities",
+  "type": "script",
+  "script": "repo-scanner.py",
+  "schedule": "6h",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "notifications",
+  "timeout": 120
+}

@@ -4,7 +4,7 @@
   "type": "script",
   "script": "github-watch.py",
   "schedule": "15m",
-  "enabled": true,
+  "enabled": false,
   "notify": "discord",
   "discord_channel": "notifications",
   "timeout": 60
