@@ -24,10 +24,7 @@ Use `/learned` for each entry. Fill in ALL fields — no placeholders. If nothin
 
 ## Projects I Work On
 
-- **Hey Lexxi** — Production app at https://app.client-project.com (Vercel + Supabase)
-  - Path: `$HOME/Desktop/Hey-Lexxi-prod`
-- **Mento** — Senior project mentorship platform (Next.js + Gemini + LightRAG)
-  - Path: `$HOME/Desktop/Seniorproject/mento`
+Projects are registered in `heartbeat-tasks/projects.json` and their knowledge stored in `vault/shared/project-knowledge/`. The Project agent auto-scans any new codebase on first invocation — no manual configuration needed.
 
 ## Conventions
 
@@ -123,7 +120,7 @@ Discord user → bot.ts (queue + command dispatch)
 | `bridges/discord/embeddings.ts` | Ollama embedding pipeline + hybrid search |
 | `mcp-servers/mcp-vault/index.ts` | MCP server for vault CRUD + semantic search |
 | `mcp-servers/mcp-harness/index.ts` | MCP server for infrastructure observability (9 tools) |
-| `.claude/agents/*.md` | Agent personalities (researcher, reviewer, builder, ops, commands) |
+| `.claude/agents/*.md` | Agent personalities (researcher, reviewer, builder, ops, commands, project) |
 
 ### Critical: Claude CLI Spawning Rules
 
@@ -220,7 +217,7 @@ Skills are Claude Code's mechanism for reusable, structured capabilities. Each s
 | `review-changes` | `/review-changes` | Code review for uncommitted changes; `context: fork` + `agent: reviewer` |
 | `digest` | `/digest` | On-demand learning summaries with date ranges; `context: fork` + `model: sonnet` |
 | `github` | `/github` | GitHub PR/issue/repo management via `gh` CLI; `context: fork` + `agent: ops` |
-| `vercel` | `/vercel` | Vercel deployment management for Hey Lexxi; `model: sonnet` |
+| `vercel` | `/vercel` | Vercel deployment management; `model: sonnet` |
 | `academics` | `/academics` | Canvas LMS + GoodNotes academic tracking; `context: fork` + `agent: researcher` |
 | `supabase` | `/supabase` | Safe Supabase DB queries with SQL guardrails; `context: fork` + `agent: ops` |
 | `scout` | `/scout` | URL/tech evaluation against all projects; `context: fork` + `agent: researcher` + `model: sonnet` |

@@ -2,7 +2,7 @@
 """Poll GitHub repos for new events and notify Discord channels.
 
 Watches for: pushes, PRs (opened/closed/merged), and issues (opened/closed).
-Uses `gh` CLI for API access. Each repo maps to a Discord channel.
+Uses `gh` CLI for API access. Reads repos from heartbeat-tasks/projects.json.
 """
 
 import subprocess
@@ -18,15 +18,24 @@ HARNESS_ROOT = os.environ.get(
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 STATE_FILE = os.path.join(TASKS_DIR, "github-watch.state.json")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
-GH_PATH = "/opt/homebrew/bin/gh"
+PROJECTS_FILE = os.path.join(TASKS_DIR, "projects.json")
+GH_PATH = os.environ.get("GH_PATH", "/opt/homebrew/bin/gh")
 
-# Repos to watch: repo full name -> Discord channel name
-WATCHED_REPOS = {
-    "AndersonsRepo/Hey-Lexxi-prod": "client-project-prod",
-    "tingtingch/mento": "mento",
-    "AndersonsRepo/LightRAG": "lightrag",
-    "AndersonsRepo/lattice": "lattice",
-}
+
+def load_watched_repos():
+    """Load repo -> channel mapping from projects.json."""
+    if not os.path.exists(PROJECTS_FILE):
+        print("No projects.json found. Copy projects.example.json and configure.", file=sys.stderr)
+        return {}
+    with open(PROJECTS_FILE) as f:
+        data = json.load(f)
+    repos = {}
+    for name, cfg in data.get("projects", {}).items():
+        repo = cfg.get("repo")
+        channel = cfg.get("discord_channel", name)
+        if repo:
+            repos[repo] = channel
+    return repos
 
 
 def load_state():
@@ -183,13 +192,18 @@ def check_issues(repo, channel, repo_state):
 
 
 def main():
+    watched_repos = load_watched_repos()
+    if not watched_repos:
+        print("No repos configured. Add projects to heartbeat-tasks/projects.json")
+        return
+
     state = load_state()
     notifications_before = 0
     if os.path.exists(NOTIFY_FILE):
         with open(NOTIFY_FILE) as f:
             notifications_before = len(f.readlines())
 
-    for repo, channel in WATCHED_REPOS.items():
+    for repo, channel in watched_repos.items():
         print(f"Checking {repo} → #{channel}")
         repo_key = repo.replace("/", "_")
         repo_state = state.get(repo_key, {})

@@ -14,9 +14,30 @@ harness.db-wal
 harness.db-shm
 *.json.bak
 vault/.obsidian/
+vault/shared/project-knowledge/*.md
+!vault/shared/project-knowledge/_example.md
 heartbeat-tasks/*.state.json
+heartbeat-tasks/*.state-files.json
+heartbeat-tasks/*.vercel-state.json
 heartbeat-tasks/pending-notifications.jsonl
 heartbeat-tasks/logs/*.log
-projects/lattice/
+heartbeat-tasks/projects.json
+!heartbeat-tasks/projects.example.json
+projects/
 context-log/
 vault/vault-embeddings.json
+
+# Project-specific agent files (user creates locally, not tracked)
+# The generic project.md agent is tracked instead
+# Project-specific agent files (user creates locally, not tracked)
+# The generic project.md agent is tracked instead
+.claude/agents/client-project.md
+.claude/agents/mento.md
+.claude/agents/lightrag.md
+.claude/agents/lattice.md
+
+# Development planning docs (contain personal project references)
+PLAN.md
+PLAN-*.md
+CONTEXT.md
+vault/daily/

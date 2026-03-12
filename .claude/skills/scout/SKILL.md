@@ -17,17 +17,17 @@ allowed-tools:
 
 # Scout — Tech & Resource Evaluator
 
-Analyze a URL and evaluate its relevance to Anderson's projects and the AI Harness system.
+Analyze a URL and evaluate its relevance to the user's projects and the AI Harness system.
 
 ## Projects to evaluate against
+
+Check `vault/shared/project-knowledge/` for registered projects. Always include:
 
 | Project | Stack | Key Concerns |
 |---------|-------|-------------|
 | **AI Harness** | TypeScript, Discord.js, SQLite, Claude CLI, macOS launchd | Agent orchestration, self-improvement, skills, heartbeats |
-| **Hey Lexxi** | Next.js, Supabase, Vercel, Voltagepark | HIPAA compliance, document processing, IFR extraction |
-| **Mento** | Next.js, Prisma, PostgreSQL, Gemini, LightRAG | Mentorship platform, onboarding, chat, RAG |
-| **LightRAG** | Python, FastAPI, Docker, knowledge graphs | Neurodiversity-affirming RAG, entity extraction |
-| **Lattice** | TypeScript, cellular automata, GitHub Pages | Self-evolving generative art, autonomous development |
+
+Add rows from any project-knowledge files found in the vault. If none exist, ask the user what projects they're working on.
 
 ## Steps
 
