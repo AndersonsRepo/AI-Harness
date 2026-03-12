@@ -14,10 +14,10 @@ HARNESS_ROOT = os.environ.get(
 )
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
-ICAL_URL = os.environ.get(
-    "CANVAS_ICAL_URL",
-    "https://canvas.cpp.edu/feeds/calendars/user_QLrf3pCggBFhQ11G1idoAp7Qp1TmNY4OegHPAUe7.ics",
-)
+ICAL_URL = os.environ.get("CANVAS_ICAL_URL", "")
+if not ICAL_URL:
+    print("CANVAS_ICAL_URL not set — skipping")
+    sys.exit(0)
 
 
 def notify(message):
