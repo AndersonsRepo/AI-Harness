@@ -50,6 +50,12 @@ function runMigrations(database: Database.Database): void {
     // Auto-migrate from JSON files
     migrateFromJson(database);
   }
+
+  if (version < 2) {
+    applyV2(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(2);
+    console.log("[DB] Applied schema v2 (oauth, email, linkedin)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -138,6 +144,66 @@ function applyV1(database: Database.Database): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_dead_letter_channel ON dead_letter(channel_id);
+  `);
+}
+
+function applyV2(database: Database.Database): void {
+  database.exec(`
+    -- OAuth tokens for Microsoft + LinkedIn
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+      provider      TEXT PRIMARY KEY,
+      access_token  TEXT NOT NULL,
+      refresh_token TEXT NOT NULL,
+      token_type    TEXT NOT NULL DEFAULT 'Bearer',
+      expires_at    TEXT NOT NULL,
+      scopes        TEXT NOT NULL,
+      extra         TEXT,
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Email index (cached from Graph API)
+    CREATE TABLE IF NOT EXISTS email_index (
+      message_id      TEXT PRIMARY KEY,
+      conversation_id TEXT,
+      subject         TEXT NOT NULL,
+      sender_name     TEXT NOT NULL,
+      sender_email    TEXT NOT NULL,
+      received_at     TEXT NOT NULL,
+      snippet         TEXT,
+      has_attachments INTEGER NOT NULL DEFAULT 0,
+      importance      TEXT,
+      is_read         INTEGER NOT NULL DEFAULT 0,
+      folder          TEXT NOT NULL DEFAULT 'inbox',
+      matched_project TEXT,
+      indexed_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_email_sender ON email_index(sender_email);
+    CREATE INDEX IF NOT EXISTS idx_email_received ON email_index(received_at);
+    CREATE INDEX IF NOT EXISTS idx_email_project ON email_index(matched_project);
+
+    -- Watched senders for email alerts
+    CREATE TABLE IF NOT EXISTS watched_senders (
+      email           TEXT PRIMARY KEY,
+      label           TEXT NOT NULL,
+      discord_channel TEXT NOT NULL DEFAULT 'outlook',
+      project         TEXT,
+      added_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- LinkedIn post drafts + approval flow
+    CREATE TABLE IF NOT EXISTS linkedin_posts (
+      id                 TEXT PRIMARY KEY,
+      status             TEXT NOT NULL CHECK (status IN ('draft','pending_approval','approved','published','rejected')),
+      topic              TEXT NOT NULL,
+      content            TEXT NOT NULL,
+      signals            TEXT,
+      approval_token     TEXT UNIQUE,
+      linkedin_post_id   TEXT,
+      created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+      published_at       TEXT,
+      discord_message_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_linkedin_status ON linkedin_posts(status);
   `);
 }
 

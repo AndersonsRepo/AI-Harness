@@ -1,0 +1,11 @@
+{
+  "name": "email-monitor",
+  "description": "Index new Outlook emails, check watched senders, match projects",
+  "type": "script",
+  "script": "email-monitor.py",
+  "schedule": "15m",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "outlook",
+  "timeout": 60
+}

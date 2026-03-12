@@ -1,0 +1,11 @@
+{
+  "name": "calendar-sync",
+  "description": "Sync Outlook calendar events and notify upcoming (24h window)",
+  "type": "script",
+  "script": "calendar-sync.py",
+  "schedule": "2h",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "outlook",
+  "timeout": 60
+}

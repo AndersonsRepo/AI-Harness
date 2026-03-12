@@ -36,6 +36,7 @@ const SECTION_LIMITS: Record<string, number> = {
   learnings: 8000,
   projectKnowledge: 3000,
   taskHistory: 1200,
+  recentOutlook: 800,
   conventions: 2000,
   gotchas: 2000,
   heartbeats: 800,
@@ -135,7 +136,16 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 5: Conventions + tool gotchas (always load — small files)
+    // Priority 5: Recent Outlook (email + calendar digest)
+    if (totalChars < MAX_TOTAL_CHARS) {
+      const outlookSection = buildRecentOutlookSection();
+      if (outlookSection) {
+        sections.push(monitor.truncate(outlookSection, SECTION_LIMITS.recentOutlook, "context:recent-outlook"));
+        totalChars += Math.min(outlookSection.length, SECTION_LIMITS.recentOutlook);
+      }
+    }
+
+    // Priority 6: Conventions + tool gotchas (always load — small files)
     if (totalChars < MAX_TOTAL_CHARS) {
       const conventionsSection = buildConventionsSection();
       if (conventionsSection) {
@@ -152,7 +162,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 6: Heartbeat status
+    // Priority 7: Heartbeat status
     if (totalChars < MAX_TOTAL_CHARS) {
       const heartbeatSection = buildHeartbeatSection();
       if (heartbeatSection) {
@@ -161,7 +171,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 7: Pending work
+    // Priority 8: Pending work
     if (totalChars < MAX_TOTAL_CHARS) {
       const pendingSection = buildPendingWorkSection(params.channelId);
       if (pendingSection) {
@@ -393,6 +403,68 @@ function buildPendingWorkSection(channelId: string): string | null {
   if (parts.length === 0) return null;
 
   return `## Pending Work\n${parts.map((p) => `- ${p}`).join("\n")}`;
+}
+
+function buildRecentOutlookSection(): string | null {
+  try {
+    const db = getDb();
+
+    // Check if email_index table exists (v2 migration)
+    const tableCheck = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='email_index'")
+      .get();
+    if (!tableCheck) return null;
+
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    // Email summary: count by sender, unread count
+    const emailStats = db
+      .prepare(
+        `SELECT sender_name, COUNT(*) as count, SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) as unread
+         FROM email_index WHERE received_at >= ? GROUP BY sender_email ORDER BY count DESC LIMIT 5`
+      )
+      .all(since) as any[];
+
+    const totalUnread = db
+      .prepare("SELECT COUNT(*) as c FROM email_index WHERE received_at >= ? AND is_read = 0")
+      .get(since) as { c: number };
+
+    // Watched sender alerts
+    const watchedAlerts = db
+      .prepare(
+        `SELECT e.sender_name, e.subject, w.label
+         FROM email_index e JOIN watched_senders w ON e.sender_email = w.email
+         WHERE e.received_at >= ? ORDER BY e.received_at DESC LIMIT 3`
+      )
+      .all(since) as any[];
+
+    // Only include if there's actual data
+    if (emailStats.length === 0 && watchedAlerts.length === 0) return null;
+
+    const lines: string[] = ["## Recent Outlook (24h)"];
+
+    if (totalUnread.c > 0) {
+      lines.push(`Unread: ${totalUnread.c}`);
+    }
+
+    if (emailStats.length > 0) {
+      for (const e of emailStats) {
+        const unreadNote = e.unread > 0 ? ` (${e.unread} new)` : "";
+        lines.push(`- ${e.sender_name}: ${e.count} email(s)${unreadNote}`);
+      }
+    }
+
+    if (watchedAlerts.length > 0) {
+      lines.push("Watched:");
+      for (const a of watchedAlerts) {
+        lines.push(`- [${a.label}] ${a.sender_name}: "${a.subject}"`);
+      }
+    }
+
+    return lines.join("\n");
+  } catch {
+    return null;
+  }
 }
 
 // ─── Keyword Extraction (deterministic, no LLM) ─────────────────────

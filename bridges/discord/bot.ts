@@ -293,15 +293,25 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
     }
   }
 
-  // For continuation steps, just update the stream message and let it keep going
+  // For continuation steps, send the full intermediate response then let it keep going
   if (isContinuation && response) {
     const streamMessage = activeStreamMessages.get(taskId);
-    if (streamMessage) {
-      const truncated = response.length > MAX_DISCORD_LENGTH
-        ? response.slice(-MAX_DISCORD_LENGTH)
-        : response;
-      try { await streamMessage.edit(`${truncated}\n\n*Continuing... (step ${task!.step_count})*`); } catch {}
-    }
+    const channel = ctx.message.channel as TextChannel;
+    const chunks = splitMessage(response);
+    const continuationNote = `\n\n*Continuing... (step ${task!.step_count})*`;
+
+    try {
+      if (streamMessage) {
+        // Edit stream message with first chunk, send rest as follow-ups
+        await streamMessage.edit(chunks[0] + (chunks.length === 1 ? continuationNote : ""));
+        for (let i = 1; i < chunks.length; i++) {
+          const suffix = i === chunks.length - 1 ? continuationNote : "";
+          await channel.send(chunks[i] + suffix);
+        }
+        // Clear stream message ref so next step creates a fresh one
+        activeStreamMessages.delete(taskId);
+      }
+    } catch {}
     return;
   }
 
@@ -1046,6 +1056,65 @@ async function handleCommand(message: Message, content: string): Promise<boolean
   return false;
 }
 
+// --- LinkedIn Approval Flow ---
+
+async function handleLinkedInApproval(message: Message, token: string, approve: boolean): Promise<void> {
+  try {
+    const db = getDb();
+    const post = db
+      .prepare("SELECT id, status, topic, content FROM linkedin_posts WHERE approval_token = ?")
+      .get(token) as { id: string; status: string; topic: string; content: string } | undefined;
+
+    if (!post) {
+      await message.reply("Invalid approval token — no matching draft found.");
+      return;
+    }
+
+    if (post.status === "published") {
+      await message.reply(`Post \`${post.id}\` was already published.`);
+      return;
+    }
+
+    if (approve) {
+      // Update status to approved
+      db.prepare("UPDATE linkedin_posts SET status = 'approved' WHERE id = ?").run(post.id);
+
+      const embed = new EmbedBuilder()
+        .setTitle("LinkedIn Post Approved")
+        .setDescription(`**${post.topic}**\n\n${post.content.slice(0, 300)}${post.content.length > 300 ? "..." : ""}`)
+        .setColor(0x0A66C2) // LinkedIn blue
+        .setFooter({ text: `Post ${post.id} — publishing...` })
+        .setTimestamp();
+
+      await message.reply({ embeds: [embed] });
+
+      // Write a notification to trigger the MCP tool call for publishing
+      // The bot doesn't call MCP directly — instead write instruction to notifications
+      const publishNotif = JSON.stringify({
+        task: "linkedin-publish",
+        channel: "linkedin",
+        summary: `Post ${post.id} approved — call linkedin_post with approvalToken "${token}" to publish.`,
+        timestamp: new Date().toISOString(),
+      });
+      const notifyPath = join(HARNESS_ROOT, "heartbeat-tasks", "pending-notifications.jsonl");
+      writeFileSync(notifyPath, readFileSync(notifyPath, "utf-8") + publishNotif + "\n");
+    } else {
+      db.prepare("UPDATE linkedin_posts SET status = 'rejected', approval_token = NULL WHERE id = ?").run(post.id);
+
+      const embed = new EmbedBuilder()
+        .setTitle("LinkedIn Post Rejected")
+        .setDescription(`**${post.topic}**\n\nDraft rejected and token invalidated.`)
+        .setColor(0xED4245) // Red
+        .setFooter({ text: `Post ${post.id}` })
+        .setTimestamp();
+
+      await message.reply({ embeds: [embed] });
+    }
+  } catch (err: any) {
+    await message.reply(`Error processing approval: ${err.message}`);
+  }
+}
+
 // --- Notification Drain ---
 const NOTIFY_FILE = join(
   HARNESS_ROOT,
@@ -1096,6 +1165,8 @@ async function drainNotifications(): Promise<void> {
           : task.includes("reminder") || task.includes("assignment") ? 0xFEE75C
           : task.includes("goodnotes") || task.includes("notes") ? 0x57F287
           : task.includes("deploy") ? 0x5865F2
+          : task.includes("linkedin") ? 0x0A66C2
+          : task.includes("email") || task.includes("outlook") || task.includes("calendar") ? 0x0078D4
           : 0x2B2D31;
 
         const embed = new EmbedBuilder()
@@ -1225,8 +1296,42 @@ client.on("clientReady", async () => {
         });
         console.log(`[SCHOOL] Created #goodnotes channel in ${guild.name}`);
       }
+      // Outlook email alerts channel under School
+      const outlookCh = guild.channels.cache.find(
+        (c) => c.name === "outlook" && c.parentId === schoolCat!.id
+      );
+      if (!outlookCh) {
+        await guild.channels.create({
+          name: "outlook",
+          type: ChannelType.GuildText,
+          parent: schoolCat.id,
+          topic: "Outlook email alerts, calendar notifications, watched sender alerts",
+          reason: "AI Harness Outlook integration",
+        });
+        console.log(`[SCHOOL] Created #outlook channel in ${guild.name}`);
+      }
     } catch (err: any) {
       console.error(`[SCHOOL] Failed to create school channels: ${err.message}`);
+    }
+  }
+
+  // Ensure "LinkedIn" channel exists (top-level or under a general category)
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const linkedinCh = guild.channels.cache.find(
+        (c) => c.name === "linkedin" && c.type === ChannelType.GuildText
+      );
+      if (!linkedinCh) {
+        await guild.channels.create({
+          name: "linkedin",
+          type: ChannelType.GuildText,
+          topic: "LinkedIn post drafts, approvals, and published confirmations",
+          reason: "AI Harness LinkedIn integration",
+        });
+        console.log(`[LINKEDIN] Created #linkedin channel in ${guild.name}`);
+      }
+    } catch (err: any) {
+      console.error(`[LINKEDIN] Failed to create linkedin channel: ${err.message}`);
     }
   }
 
@@ -1257,6 +1362,18 @@ client.on("messageCreate", async (message: Message) => {
     const handled = await handleCommand(message, content);
     if (handled) return;
     // If not a recognized command, fall through to Claude
+  }
+
+  // !approve / !reject — LinkedIn post approval flow
+  const approveTokenMatch = content.match(/^!approve\s+(\S+)$/);
+  if (approveTokenMatch) {
+    await handleLinkedInApproval(message, approveTokenMatch[1], true);
+    return;
+  }
+  const rejectTokenMatch = content.match(/^!reject\s+(\S+)$/);
+  if (rejectTokenMatch) {
+    await handleLinkedInApproval(message, rejectTokenMatch[1], false);
+    return;
   }
 
   // Auto-adopt channels under the Projects category

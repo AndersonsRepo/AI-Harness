@@ -74,6 +74,10 @@ Priority-ordered sections (trimmed if over budget):
 
 **MCP Projects Server**: `mcp-servers/mcp-projects/` — Registered as `projects` in `~/.claude/Config/mcp-config.json`. Tools: `project_list`, `project_register`, `project_scan`, `project_context`, `project_remove`, `project_scan_security`. Manages the project registry (`heartbeat-tasks/projects.json`) and generates knowledge files in `vault/shared/project-knowledge/`. Security scanning delegates to `heartbeat-tasks/scripts/repo-scanner.py`.
 
+**MCP Outlook Server**: `mcp-servers/mcp-outlook/` — Registered as `outlook` in MCP config. Tools: `outlook_emails`, `outlook_email_read`, `outlook_calendar`, `outlook_senders`, `outlook_summary`. Queries `email_index` SQLite table (fast) and Graph API (live). Auto-refreshes Microsoft OAuth tokens.
+
+**MCP LinkedIn Server**: `mcp-servers/mcp-linkedin/` — Registered as `linkedin` in MCP config. Tools: `linkedin_draft`, `linkedin_post`, `linkedin_history`, `linkedin_profile`. Draft→approve→publish flow with single-use approval tokens. Publishes to LinkedIn REST API.
+
 ### System Overview
 
 ```
@@ -99,6 +103,10 @@ Discord user → bot.ts (queue + command dispatch)
 - `projects` — project channel registration, handoff depth
 - `task_queue` — bounded-step execution, retry state, PID tracking
 - `dead_letter` — tasks that failed after all retry attempts
+- `oauth_tokens` — Microsoft + LinkedIn OAuth tokens (refresh token AES-256-GCM encrypted)
+- `email_index` — cached Outlook emails (indexed by sender, date, project)
+- `watched_senders` — email alert triggers with label and project association
+- `linkedin_posts` — draft→approve→publish flow with single-use approval tokens
 - WAL journal mode for crash safety
 
 **Obsidian Vault** (`vault/`) — long-term agent knowledge/learnings. NOT operational state.
@@ -125,6 +133,11 @@ Discord user → bot.ts (queue + command dispatch)
 | `mcp-servers/mcp-vault/index.ts` | MCP server for vault CRUD + semantic search |
 | `mcp-servers/mcp-harness/index.ts` | MCP server for infrastructure observability (9 tools) |
 | `mcp-servers/mcp-projects/index.ts` | MCP server for project management + security scanning (6 tools) |
+| `mcp-servers/mcp-outlook/index.ts` | MCP server for Outlook email + calendar (5 tools) |
+| `mcp-servers/mcp-linkedin/index.ts` | MCP server for LinkedIn post draft/approve/publish (4 tools) |
+| `bridges/discord/oauth-store.ts` | OAuth token CRUD + AES-256-GCM encryption + auto-refresh |
+| `bridges/discord/oauth-setup.ts` | One-time interactive OAuth flow for Microsoft + LinkedIn |
+| `heartbeat-tasks/scripts/oauth_helper.py` | Python OAuth helper for heartbeat scripts |
 | `bridges/discord/agent-loader.ts` | Shared agent loading, tool restriction definitions |
 | `.claude/agents/*.md` | Agent personalities (orchestrator, researcher, reviewer, builder, ops, commands, project) |
 
@@ -303,6 +316,40 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 | Vercel | `/vercel` | deploy-monitor (30m) | — | confirmation for deploy/rollback |
 | Supabase | `/supabase` | — | supabase (postgres) | fork, SQL whitelist, no DELETEs |
 | Canvas+GoodNotes | `/academics` | assignment-reminder (12h), goodnotes-watch (1h) | canvas | fork, read-only |
+| Outlook | — | email-monitor (15m), calendar-sync (2h) | outlook (5 tools) | OAuth token encryption, auto-refresh |
+| LinkedIn | — | — | linkedin (4 tools) | approval token flow, !approve/!reject in Discord |
+
+### Outlook Integration
+
+**MCP Server**: `mcp-servers/mcp-outlook/` — Registered as `outlook` in MCP config.
+**Tools**: `outlook_emails` (search indexed + live), `outlook_email_read` (full email by ID), `outlook_calendar` (calendar view with school tagging), `outlook_senders` (watched sender CRUD), `outlook_summary` (structured digest for context injection).
+
+**Heartbeat Scripts**:
+- `email-monitor.py` (15m) — indexes new emails, checks watched senders, matches projects, alerts to `#outlook`
+- `calendar-sync.py` (2h) — syncs 48h calendar window, notifies upcoming 24h events, school events to `#calendar`
+
+**Context Injection**: `recentOutlook` section in `context-assembler.ts` (priority 5, 800 chars) — last 24h email summary (by sender, unread count), watched sender alerts. Always-on for every agent.
+
+**Data**: `email_index` table (cached emails), `watched_senders` table (alert triggers).
+
+### LinkedIn Integration
+
+**MCP Server**: `mcp-servers/mcp-linkedin/` — Registered as `linkedin` in MCP config.
+**Tools**: `linkedin_draft` (store draft + approval token → notify `#linkedin`), `linkedin_post` (publish with approval token), `linkedin_history` (query post history), `linkedin_profile` (authenticated user info).
+
+**Approval Flow**: Agent generates content → `linkedin_draft` stores with random approval token → notification to `#linkedin` → user types `!approve <token>` or `!reject <token>` → bot publishes or rejects. Token is single-use and random.
+
+**Data**: `linkedin_posts` table (draft/pending_approval/approved/published/rejected states).
+
+### OAuth Infrastructure
+
+**Token Store**: `bridges/discord/oauth-store.ts` — CRUD + AES-256-GCM encryption for refresh tokens + auto-refresh for Microsoft and LinkedIn.
+
+**Setup**: `npx tsx oauth-setup.ts microsoft` / `npx tsx oauth-setup.ts linkedin` — one-time interactive OAuth flow (temp HTTP server on `:3847`, browser auth, token exchange).
+
+**Python Helper**: `heartbeat-tasks/scripts/oauth_helper.py` — self-contained module for heartbeat scripts to get valid access tokens with auto-refresh.
+
+**DB Tables** (v2 migration): `oauth_tokens` (provider, encrypted refresh token, access token, scopes, expiry).
 
 ---
 
