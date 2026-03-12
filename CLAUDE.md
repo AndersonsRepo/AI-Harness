@@ -125,7 +125,8 @@ Discord user → bot.ts (queue + command dispatch)
 | `mcp-servers/mcp-vault/index.ts` | MCP server for vault CRUD + semantic search |
 | `mcp-servers/mcp-harness/index.ts` | MCP server for infrastructure observability (9 tools) |
 | `mcp-servers/mcp-projects/index.ts` | MCP server for project management + security scanning (6 tools) |
-| `.claude/agents/*.md` | Agent personalities (researcher, reviewer, builder, ops, commands, project) |
+| `bridges/discord/agent-loader.ts` | Shared agent loading, tool restriction definitions |
+| `.claude/agents/*.md` | Agent personalities (orchestrator, researcher, reviewer, builder, ops, commands, project) |
 
 ### Critical: Claude CLI Spawning Rules
 
@@ -144,6 +145,16 @@ These rules are hard-won from debugging. Violating any of them will cause silent
 6. **Detached + stdio ignore** — Spawn `claude-runner.py` with `{ detached: true, stdio: "ignore" }` and call `proc.unref()`. This prevents the parent process from blocking on the child.
 
 7. **Session compound keys** — In project channels, each agent gets its own session via `channelId:agentName`. Regular channels just use `channelId`. See `getProjectSessionKey()` in `handoff-router.ts`.
+
+### Notification Routing Pattern
+
+Heartbeat scripts write to `pending-notifications.jsonl`. The bot's `drainNotifications()` reads the `"channel"` field and resolves it by name against Discord guild channels. **Each script's `notify()` function must set the correct channel name** — the `discord_channel` field in heartbeat JSON configs is metadata only, not used by the drain logic.
+
+Channel mapping: goodnotes-watch → `goodnotes`, assignment-reminder → `calendar`, deploy-monitor → `notifications`, repo-scanner → `notifications`.
+
+### GitHub Webhooks
+
+GitHub→Discord webhooks are configured natively on each repo (not via code). Events (push, PR, issues, release) go to project-specific channels under the "Github" Discord category. This replaced the `github-watch.py` polling script.
 
 ### Store Pattern
 
@@ -182,6 +193,37 @@ All file-based polling has been replaced with `FileWatcher` from `file-watcher.t
 - Self-handoff and unknown-agent handoffs are blocked
 - `[CREATE_CHANNEL:name --agent builder "description"]` creates new project channels
 
+### Orchestrator Agent
+
+The orchestrator is the default agent for new project channels. It plans work, delegates to specialists, and captures learnings.
+
+**Flow:** User message → orchestrator plans phases → hands off to specialist → chain executes → review gate → orchestrator debrief
+
+- **Tool restrictions**: Cannot Edit, Write, NotebookEdit, or run git commit/push/npm commands. Enforced at CLI level via `--disallowedTools`.
+- **Debrief**: When a chain started by the orchestrator completes (2+ agents participated), `invokeOrchestratorDebrief()` in `bot.ts` sends `[CHAIN_COMPLETE]` with a chain summary back to the orchestrator. The orchestrator extracts learnings via `vault_write` and posts a summary.
+- **Chain log**: `ChainResult` with `ChainEntry[]` accumulates each agent's (truncated) response during a handoff chain. Used for structured context injection and debrief.
+
+### Agent Tool Restrictions
+
+Defined in `bridges/discord/agent-loader.ts` (`AGENT_TOOL_RESTRICTIONS`). Applied deterministically at spawn time — the LLM cannot override them.
+
+| Agent | Restriction | Tools |
+|-------|------------|-------|
+| `orchestrator` | disallowed | Edit, Write, NotebookEdit, git commit/push, npm/npx |
+| `researcher` | allowed (whitelist) | Read, Grep, Glob, WebSearch, WebFetch, vault MCP (read-only) |
+| `reviewer` | allowed (whitelist) | Read, Grep, Glob, git diff/log/show |
+| `builder` | global guardrails only | All tools |
+| `ops` | global guardrails only | All tools |
+| `project` | global guardrails only | All tools |
+
+### Review Gate
+
+Deterministic review injection defined in `handoff-router.ts` (`REVIEW_GATE` map). After a handoff chain terminates:
+
+- If the **final agent** is `builder` and `reviewer` has NOT already participated in the chain → auto-inject a reviewer handoff
+- The reviewer gets the builder's output and produces a quality review
+- This is infrastructure-enforced — the builder cannot skip review regardless of LLM output
+
 ### Safety Guardrails
 
 All Claude invocations include `--disallowedTools` blocking:
@@ -201,6 +243,8 @@ Run `HARNESS_ROOT=/path/to/AI-Harness npx tsx bridges/discord/test-upgrade.ts` t
 - **LaunchAgent + TCC**: macOS blocks launchd-spawned processes from `~/Desktop`. Use symlink `~/.local/ai-harness → ~/Desktop/AI-Harness`.
 - **Clean env ≠ no auth**: `env -i` strips Claude auth. Pass full env minus CLAUDE* vars instead.
 - **HARNESS_ROOT required**: Always set `HARNESS_ROOT=/path/to/AI-Harness` when starting the bot. Without it, `db.ts` resolves `./bridges/discord/harness.db` relative to cwd, which fails if cwd is `bridges/discord/`.
+- **Google Drive CloudStorage latency**: `~/Library/CloudStorage/GoogleDrive-*/` is a virtual filesystem. `os.walk()` can take 60-90s with many files. Set heartbeat timeouts accordingly (goodnotes-watch uses 120s).
+- **Heartbeat auto-pause**: 3 consecutive failures auto-disables a task. Reset by setting `consecutive_failures: 0` and `enabled: true` in both the `.state.json` and task `.json` config.
 
 ---
 

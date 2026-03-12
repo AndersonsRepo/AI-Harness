@@ -49,7 +49,9 @@ import {
   parseCreateChannel,
   runHandoffChain,
   getProjectSessionKey,
+  type ChainResult,
 } from "./handoff-router.js";
+import { listAgentNames, readAgentPrompt as loadAgentPrompt } from "./agent-loader.js";
 import {
   readFileSync,
   existsSync,
@@ -237,20 +239,13 @@ function splitMessage(text: string): string[] {
   return chunks;
 }
 
-// List available agent personalities
+// Alias imports to match existing usage
 function listAgents(): string[] {
-  const agentsDir = join(HARNESS_ROOT, ".claude", "agents");
-  if (!existsSync(agentsDir)) return [];
-  return readdirSync(agentsDir)
-    .filter((f) => f.endsWith(".md"))
-    .map((f) => f.replace(".md", ""));
+  return listAgentNames();
 }
 
-// Read an agent's system prompt
 function readAgentPrompt(name: string): string | null {
-  const agentFile = join(HARNESS_ROOT, ".claude", "agents", `${name}.md`);
-  if (!existsSync(agentFile)) return null;
-  return readFileSync(agentFile, "utf-8");
+  return loadAgentPrompt(name);
 }
 
 // Temp directory for Claude response files
@@ -394,11 +389,18 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
         await streamMessage.delete().catch(() => {});
       }
       releaseChannel(channelId);
-      await runHandoffChain(
+      const chainResult = await runHandoffChain(
         channel as TextChannel,
         agentName,
-        response
+        response,
+        { originAgent: agentName }
       );
+
+      // If orchestrator started the chain and there were multiple agents, trigger debrief
+      if (agentName === "orchestrator" && chainResult.entries.length > 1) {
+        await invokeOrchestratorDebrief(channel as TextChannel, chainResult);
+      }
+
       postAgentComplete(ctx.activity, response).catch(() => {});
       return;
     }
@@ -443,6 +445,44 @@ onTaskDeadLetter(async (record: DeadLetterRecord) => {
     console.error(`[DEAD-LETTER] Failed to notify channel: ${err.message}`);
   }
 });
+
+// --- Orchestrator Debrief ---
+// After a chain started by the orchestrator completes, invoke the orchestrator
+// one more time with [CHAIN_COMPLETE] to extract learnings and summarize.
+
+async function invokeOrchestratorDebrief(
+  channel: TextChannel,
+  chainResult: ChainResult
+): Promise<void> {
+  // Build structured summary from chain entries (deterministic — just concatenation)
+  const summaryLines: string[] = ["[CHAIN_COMPLETE]", "", "## Chain Summary", ""];
+  for (const entry of chainResult.entries) {
+    summaryLines.push(`### ${entry.agent}`);
+    summaryLines.push(entry.response);
+    summaryLines.push("");
+  }
+  const summary = summaryLines.join("\n");
+
+  // Submit as a new task to orchestrator
+  const taskId = submitTask({
+    channelId: channel.id,
+    prompt: summary,
+    agent: "orchestrator",
+    sessionKey: getProjectSessionKey(channel.id, "orchestrator"),
+    maxSteps: 3, // Debrief shouldn't need many steps
+    maxAttempts: 1, // Don't retry debriefs
+  });
+
+  const spawnResult = await spawnTask(taskId);
+  if (!spawnResult) {
+    console.error("[DEBRIEF] Failed to spawn orchestrator debrief task");
+    return;
+  }
+
+  // Store context so it gets handled by the normal onTaskOutput flow
+  // We need a synthetic message — use the channel to send updates
+  console.log(`[DEBRIEF] Orchestrator debrief spawned as ${taskId}`);
+}
 
 async function handleClaude(
   message: Message,
