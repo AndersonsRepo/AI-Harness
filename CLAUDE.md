@@ -70,6 +70,10 @@ Priority-ordered sections (trimmed if over budget):
 
 **MCP Harness Server**: `mcp-servers/mcp-harness/` — Registered as `harness` in `~/.claude/Config/mcp-config.json`. Tools: `harness_health`, `harness_digest`, `harness_heartbeat_list`, `harness_heartbeat_toggle`, `harness_heartbeat_run`, `harness_context_preview`, `harness_skills`, `harness_agents`, `harness_truncation_report`.
 
+**Session Debrief**: `heartbeat-tasks/scripts/session-debrief.py` — Runs every 3h. Reads Claude Code transcripts (`.claude/projects/.../*.jsonl`), extracts conversation text (deterministic), sends to Claude Sonnet for knowledge extraction (non-deterministic), then writes vault entries with pattern-key dedup (deterministic). Also appends learnings to relevant `vault/shared/project-knowledge/<name>.md` files. Uses `--model sonnet` for cost efficiency.
+
+**MCP Projects Server**: `mcp-servers/mcp-projects/` — Registered as `projects` in `~/.claude/Config/mcp-config.json`. Tools: `project_list`, `project_register`, `project_scan`, `project_context`, `project_remove`, `project_scan_security`. Manages the project registry (`heartbeat-tasks/projects.json`) and generates knowledge files in `vault/shared/project-knowledge/`. Security scanning delegates to `heartbeat-tasks/scripts/repo-scanner.py`.
+
 ### System Overview
 
 ```
@@ -120,6 +124,7 @@ Discord user → bot.ts (queue + command dispatch)
 | `bridges/discord/embeddings.ts` | Ollama embedding pipeline + hybrid search |
 | `mcp-servers/mcp-vault/index.ts` | MCP server for vault CRUD + semantic search |
 | `mcp-servers/mcp-harness/index.ts` | MCP server for infrastructure observability (9 tools) |
+| `mcp-servers/mcp-projects/index.ts` | MCP server for project management + security scanning (6 tools) |
 | `.claude/agents/*.md` | Agent personalities (researcher, reviewer, builder, ops, commands, project) |
 
 ### Critical: Claude CLI Spawning Rules

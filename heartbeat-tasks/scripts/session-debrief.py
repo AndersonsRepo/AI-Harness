@@ -1,0 +1,637 @@
+#!/usr/bin/env python3
+"""Session debrief — extract knowledge from recent Claude Code conversations.
+
+Hybrid approach: deterministic code handles transcript extraction, dedup, file I/O,
+and routing. The LLM handles the hard part — reading a conversation and deciding
+what's worth remembering.
+
+Usage:
+    python3 session-debrief.py                    # Process most recent transcript
+    python3 session-debrief.py --all              # Process all unprocessed transcripts
+    python3 session-debrief.py --dry-run          # Show what would be extracted, don't write
+    python3 session-debrief.py --transcript UUID  # Process a specific transcript
+"""
+
+import subprocess
+import json
+import os
+import sys
+import re
+import hashlib
+import argparse
+import datetime
+import glob
+
+HARNESS_ROOT = os.environ.get(
+    "HARNESS_ROOT",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
+STATE_FILE = os.path.join(TASKS_DIR, "session-debrief.state.json")
+VAULT_DIR = os.path.join(HARNESS_ROOT, "vault")
+LEARNINGS_DIR = os.path.join(VAULT_DIR, "learnings")
+KNOWLEDGE_DIR = os.path.join(VAULT_DIR, "shared", "project-knowledge")
+PROJECTS_FILE = os.path.join(TASKS_DIR, "projects.json")
+TRANSCRIPTS_DIR = os.environ.get(
+    "CLAUDE_TRANSCRIPTS_DIR",
+    os.path.join(os.environ.get("HOME", ""), ".claude", "projects")
+)
+CLAUDE_PATH = os.path.join(os.environ.get("HOME", ""), ".local", "bin", "claude")
+
+# Max chars of conversation to send to LLM for extraction
+MAX_CONTEXT_CHARS = 25000
+# Max messages to include
+MAX_MESSAGES = 80
+
+
+# ─── Transcript Extraction (Deterministic) ────────────────────────────
+
+def find_transcripts(since_ts=None):
+    """Find transcript .jsonl files, optionally filtered by modification time."""
+    pattern = os.path.join(TRANSCRIPTS_DIR, "**", "*.jsonl")
+    files = glob.glob(pattern, recursive=True)
+    if since_ts:
+        files = [f for f in files if os.path.getmtime(f) > since_ts]
+    # Sort by modification time, newest first
+    files.sort(key=os.path.getmtime, reverse=True)
+    return files
+
+
+def extract_conversation(transcript_path):
+    """Extract user/assistant messages from a transcript JSONL.
+
+    Returns a list of {role, text} dicts. Skips tool calls, progress,
+    and system messages to keep the context focused on what was discussed.
+    """
+    messages = []
+    try:
+        with open(transcript_path) as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                msg_type = d.get("type")
+                if msg_type not in ("user", "assistant"):
+                    continue
+
+                msg = d.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+
+                content = msg.get("content", "")
+                text = ""
+
+                if isinstance(content, str):
+                    text = content.strip()
+                elif isinstance(content, list):
+                    # Extract text blocks, skip tool_use/tool_result blocks
+                    parts = []
+                    for block in content:
+                        if isinstance(block, dict):
+                            if block.get("type") == "text":
+                                parts.append(block.get("text", ""))
+                            elif block.get("type") == "tool_use":
+                                # Include tool name as brief context
+                                tool = block.get("name", "?")
+                                inp = block.get("input", {})
+                                # For key tools, include a summary
+                                if tool in ("Edit", "Write"):
+                                    fp = inp.get("file_path", "")
+                                    parts.append(f"[{tool}: {fp}]")
+                                elif tool == "Bash":
+                                    cmd = inp.get("command", "")[:100]
+                                    parts.append(f"[Bash: {cmd}]")
+                                else:
+                                    parts.append(f"[{tool}]")
+                    text = " ".join(parts).strip()
+
+                if text and len(text) > 3:
+                    messages.append({"role": msg_type, "text": text})
+
+    except Exception as e:
+        print(f"Error reading transcript: {e}", file=sys.stderr)
+
+    return messages
+
+
+def trim_conversation(messages, max_chars=MAX_CONTEXT_CHARS, max_messages=MAX_MESSAGES):
+    """Trim conversation to fit within context budget.
+
+    Keeps first few messages (for context on what the session was about)
+    and last messages (for what was concluded/learned).
+    """
+    if not messages:
+        return []
+
+    # If short enough, return all
+    total = sum(len(m["text"]) for m in messages)
+    if total <= max_chars and len(messages) <= max_messages:
+        return messages
+
+    # Keep first 10 messages + last N messages that fit
+    head = messages[:10]
+    head_chars = sum(len(m["text"]) for m in head)
+    remaining_budget = max_chars - head_chars - 200  # 200 for separator
+
+    tail = []
+    for m in reversed(messages[10:]):
+        if remaining_budget <= 0 or len(tail) >= (max_messages - 10):
+            break
+        remaining_budget -= len(m["text"])
+        tail.insert(0, m)
+
+    return head + [{"role": "system", "text": "--- [middle of conversation trimmed] ---"}] + tail
+
+
+def format_conversation_for_llm(messages):
+    """Format messages into a readable conversation string."""
+    lines = []
+    for m in messages:
+        role = "USER" if m["role"] == "user" else "ASSISTANT" if m["role"] == "assistant" else "---"
+        if role == "---":
+            lines.append(m["text"])
+        else:
+            lines.append(f"[{role}]: {m['text']}")
+    return "\n\n".join(lines)
+
+
+def detect_projects_discussed(messages):
+    """Deterministically detect which projects were discussed."""
+    projects = load_projects()
+    text_blob = " ".join(m["text"].lower() for m in messages)
+
+    mentioned = []
+    for name, cfg in projects.items():
+        # Check for project name, path fragments, or repo name
+        triggers = [name.lower()]
+        path = cfg.get("path", "")
+        if path:
+            triggers.append(os.path.basename(path.rstrip("/")).lower())
+        repo = cfg.get("repo", "")
+        if repo:
+            triggers.append(repo.split("/")[-1].lower())
+
+        if any(t in text_blob for t in triggers):
+            mentioned.append(name)
+
+    return mentioned
+
+
+# ─── Project & State Helpers ──────────────────────────────────────────
+
+def load_projects():
+    if not os.path.exists(PROJECTS_FILE):
+        return {}
+    with open(PROJECTS_FILE) as f:
+        return json.load(f).get("projects", {})
+
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {"processed_transcripts": [], "last_run": None, "total_learnings_created": 0}
+
+
+def save_state(state):
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.rename(tmp, STATE_FILE)
+
+
+# ─── Existing Knowledge Check (Deterministic) ────────────────────────
+
+def load_existing_pattern_keys():
+    """Get all pattern-keys already in the vault for dedup."""
+    keys = set()
+    if not os.path.exists(LEARNINGS_DIR):
+        return keys
+    for fname in os.listdir(LEARNINGS_DIR):
+        if not fname.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(LEARNINGS_DIR, fname)) as f:
+                content = f.read(2000)  # frontmatter is always near the top
+            match = re.search(r'^pattern-key:\s*(.+)$', content, re.MULTILINE)
+            if match:
+                keys.add(match.group(1).strip())
+        except Exception:
+            continue
+    return keys
+
+
+def next_learning_id(prefix="LRN"):
+    """Generate the next available learning ID for today."""
+    today = datetime.date.today().strftime("%Y%m%d")
+    existing = []
+    if os.path.exists(LEARNINGS_DIR):
+        for fname in os.listdir(LEARNINGS_DIR):
+            if fname.startswith(f"{prefix}-{today}-"):
+                try:
+                    num = int(fname.split("-")[-1].replace(".md", ""))
+                    existing.append(num)
+                except ValueError:
+                    pass
+    next_num = max(existing, default=0) + 1
+    return f"{prefix}-{today}-{next_num:03d}"
+
+
+# ─── LLM Knowledge Extraction ────────────────────────────────────────
+
+EXTRACTION_PROMPT = """You are a knowledge extraction system. Read the following conversation transcript and extract learnings worth remembering for future sessions.
+
+CONVERSATION:
+{conversation}
+
+PROJECTS DISCUSSED: {projects}
+EXISTING PATTERN KEYS (do NOT duplicate these): {existing_keys}
+
+Extract knowledge in the following categories. Only include items that are genuinely useful for future work — skip trivial observations.
+
+Respond with ONLY a JSON array. Each item must have these fields:
+- "type": "learning" or "error"
+- "title": short descriptive title
+- "pattern_key": unique kebab-case identifier (check it's not in the existing keys list)
+- "area": one of "infra", "architecture", "security", "dependency-management", "ui", "api", "database", "testing", "deployment", "ai-ml"
+- "project": project name if specific to one, or "ai-harness" if general
+- "tags": array of relevant tags
+- "body": 2-4 sentence description of what was learned and why it matters
+- "severity": for errors only — "critical", "high", "medium", "low"
+- "priority": for learnings only — "critical", "medium", "low"
+
+Categories to look for:
+1. **Bugs debugged** — root cause + fix (type: error)
+2. **Architecture decisions** — what was decided and why (type: learning)
+3. **Dependency/security fixes** — what was vulnerable and how it was resolved (type: learning)
+4. **Project-specific facts** — stack quirks, API patterns, config gotchas (type: learning)
+5. **Patterns discovered** — reusable approaches that worked well (type: learning)
+6. **Gotchas** — things that fail silently or are easy to get wrong (type: error)
+
+If nothing worth extracting, return an empty array: []
+
+IMPORTANT: Return ONLY valid JSON. No markdown, no explanation, just the array."""
+
+
+def extract_knowledge_via_llm(conversation_text, projects, existing_keys, timeout=120):
+    """Send conversation to Claude for knowledge extraction. Returns parsed JSON."""
+    prompt = EXTRACTION_PROMPT.format(
+        conversation=conversation_text,
+        projects=", ".join(projects) if projects else "none detected",
+        existing_keys=", ".join(list(existing_keys)[:50]) if existing_keys else "none",
+    )
+
+    clean_env = {
+        "HOME": os.environ.get("HOME", ""),
+        "USER": os.environ.get("USER", ""),
+        "PATH": os.path.join(os.environ.get("HOME", ""), ".local", "bin")
+            + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "SHELL": os.environ.get("SHELL", "/bin/zsh"),
+        "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+        "TERM": "dumb",
+        "HARNESS_ROOT": HARNESS_ROOT,
+    }
+
+    try:
+        result = subprocess.run(
+            [CLAUDE_PATH, "-p", "--dangerously-skip-permissions",
+             "--output-format", "json", "--model", "sonnet",
+             "--", prompt],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            env=clean_env, timeout=timeout, cwd=HARNESS_ROOT,
+        )
+
+        if result.returncode != 0:
+            print(f"Claude extraction failed: {result.stderr[:300]}", file=sys.stderr)
+            return []
+
+        # Parse Claude's JSON output wrapper
+        try:
+            wrapper = json.loads(result.stdout)
+            text = wrapper.get("result", result.stdout)
+        except (json.JSONDecodeError, TypeError):
+            text = result.stdout
+
+        # Extract JSON array from response (Claude may wrap it in markdown)
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r'^```(?:json)?\s*', '', text)
+            text = re.sub(r'\s*```$', '', text)
+
+        items = json.loads(text)
+        if not isinstance(items, list):
+            return []
+        return items
+
+    except subprocess.TimeoutExpired:
+        print("Claude extraction timed out", file=sys.stderr)
+        return []
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"Failed to parse extraction output: {e}", file=sys.stderr)
+        return []
+
+
+# ─── Write Knowledge to Vault (Deterministic) ────────────────────────
+
+def write_vault_entry(item, existing_keys):
+    """Write a single learning/error to the vault. Returns the ID or None if skipped."""
+    pattern_key = item.get("pattern_key", "")
+    if not pattern_key or pattern_key in existing_keys:
+        return None  # Skip duplicates
+
+    entry_type = item.get("type", "learning")
+    prefix = "ERR" if entry_type == "error" else "LRN"
+    entry_id = next_learning_id(prefix)
+    today = datetime.date.today().isoformat()
+    now = datetime.datetime.now().isoformat()
+
+    tags = item.get("tags", [])
+    tags_str = ", ".join(tags)
+
+    lines = [
+        "---",
+        f"id: {entry_id}",
+        f"logged: {now}",
+        f"type: {entry_type}",
+    ]
+
+    if entry_type == "error":
+        lines.append(f"severity: {item.get('severity', 'medium')}")
+    else:
+        lines.append(f"priority: {item.get('priority', 'medium')}")
+
+    lines.extend([
+        "status: new",
+        f"category: best_practice",
+        f"area: {item.get('area', 'infra')}",
+        "agent: session-debrief",
+        f"project: {item.get('project', 'ai-harness')}",
+        f"pattern-key: {pattern_key}",
+        "recurrence-count: 1",
+        f"first-seen: {today}",
+        f"last-seen: {today}",
+        f"tags: [{tags_str}]",
+        "related: []",
+        "---",
+        "",
+        f"# {item.get('title', 'Untitled')}",
+        "",
+        item.get("body", ""),
+        "",
+    ])
+
+    os.makedirs(LEARNINGS_DIR, exist_ok=True)
+    file_path = os.path.join(LEARNINGS_DIR, f"{entry_id}.md")
+    with open(file_path, "w") as f:
+        f.write("\n".join(lines))
+
+    return entry_id
+
+
+def append_to_project_knowledge(project_name, items):
+    """Append session learnings to a project's knowledge file.
+
+    Also checks for recurring project-specific patterns and promotes them
+    to the Conventions section when they recur 2+ times.
+    """
+    knowledge_file = os.path.join(KNOWLEDGE_DIR, f"{project_name}.md")
+    if not os.path.exists(knowledge_file):
+        return  # Don't create new knowledge files — use project_scan for that
+
+    project_items = [i for i in items if i.get("project") == project_name]
+    if not project_items:
+        return
+
+    content = ""
+    with open(knowledge_file, "r") as f:
+        content = f.read()
+
+    # Append session learnings
+    today = datetime.date.today().isoformat()
+    section = f"\n## Session Learnings ({today})\n\n"
+    for item in project_items:
+        section += f"- **{item.get('title', '?')}**: {item.get('body', '').split('.')[0]}.\n"
+
+    with open(knowledge_file, "a") as f:
+        f.write(section)
+
+    # Check for recurring patterns → promote to Conventions
+    promote_recurring_to_conventions(project_name, content)
+
+
+def promote_recurring_to_conventions(project_name, knowledge_content):
+    """Scan vault learnings for recurring project-specific patterns.
+
+    When a pattern-key for this project has recurrence-count >= 2,
+    and it's not already in the Conventions section, add it.
+    """
+    if not os.path.exists(LEARNINGS_DIR):
+        return
+
+    # Find the Conventions section in the knowledge file
+    conventions_match = re.search(r'^## Conventions\s*\n(.*?)(?=\n## |\Z)', knowledge_content, re.MULTILINE | re.DOTALL)
+    if not conventions_match:
+        return  # No conventions section to write to
+
+    existing_conventions = conventions_match.group(1).lower()
+
+    # Find recurring project-specific learnings
+    new_conventions = []
+    for fname in os.listdir(LEARNINGS_DIR):
+        if not fname.endswith(".md"):
+            continue
+        try:
+            fpath = os.path.join(LEARNINGS_DIR, fname)
+            with open(fpath) as f:
+                entry = f.read(3000)
+
+            # Check it's for this project
+            proj_match = re.search(r'^project:\s*(.+)$', entry, re.MULTILINE)
+            if not proj_match or proj_match.group(1).strip() != project_name:
+                continue
+
+            # Check recurrence
+            rec_match = re.search(r'^recurrence-count:\s*(\d+)$', entry, re.MULTILINE)
+            if not rec_match or int(rec_match.group(1)) < 2:
+                continue
+
+            # Get the title
+            title_match = re.search(r'^# (.+)$', entry, re.MULTILINE)
+            if not title_match:
+                continue
+            title = title_match.group(1).strip()
+
+            # Check it's not already in conventions
+            if title.lower() in existing_conventions:
+                continue
+
+            # Get pattern-key to check conventions more broadly
+            pk_match = re.search(r'^pattern-key:\s*(.+)$', entry, re.MULTILINE)
+            if pk_match and pk_match.group(1).strip().lower().replace("-", " ") in existing_conventions:
+                continue
+
+            # Extract a one-line summary from the body
+            body = re.sub(r'^---\n[\s\S]*?\n---\n*', '', entry).strip()
+            body = re.sub(r'^# .+\n*', '', body).strip()
+            first_sentence = body.split('.')[0].strip() if body else title
+            if len(first_sentence) > 120:
+                first_sentence = first_sentence[:117] + "..."
+
+            new_conventions.append(f"- {first_sentence}")
+
+        except Exception:
+            continue
+
+    if not new_conventions:
+        return
+
+    # Append to conventions section
+    knowledge_file = os.path.join(KNOWLEDGE_DIR, f"{project_name}.md")
+    with open(knowledge_file, "r") as f:
+        content = f.read()
+
+    # Find the placeholder text and replace, or append after ## Conventions
+    placeholder = "*No conventions yet. These are populated automatically as project-specific patterns are discovered across sessions.*"
+    if placeholder in content:
+        content = content.replace(placeholder, "\n".join(new_conventions))
+    else:
+        # Append after the existing conventions
+        insert_point = content.find("## Conventions")
+        if insert_point == -1:
+            return
+        # Find end of conventions section
+        next_section = re.search(r'\n## ', content[insert_point + 15:])
+        if next_section:
+            pos = insert_point + 15 + next_section.start()
+        else:
+            pos = len(content)
+        content = content[:pos].rstrip() + "\n" + "\n".join(new_conventions) + "\n" + content[pos:]
+
+    with open(knowledge_file, "w") as f:
+        f.write(content)
+
+    print(f"  Promoted {len(new_conventions)} convention(s) for {project_name}", file=sys.stderr)
+
+
+# ─── Main ─────────────────────────────────────────────────────────────
+
+def process_transcript(transcript_path, existing_keys, dry_run=False):
+    """Process a single transcript. Returns list of created IDs."""
+    transcript_id = os.path.basename(transcript_path).replace(".jsonl", "")
+    print(f"Processing: {transcript_id}", file=sys.stderr)
+
+    # 1. Extract conversation (deterministic)
+    messages = extract_conversation(transcript_path)
+    if len(messages) < 5:
+        print(f"  Skipping — too short ({len(messages)} messages)", file=sys.stderr)
+        return []
+
+    # 2. Detect projects (deterministic)
+    projects = detect_projects_discussed(messages)
+    print(f"  Projects: {projects or 'none'}", file=sys.stderr)
+
+    # 3. Trim and format (deterministic)
+    trimmed = trim_conversation(messages)
+    conversation_text = format_conversation_for_llm(trimmed)
+    print(f"  Context: {len(conversation_text)} chars from {len(trimmed)} messages", file=sys.stderr)
+
+    if dry_run:
+        print(f"  [DRY RUN] Would send {len(conversation_text)} chars to LLM", file=sys.stderr)
+        return []
+
+    # 4. LLM extraction (non-deterministic — the one LLM step)
+    items = extract_knowledge_via_llm(conversation_text, projects, existing_keys)
+    print(f"  LLM extracted: {len(items)} items", file=sys.stderr)
+
+    if not items:
+        return []
+
+    # 5. Write to vault (deterministic)
+    created = []
+    for item in items:
+        entry_id = write_vault_entry(item, existing_keys)
+        if entry_id:
+            created.append(entry_id)
+            existing_keys.add(item.get("pattern_key", ""))
+            print(f"  Created: {entry_id} — {item.get('title', '?')}", file=sys.stderr)
+
+    # 6. Append to project knowledge files (deterministic)
+    for project in projects:
+        append_to_project_knowledge(project, items)
+
+    return created
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Session debrief — extract knowledge from transcripts")
+    parser.add_argument("--all", action="store_true", help="Process all unprocessed transcripts")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be extracted without writing")
+    parser.add_argument("--transcript", help="Process a specific transcript UUID")
+    args = parser.parse_args()
+
+    state = load_state()
+    processed = set(state.get("processed_transcripts", []))
+    existing_keys = load_existing_pattern_keys()
+
+    # Find transcripts to process
+    if args.transcript:
+        matches = glob.glob(os.path.join(TRANSCRIPTS_DIR, "**", f"{args.transcript}.jsonl"), recursive=True)
+        if not matches:
+            print(f"Transcript not found: {args.transcript}")
+            return
+        transcripts = [matches[0]]
+    elif args.all:
+        transcripts = find_transcripts()
+        # Filter out already processed
+        transcripts = [t for t in transcripts
+                       if os.path.basename(t).replace(".jsonl", "") not in processed]
+    else:
+        # Just the most recent unprocessed
+        all_transcripts = find_transcripts()
+        transcripts = []
+        for t in all_transcripts:
+            tid = os.path.basename(t).replace(".jsonl", "")
+            if tid not in processed:
+                transcripts = [t]
+                break
+        if not transcripts and all_transcripts:
+            # All processed — grab the most recent anyway if modified since last run
+            last_run = state.get("last_run")
+            if last_run:
+                last_ts = datetime.datetime.fromisoformat(last_run).timestamp()
+                recent = find_transcripts(since_ts=last_ts)
+                if recent:
+                    transcripts = [recent[0]]
+
+    if not transcripts:
+        print("No unprocessed transcripts found.", file=sys.stderr)
+        return
+
+    print(f"Found {len(transcripts)} transcript(s) to process", file=sys.stderr)
+
+    total_created = []
+    for transcript_path in transcripts:
+        tid = os.path.basename(transcript_path).replace(".jsonl", "")
+        created = process_transcript(transcript_path, existing_keys, dry_run=args.dry_run)
+        total_created.extend(created)
+
+        if not args.dry_run:
+            processed.add(tid)
+
+    # Update state
+    if not args.dry_run:
+        state["processed_transcripts"] = list(processed)
+        state["last_run"] = datetime.datetime.now().isoformat()
+        state["total_learnings_created"] = state.get("total_learnings_created", 0) + len(total_created)
+        save_state(state)
+
+    # Summary
+    print(f"\nDone. Created {len(total_created)} vault entries from {len(transcripts)} transcript(s).")
+    for entry_id in total_created:
+        print(f"  {entry_id}")
+
+
+if __name__ == "__main__":
+    main()
