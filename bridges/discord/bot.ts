@@ -415,17 +415,24 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
       return;
     }
 
-    // Normal response
+    // Normal response — cap at 5 messages to prevent raw doc dumps
+    const MAX_RESPONSE_MESSAGES = 5;
     const chunks = splitMessage(response);
+    const cappedChunks = chunks.slice(0, MAX_RESPONSE_MESSAGES);
+    const wasCapped = chunks.length > MAX_RESPONSE_MESSAGES;
+
     if (streamMessage) {
-      await streamMessage.edit(chunks[0]);
-      for (let i = 1; i < chunks.length; i++) {
-        await message.reply(chunks[i]);
+      await streamMessage.edit(cappedChunks[0]);
+      for (let i = 1; i < cappedChunks.length; i++) {
+        await message.reply(cappedChunks[i]);
       }
     } else {
-      for (const chunk of chunks) {
+      for (const chunk of cappedChunks) {
         await message.reply(chunk);
       }
+    }
+    if (wasCapped) {
+      await message.reply(`*(Response truncated — ${chunks.length - MAX_RESPONSE_MESSAGES} additional messages omitted. Ask me to continue or be more specific.)*`);
     }
 
     postAgentComplete(ctx.activity, response).catch(() => {});
@@ -1018,6 +1025,14 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     return true;
   }
 
+  // /restart — graceful bot restart via launchd
+  if (content === "/restart") {
+    await message.reply("Restarting bot... (launchd will bring it back in ~30s)");
+    // Exit with non-zero code so launchd's KeepAlive (SuccessfulExit=false) restarts us
+    setTimeout(() => process.exit(75), 1000);
+    return true;
+  }
+
   // /help — list all commands
   if (content === "/help") {
     await message.reply(
@@ -1046,6 +1061,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
 • \`/dead-letter\` — List failed tasks (dead-letter queue)
 • \`/retry <id>\` — Re-enqueue a dead-lettered task
 • \`/db-status\` — Show database table counts and file size
+• \`/restart\` — Restart the bot (launchd brings it back)
 *Channels under the Projects category are auto-adopted on first message.*
 *Agents can create channels with \`[CREATE_CHANNEL:name]\` in their output.*
 • \`/help\` — Show this help message`
@@ -1355,7 +1371,39 @@ client.on("messageCreate", async (message: Message) => {
   }
 
   const content = message.content.trim();
-  if (!content) return;
+
+  // Download image attachments so Claude can read them
+  const imageAttachments = message.attachments.filter(
+    (a) => a.contentType?.startsWith("image/") || /\.(png|jpg|jpeg|gif|webp)$/i.test(a.name || "")
+  );
+  let attachmentPaths: string[] = [];
+  if (imageAttachments.size > 0) {
+    const imgDir = join(HARNESS_ROOT, "bridges", "discord", ".tmp", "images");
+    mkdirSync(imgDir, { recursive: true });
+    for (const [, attachment] of imageAttachments) {
+      try {
+        const ext = (attachment.name || "image.png").split(".").pop() || "png";
+        const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
+        const filepath = join(imgDir, filename);
+        const response = await fetch(attachment.url);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        writeFileSync(filepath, buffer);
+        attachmentPaths.push(filepath);
+        console.log(`[IMG] Downloaded ${attachment.name} → ${filepath} (${buffer.length} bytes)`);
+      } catch (err: any) {
+        console.error(`[IMG] Failed to download ${attachment.name}: ${err.message}`);
+      }
+    }
+  }
+
+  // Build prompt with image references
+  let promptText = content;
+  if (attachmentPaths.length > 0) {
+    const imgRefs = attachmentPaths.map((p) => `[Attached image: ${p}]`).join("\n");
+    promptText = `${imgRefs}\n\n${content || "What do you see in this image?"}`;
+  }
+
+  if (!promptText.trim()) return;
 
   // Handle commands first
   if (content.startsWith("/")) {
@@ -1421,7 +1469,7 @@ client.on("messageCreate", async (message: Message) => {
   const task: QueuedTask = {
     message,
     execute: () => {
-      handleClaude(message, content).catch(async (err) => {
+      handleClaude(message, promptText).catch(async (err) => {
         await message.reply(`Error: ${err.message}`);
         releaseChannel(channelId);
       });

@@ -4,7 +4,7 @@ import { join } from "path";
 import { getDb } from "./db.js";
 import { getSession, setSession, validateSession } from "./session-store.js";
 import { getChannelConfig } from "./channel-config-store.js";
-import { getProject } from "./project-manager.js";
+import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { getProjectSessionKey } from "./handoff-router.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
@@ -292,9 +292,17 @@ export async function spawnTask(taskId: string): Promise<{ pid: number; outputFi
     ...args,
   ];
 
+  // Resolve project working directory (passed via env to claude-runner.py)
+  const project = getProject(task.channel_id);
+  const projectCwd = project ? resolveProjectWorkdir(project.name) : null;
+
   const proc = spawn("python3", pythonArgs, {
     cwd: HARNESS_ROOT,
-    env: { ...process.env, HARNESS_ROOT },
+    env: {
+      ...process.env,
+      HARNESS_ROOT,
+      ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
+    },
     detached: true,
     stdio: "ignore",
   });

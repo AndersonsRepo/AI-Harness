@@ -9,6 +9,7 @@ import {
   postError,
 } from "./activity-stream.js";
 import { getChannelConfig } from "./channel-config-store.js";
+import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
 
@@ -129,9 +130,17 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
     ...args,
   ];
 
+  // Resolve project working directory (passed via env to claude-runner.py)
+  const project = getProject(options.channelId);
+  const projectCwd = project ? resolveProjectWorkdir(project.name) : null;
+
   const proc = spawn("python3", pythonArgs, {
     cwd: HARNESS_ROOT,
-    env: { ...process.env, HARNESS_ROOT },
+    env: {
+      ...process.env,
+      HARNESS_ROOT,
+      ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
+    },
     detached: true,
     stdio: "ignore",
   });

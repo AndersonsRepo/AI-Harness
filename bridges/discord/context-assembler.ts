@@ -14,7 +14,7 @@
 import { existsSync, readFileSync, readdirSync, appendFileSync, mkdirSync } from "fs";
 import { join, basename } from "path";
 import { getDb } from "./db.js";
-import { getProject, type ProjectConfig } from "./project-manager.js";
+import { getProject, resolveProjectWorkdir, type ProjectConfig } from "./project-manager.js";
 import { getChannelConfig, type ChannelConfig } from "./channel-config-store.js";
 import { hybridSearch, type SearchResult } from "./embeddings.js";
 import { monitor } from "./truncation-monitor.js";
@@ -208,6 +208,10 @@ function buildProjectSection(
   if (project) {
     lines.push(`Name: ${project.name}`);
     lines.push(`Description: ${project.description}`);
+    const projectPath = resolveProjectWorkdir(project.name);
+    if (projectPath) {
+      lines.push(`Working directory: ${projectPath}`);
+    }
     lines.push(`Agents: ${project.agents.join(", ")}`);
     lines.push(`Current agent: ${agentName}`);
     if (project.activeAgent && project.activeAgent !== agentName) {
