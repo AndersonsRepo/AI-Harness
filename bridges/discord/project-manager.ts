@@ -4,8 +4,12 @@ import {
   ChannelType,
   CategoryChannel,
 } from "discord.js";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
 import { setChannelConfig } from "./channel-config-store.js";
 import { getDb } from "./db.js";
+
+const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 
 export interface ProjectConfig {
   channelId: string;
@@ -286,4 +290,36 @@ export function adoptChannel(
 
 export function getProjectsCategoryName(): string {
   return PROJECTS_CATEGORY_NAME;
+}
+
+/**
+ * Resolve the filesystem working directory for a project.
+ * Looks up the project name in heartbeat-tasks/projects.json and resolves
+ * env vars ($HOME, $HARNESS_ROOT) in the path. Returns null if not found
+ * or path doesn't exist.
+ */
+export function resolveProjectWorkdir(projectName: string): string | null {
+  try {
+    const projectsFile = join(HARNESS_ROOT, "heartbeat-tasks", "projects.json");
+    if (!existsSync(projectsFile)) return null;
+
+    const data = JSON.parse(readFileSync(projectsFile, "utf-8"));
+    const entry = data.projects?.[projectName];
+    if (!entry?.path) return null;
+
+    // Resolve environment variables in path
+    const resolved = entry.path
+      .replace(/\$HOME/g, process.env.HOME || "")
+      .replace(/\$HARNESS_ROOT/g, HARNESS_ROOT);
+
+    if (!existsSync(resolved)) {
+      console.warn(`[project-manager] Project path not found: ${resolved} (project: ${projectName})`);
+      return null;
+    }
+
+    return resolved;
+  } catch (err: any) {
+    console.error(`[project-manager] Error resolving workdir for ${projectName}: ${err.message}`);
+    return null;
+  }
 }

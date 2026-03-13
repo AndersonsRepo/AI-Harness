@@ -1,0 +1,11 @@
+{
+  "name": "token-expiry-check",
+  "description": "Check OAuth token expiration and notify before tokens expire",
+  "type": "script",
+  "script": "token-expiry-check.py",
+  "schedule": "24h",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "notifications",
+  "timeout": 30
+}

@@ -10,7 +10,7 @@
 import { getDb } from "./db.js";
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
 
-export type OAuthProvider = "microsoft" | "linkedin";
+export type OAuthProvider = "microsoft" | "linkedin" | "linkedin-community";
 
 export interface TokenRecord {
   provider: OAuthProvider;
@@ -221,14 +221,65 @@ export async function refreshLinkedInToken(): Promise<TokenRecord> {
   return getTokens("linkedin")!;
 }
 
+export async function refreshLinkedInCommunityToken(): Promise<TokenRecord> {
+  const record = getTokens("linkedin-community");
+  if (!record) throw new Error("No LinkedIn Community tokens stored — run oauth-setup.ts linkedin-community");
+
+  const clientId = process.env.LINKEDIN_COMMUNITY_CLIENT_ID;
+  const clientSecret = process.env.LINKEDIN_COMMUNITY_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error("LINKEDIN_COMMUNITY_CLIENT_ID and LINKEDIN_COMMUNITY_CLIENT_SECRET must be set");
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: record.refreshToken,
+    client_id: clientId,
+    client_secret: clientSecret,
+  });
+
+  const res = await fetch("https://www.linkedin.com/oauth/v2/accessToken", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`LinkedIn Community token refresh failed (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as {
+    access_token: string;
+    refresh_token?: string;
+    expires_in: number;
+    refresh_token_expires_in?: number;
+  };
+
+  const expiresAt = new Date(Date.now() + data.expires_in * 1000).toISOString();
+  const newTokens = {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || record.refreshToken,
+    expiresAt,
+    scopes: record.scopes,
+    extra: record.extra || undefined,
+  };
+
+  saveTokens("linkedin-community", newTokens);
+  return getTokens("linkedin-community")!;
+}
+
 export async function ensureFreshToken(provider: OAuthProvider): Promise<string> {
   if (!isExpired(provider)) {
     return getTokens(provider)!.accessToken;
   }
 
-  const refreshed = provider === "microsoft"
-    ? await refreshMicrosoftToken()
-    : await refreshLinkedInToken();
+  let refreshed: TokenRecord;
+  if (provider === "microsoft") {
+    refreshed = await refreshMicrosoftToken();
+  } else if (provider === "linkedin-community") {
+    refreshed = await refreshLinkedInCommunityToken();
+  } else {
+    refreshed = await refreshLinkedInToken();
+  }
 
   return refreshed.accessToken;
 }

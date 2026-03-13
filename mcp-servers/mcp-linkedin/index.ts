@@ -43,23 +43,33 @@ function getDb(): Database.Database {
 
 // ─── Token Management ───────────────────────────────────────────────
 
-async function ensureFreshToken(): Promise<string> {
+type LinkedInProvider = "linkedin" | "linkedin-community";
+
+async function ensureFreshToken(provider: LinkedInProvider = "linkedin"): Promise<string> {
   const database = getDb();
   const row = database
-    .prepare("SELECT access_token, refresh_token, expires_at, scopes, extra FROM oauth_tokens WHERE provider = 'linkedin'")
-    .get() as any;
+    .prepare("SELECT access_token, refresh_token, expires_at, scopes, extra FROM oauth_tokens WHERE provider = ?")
+    .get(provider) as any;
 
-  if (!row) throw new Error("No LinkedIn tokens — run: npx tsx oauth-setup.ts linkedin");
+  if (!row) throw new Error(`No ${provider} tokens — run: npx tsx oauth-setup.ts ${provider}`);
 
   const expiresAt = new Date(row.expires_at).getTime();
   if (Date.now() < expiresAt - 5 * 60 * 1000) {
     return row.access_token;
   }
 
-  console.error("[mcp-linkedin] Refreshing LinkedIn token...");
-  const clientId = process.env.LINKEDIN_CLIENT_ID;
-  const clientSecret = process.env.LINKEDIN_CLIENT_SECRET;
-  if (!clientId || !clientSecret) throw new Error("LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET required");
+  if (!row.refresh_token || row.refresh_token === "none") {
+    throw new Error(`${provider} token expired and no refresh token available — re-run: npx tsx oauth-setup.ts ${provider}`);
+  }
+
+  console.error(`[mcp-linkedin] Refreshing ${provider} token...`);
+  const clientId = provider === "linkedin-community"
+    ? process.env.LINKEDIN_COMMUNITY_CLIENT_ID
+    : process.env.LINKEDIN_CLIENT_ID;
+  const clientSecret = provider === "linkedin-community"
+    ? process.env.LINKEDIN_COMMUNITY_CLIENT_SECRET
+    : process.env.LINKEDIN_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error(`Client credentials required for ${provider}`);
 
   const body = new URLSearchParams({
     grant_type: "refresh_token",
@@ -76,7 +86,7 @@ async function ensureFreshToken(): Promise<string> {
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`LinkedIn token refresh failed (${res.status}): ${text}`);
+    throw new Error(`${provider} token refresh failed (${res.status}): ${text}`);
   }
 
   const data = (await res.json()) as {
@@ -88,9 +98,9 @@ async function ensureFreshToken(): Promise<string> {
   const newExpiresAt = new Date(Date.now() + data.expires_in * 1000).toISOString();
   database
     .prepare(
-      `UPDATE oauth_tokens SET access_token = ?, refresh_token = COALESCE(?, refresh_token), expires_at = ?, updated_at = datetime('now') WHERE provider = 'linkedin'`
+      `UPDATE oauth_tokens SET access_token = ?, refresh_token = COALESCE(?, refresh_token), expires_at = ?, updated_at = datetime('now') WHERE provider = ?`
     )
-    .run(data.access_token, data.refresh_token || null, newExpiresAt);
+    .run(data.access_token, data.refresh_token || null, newExpiresAt, provider);
 
   return data.access_token;
 }
@@ -289,6 +299,98 @@ server.tool(
     });
 
     return { content: [{ type: "text" as const, text: formatted.join("\n\n") }] };
+  }
+);
+
+// ─── Tool: linkedin_comment ──────────────────────────────────────────
+
+server.tool(
+  "linkedin_comment",
+  "Add a comment to a LinkedIn post. Requires Community Management API tokens (linkedin-community provider). Use this to continue a post as a comment thread.",
+  {
+    postUrn: z.string().describe("The post URN (e.g., urn:li:share:123456 or urn:li:ugcPost:123456)"),
+    comment: z.string().describe("The comment text"),
+  },
+  async ({ postUrn, comment }) => {
+    const token = await ensureFreshToken("linkedin-community");
+    const personUrn = getPersonUrn();
+
+    const res = await fetch("https://api.linkedin.com/rest/socialActions/" + encodeURIComponent(postUrn) + "/comments", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "LinkedIn-Version": LINKEDIN_VERSION,
+        "X-Restli-Protocol-Version": "2.0.0",
+      },
+      body: JSON.stringify({
+        actor: personUrn,
+        message: { text: comment },
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Comment failed (${res.status}): ${text.slice(0, 500)}`,
+        }],
+      };
+    }
+
+    const commentId = res.headers.get("x-restli-id") || "";
+    return {
+      content: [{
+        type: "text" as const,
+        text: `Comment posted! ID: ${commentId}\nOn post: ${postUrn}`,
+      }],
+    };
+  }
+);
+
+// ─── Tool: linkedin_delete ──────────────────────────────────────────
+
+server.tool(
+  "linkedin_delete",
+  "Delete a LinkedIn post by its URN.",
+  {
+    postUrn: z.string().describe("The post URN to delete (e.g., urn:li:share:123456)"),
+  },
+  async ({ postUrn }) => {
+    const token = await ensureFreshToken();
+
+    const res = await fetch("https://api.linkedin.com/rest/posts/" + encodeURIComponent(postUrn), {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "LinkedIn-Version": LINKEDIN_VERSION,
+        "X-Restli-Protocol-Version": "2.0.0",
+      },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Delete failed (${res.status}): ${text.slice(0, 500)}`,
+        }],
+      };
+    }
+
+    // Update local DB if we have this post tracked
+    const database = getDb();
+    database
+      .prepare("UPDATE linkedin_posts SET status = 'rejected' WHERE linkedin_post_id = ?")
+      .run(postUrn);
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: `Post deleted: ${postUrn}`,
+      }],
+    };
   }
 );
 

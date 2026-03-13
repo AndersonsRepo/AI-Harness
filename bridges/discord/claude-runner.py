@@ -44,7 +44,9 @@ def main():
 
     home = os.environ.get("HOME", os.path.expanduser("~"))
     claude_path = os.environ.get("CLAUDE_CLI_PATH", os.path.join(home, ".local", "bin", "claude"))
-    cwd = os.environ.get("HARNESS_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    harness_root = os.environ.get("HARNESS_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    # PROJECT_CWD allows spawning Claude in a project's directory instead of HARNESS_ROOT
+    cwd = os.environ.get("PROJECT_CWD", harness_root)
 
     clean_env = {
         "HOME": home,

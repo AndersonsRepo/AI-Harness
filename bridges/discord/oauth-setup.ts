@@ -158,10 +158,95 @@ async function exchangeLinkedInCode(code: string): Promise<void> {
   console.log("LinkedIn tokens saved successfully.");
 }
 
+// ─── LinkedIn Community Management ──────────────────────────────────
+
+const LINKEDIN_COMMUNITY_SCOPES = "w_member_social w_member_social_comments r_member_social openid profile";
+
+function getLinkedInCommunityAuthUrl(): string {
+  const clientId = process.env.LINKEDIN_COMMUNITY_CLIENT_ID;
+  if (!clientId) throw new Error("LINKEDIN_COMMUNITY_CLIENT_ID env var required");
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: clientId,
+    redirect_uri: REDIRECT_URI,
+    scope: LINKEDIN_COMMUNITY_SCOPES,
+    state: "harness-oauth-community",
+  });
+
+  return `https://www.linkedin.com/oauth/v2/authorization?${params}`;
+}
+
+async function exchangeLinkedInCommunityCode(code: string): Promise<void> {
+  const clientId = process.env.LINKEDIN_COMMUNITY_CLIENT_ID!;
+  const clientSecret = process.env.LINKEDIN_COMMUNITY_CLIENT_SECRET;
+  if (!clientSecret) throw new Error("LINKEDIN_COMMUNITY_CLIENT_SECRET env var required");
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: REDIRECT_URI,
+  });
+
+  const res = await fetch("https://www.linkedin.com/oauth/v2/accessToken", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`LinkedIn Community token exchange failed (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as {
+    access_token: string;
+    refresh_token?: string;
+    expires_in: number;
+    refresh_token_expires_in?: number;
+  };
+
+  // Fetch person URN via userinfo (requires openid scope)
+  let extra: Record<string, any> = {};
+  try {
+    const profileRes = await fetch("https://api.linkedin.com/v2/userinfo", {
+      headers: { Authorization: `Bearer ${data.access_token}` },
+    });
+    if (profileRes.ok) {
+      const profile = (await profileRes.json()) as { sub: string; name?: string; email?: string };
+      extra = { personUrn: `urn:li:person:${profile.sub}`, name: profile.name, email: profile.email };
+      console.log(`LinkedIn Community profile: ${profile.name} (${profile.sub})`);
+    }
+  } catch (err: any) {
+    console.error(`Warning: Could not fetch LinkedIn profile: ${err.message}`);
+  }
+
+  saveTokens("linkedin-community", {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || "none",
+    expiresAt: new Date(Date.now() + data.expires_in * 1000).toISOString(),
+    scopes: LINKEDIN_COMMUNITY_SCOPES,
+    extra,
+  });
+
+  console.log("LinkedIn Community Management tokens saved successfully.");
+  if (data.refresh_token) {
+    console.log("Refresh token received — auto-refresh will work.");
+  } else {
+    console.log("WARNING: No refresh token received. Token will expire and require re-auth.");
+  }
+}
+
 // ─── Server ─────────────────────────────────────────────────────────
 
 async function run(provider: OAuthProvider): Promise<void> {
-  const authUrl = provider === "microsoft" ? getMicrosoftAuthUrl() : getLinkedInAuthUrl();
+  const authUrl = provider === "microsoft"
+    ? getMicrosoftAuthUrl()
+    : provider === "linkedin-community"
+    ? getLinkedInCommunityAuthUrl()
+    : getLinkedInAuthUrl();
 
   return new Promise((resolve, reject) => {
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -195,6 +280,8 @@ async function run(provider: OAuthProvider): Promise<void> {
       try {
         if (provider === "microsoft") {
           await exchangeMicrosoftCode(code);
+        } else if (provider === "linkedin-community") {
+          await exchangeLinkedInCommunityCode(code);
         } else {
           await exchangeLinkedInCode(code);
         }
@@ -235,8 +322,8 @@ async function run(provider: OAuthProvider): Promise<void> {
 // ─── CLI ────────────────────────────────────────────────────────────
 
 const provider = process.argv[2] as OAuthProvider;
-if (provider !== "microsoft" && provider !== "linkedin") {
-  console.error("Usage: npx tsx oauth-setup.ts <microsoft|linkedin>");
+if (provider !== "microsoft" && provider !== "linkedin" && provider !== "linkedin-community") {
+  console.error("Usage: npx tsx oauth-setup.ts <microsoft|linkedin|linkedin-community>");
   process.exit(1);
 }
 

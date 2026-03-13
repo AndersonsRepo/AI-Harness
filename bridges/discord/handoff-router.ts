@@ -7,6 +7,7 @@ import {
   updateProject,
   incrementHandoffDepth,
   resetHandoffDepth,
+  resolveProjectWorkdir,
 } from "./project-manager.js";
 import { getSession, setSession } from "./session-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
@@ -312,10 +313,17 @@ export async function executeHandoff(
     ...args,
   ];
 
+  // Resolve project working directory (passed via env to claude-runner.py)
+  const projectCwd = project ? resolveProjectWorkdir(project.name) : null;
+
   return new Promise((resolve) => {
     const proc = spawn("python3", pythonArgs, {
       cwd: HARNESS_ROOT,
-      env: { ...process.env, HARNESS_ROOT },
+      env: {
+        ...process.env,
+        HARNESS_ROOT,
+        ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
+      },
       detached: true,
       stdio: "ignore",
     });
