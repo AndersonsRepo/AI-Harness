@@ -16,6 +16,7 @@ import sys
 import os
 import json
 import threading
+import time
 
 def main():
     args = sys.argv[1:]
@@ -57,6 +58,7 @@ def main():
         "TERM": "dumb",
         "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
         "SSH_AUTH_SOCK": os.environ.get("SSH_AUTH_SOCK", ""),
+        "HARNESS_ROOT": harness_root,
     }
     clean_env = {k: v for k, v in clean_env.items() if v}
 
@@ -104,32 +106,54 @@ def main():
             stderr_thread = threading.Thread(target=read_stderr, args=(proc, stderr_container))
             stderr_thread.start()
 
-            for line in proc.stdout:
-                decoded = line.decode("utf-8", errors="replace").strip()
-                if not decoded:
-                    continue
-                all_stdout.append(decoded)
-
-                # Write chunk file for the stream poller
+            # Enforce timeout on streaming stdout reads via a watchdog thread
+            timed_out = [False]
+            def watchdog():
+                timed_out[0] = True
                 try:
-                    chunk_file = os.path.join(stream_dir, f"chunk-{chunk_num:04d}.json")
-                    parsed = json.loads(decoded)
-                    with open(chunk_file, "w") as f:
-                        json.dump(parsed, f)
-                    chunk_num += 1
-                except (json.JSONDecodeError, IOError):
+                    proc.kill()
+                except OSError:
                     pass
 
-            proc.wait(timeout=timeout)
+            timer = threading.Timer(timeout, watchdog)
+            timer.start()
+
+            try:
+                for line in proc.stdout:
+                    decoded = line.decode("utf-8", errors="replace").strip()
+                    if not decoded:
+                        continue
+                    all_stdout.append(decoded)
+
+                    # Write chunk file for the stream poller
+                    try:
+                        chunk_file = os.path.join(stream_dir, f"chunk-{chunk_num:04d}.json")
+                        parsed = json.loads(decoded)
+                        with open(chunk_file, "w") as f:
+                            json.dump(parsed, f)
+                        chunk_num += 1
+                    except (json.JSONDecodeError, IOError):
+                        pass
+            finally:
+                timer.cancel()
+
+            proc.wait(timeout=30)
             stderr_thread.join(timeout=5)
             stderr_text = stderr_container[0].decode("utf-8", errors="replace") if stderr_container else ""
 
-            # Write final aggregated result (backward compat)
-            write_result({
-                "stdout": "\n".join(all_stdout),
-                "stderr": stderr_text,
-                "returncode": proc.returncode or 0,
-            })
+            if timed_out[0]:
+                write_result({
+                    "stdout": "\n".join(all_stdout),
+                    "stderr": f"Claude timed out after {timeout} seconds (streaming)",
+                    "returncode": 1,
+                })
+            else:
+                # Write final aggregated result (backward compat)
+                write_result({
+                    "stdout": "\n".join(all_stdout),
+                    "stderr": stderr_text,
+                    "returncode": proc.returncode if proc.returncode is not None else 1,
+                })
 
         except subprocess.TimeoutExpired:
             proc.kill()
@@ -138,28 +162,53 @@ def main():
             write_result({"stdout": "", "stderr": str(e), "returncode": 1})
 
     else:
-        # Non-streaming mode: original behavior
-        try:
-            result = subprocess.run(
-                [claude_path] + claude_args,
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-                env=clean_env,
-                timeout=timeout,
-                cwd=cwd,
-            )
+        # Non-streaming mode: with retry on transient errors (429, 5xx, network)
+        max_retries = 3
+        backoff_delays = [5, 15, 45]  # seconds
 
-            write_result({
-                "stdout": result.stdout or "",
-                "stderr": result.stderr or "",
-                "returncode": result.returncode,
-            })
+        for attempt in range(max_retries + 1):
+            try:
+                result = subprocess.run(
+                    [claude_path] + claude_args,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    env=clean_env,
+                    timeout=timeout,
+                    cwd=cwd,
+                )
 
-        except subprocess.TimeoutExpired:
-            write_result({"stdout": "", "stderr": f"Claude timed out after {timeout} seconds", "returncode": 1})
-        except Exception as e:
-            write_result({"stdout": "", "stderr": str(e), "returncode": 1})
+                # Check for transient errors worth retrying
+                is_transient = False
+                if result.returncode != 0 and attempt < max_retries:
+                    stderr_lower = (result.stderr or "").lower()
+                    if any(s in stderr_lower for s in ["429", "rate limit", "503", "502", "500", "overloaded", "connection", "econnreset", "timeout"]):
+                        is_transient = True
+
+                if is_transient:
+                    delay = backoff_delays[attempt]
+                    sys.stderr.write(f"[claude-runner] Transient error (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay}s: {result.stderr[:100]}\n")
+                    time.sleep(delay)
+                    continue
+
+                write_result({
+                    "stdout": result.stdout or "",
+                    "stderr": result.stderr or "",
+                    "returncode": result.returncode,
+                })
+                break
+
+            except subprocess.TimeoutExpired:
+                if attempt < max_retries:
+                    delay = backoff_delays[attempt]
+                    sys.stderr.write(f"[claude-runner] Timeout (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay}s\n")
+                    time.sleep(delay)
+                    continue
+                write_result({"stdout": "", "stderr": f"Claude timed out after {timeout} seconds ({max_retries + 1} attempts)", "returncode": 1})
+                break
+            except Exception as e:
+                write_result({"stdout": "", "stderr": str(e), "returncode": 1})
+                break
 
 if __name__ == "__main__":
     main()

@@ -27,6 +27,8 @@ projects/
 context-log/
 vault/vault-embeddings.json
 __pycache__/
+heartbeat-tasks/.cs2600-cache/
+vault/shared/course-notes/
 
 # Vault entries contain personal session data
 vault/learnings/*

@@ -130,6 +130,8 @@ server.tool(
 
         const counts: string[] = [];
         for (const table of tableList) {
+          // Validate table name: alphanumeric + underscore only (prevents SQL injection)
+          if (!/^[a-zA-Z_]\w*$/.test(table)) continue;
           const count = safeExec(`sqlite3 "${DB_PATH}" "SELECT COUNT(*) FROM ${table}" 2>/dev/null`);
           counts.push(`  ${table}: ${count} rows`);
         }

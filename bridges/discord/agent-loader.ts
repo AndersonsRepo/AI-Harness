@@ -89,6 +89,20 @@ export const AGENT_TOOL_RESTRICTIONS: Record<string, AgentToolRestrictions> = {
       "Bash(git show:*)",
     ],
   },
+  education: {
+    allowed: [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "mcp__vault__vault_search",
+      "mcp__vault__vault_read",
+      "mcp__vault__vault_list",
+    ],
+  },
   // builder, ops, project: no restrictions beyond global guardrails
 };
 

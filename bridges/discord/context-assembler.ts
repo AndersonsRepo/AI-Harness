@@ -30,6 +30,8 @@ const NOTIFICATIONS_FILE = join(HEARTBEAT_DIR, "pending-notifications.jsonl");
 // Token budget: ~4000-5000 tokens. Cost is negligible on Max subscription.
 // Learnings get the lion's share — that's the whole point of the system.
 const MAX_TOTAL_CHARS = 20000; // ~5000 tokens
+const COURSE_NOTES_DIR = join(SHARED_DIR, "course-notes");
+
 const SECTION_LIMITS: Record<string, number> = {
   project: 600,
   channelState: 400,
@@ -37,6 +39,7 @@ const SECTION_LIMITS: Record<string, number> = {
   projectKnowledge: 3000,
   taskHistory: 1200,
   recentOutlook: 800,
+  recentAcademic: 1200,
   conventions: 2000,
   gotchas: 2000,
   heartbeats: 800,
@@ -142,6 +145,15 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       if (outlookSection) {
         sections.push(monitor.truncate(outlookSection, SECTION_LIMITS.recentOutlook, "context:recent-outlook"));
         totalChars += Math.min(outlookSection.length, SECTION_LIMITS.recentOutlook);
+      }
+    }
+
+    // Priority 5.5: Recent academic notes (course-specific if in a course channel)
+    if (totalChars < MAX_TOTAL_CHARS) {
+      const academicSection = buildRecentAcademicSection(params.channelId);
+      if (academicSection) {
+        sections.push(monitor.truncate(academicSection, SECTION_LIMITS.recentAcademic, "context:recent-academic"));
+        totalChars += Math.min(academicSection.length, SECTION_LIMITS.recentAcademic);
       }
     }
 
@@ -469,6 +481,93 @@ function buildRecentOutlookSection(): string | null {
   } catch {
     return null;
   }
+}
+
+// ─── Academic Notes Section ──────────────────────────────────────────
+
+// Map Discord channel names to course-notes subdirectories
+const COURSE_CHANNEL_MAP: Record<string, string> = {
+  "numerical-methods": "numerical-methods",
+  "philosophy": "philosophy",
+  "systems-programming": "systems-programming",
+  "comp-society": "comp-society",
+};
+
+function buildRecentAcademicSection(channelId: string): string | null {
+  if (!existsSync(COURSE_NOTES_DIR)) return null;
+
+  // Try to resolve channel name from Discord cache (via channel config or project)
+  // For now, check all course dirs and summarize what's available
+  const channelConfig = getChannelConfig(channelId);
+
+  // Determine if we're in a course-specific channel
+  let targetCourse: string | null = null;
+
+  // Check if the channel has a topic or name matching a course
+  // We can also check by looking up the channel name from projects table
+  try {
+    const db = getDb();
+    const row = db.prepare(
+      "SELECT name FROM projects WHERE channel_id = ?"
+    ).get(channelId) as { name: string } | undefined;
+    if (row) {
+      const projectName = row.name.toLowerCase();
+      for (const [chanName, dir] of Object.entries(COURSE_CHANNEL_MAP)) {
+        if (projectName === chanName || projectName.includes(dir)) {
+          targetCourse = dir;
+          break;
+        }
+      }
+    }
+  } catch {}
+
+  // Also check by iterating channel configs for name match
+  // (channels created under School category aren't projects, so check by channelId directly)
+  // We'll build a summary of all courses with note counts, and detail for the target course
+
+  const lines: string[] = ["## Academic Notes"];
+  let hasContent = false;
+
+  try {
+    const courseDirs = readdirSync(COURSE_NOTES_DIR).filter((d) => {
+      try {
+        return existsSync(join(COURSE_NOTES_DIR, d)) &&
+          readdirSync(join(COURSE_NOTES_DIR, d)).some((f) => f.endsWith(".md"));
+      } catch { return false; }
+    });
+
+    if (courseDirs.length === 0) return null;
+
+    // Summary line: note counts per course
+    const counts: string[] = [];
+    for (const dir of courseDirs) {
+      const noteFiles = readdirSync(join(COURSE_NOTES_DIR, dir)).filter((f) => f.endsWith(".md"));
+      counts.push(`${dir}: ${noteFiles.length} notes`);
+    }
+    lines.push(`Courses: ${counts.join(", ")}`);
+    hasContent = true;
+
+    // If in a course channel, list recent notes for that course
+    if (targetCourse && courseDirs.includes(targetCourse)) {
+      const courseDir = join(COURSE_NOTES_DIR, targetCourse);
+      const noteFiles = readdirSync(courseDir)
+        .filter((f) => f.endsWith(".md"))
+        .sort()
+        .slice(-5); // last 5
+
+      if (noteFiles.length > 0) {
+        lines.push(`\nRecent ${targetCourse} notes:`);
+        for (const f of noteFiles) {
+          const title = f.replace(".md", "").replace(/-/g, " ");
+          lines.push(`- ${title}`);
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return hasContent ? lines.join("\n") : null;
 }
 
 // ─── Keyword Extraction (deterministic, no LLM) ─────────────────────

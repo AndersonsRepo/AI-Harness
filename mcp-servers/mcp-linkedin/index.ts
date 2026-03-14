@@ -17,7 +17,7 @@ import { z } from "zod";
 import Database from "better-sqlite3";
 import { existsSync, appendFileSync } from "fs";
 import { join } from "path";
-import { randomBytes } from "crypto";
+import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
 
 // ─── Configuration ───────────────────────────────────────────────────
 
@@ -39,6 +39,34 @@ function getDb(): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   return db;
+}
+
+// ─── Encryption (matches oauth-store.ts format) ────────────────────
+
+const ENCRYPTION_KEY = process.env.OAUTH_ENCRYPTION_KEY || "";
+
+function decryptToken(ciphertext: string): string {
+  if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 64) return ciphertext;
+  const parts = ciphertext.split(":");
+  if (parts.length !== 3) return ciphertext; // Not encrypted (legacy/dev)
+  const [ivHex, tagHex, dataHex] = parts;
+  const key = Buffer.from(ENCRYPTION_KEY, "hex");
+  const iv = Buffer.from(ivHex, "hex");
+  const tag = Buffer.from(tagHex, "hex");
+  const data = Buffer.from(dataHex, "hex");
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
+}
+
+function encryptToken(plaintext: string): string {
+  if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 64) return plaintext;
+  const key = Buffer.from(ENCRYPTION_KEY, "hex");
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
 }
 
 // ─── Token Management ───────────────────────────────────────────────
@@ -73,7 +101,7 @@ async function ensureFreshToken(provider: LinkedInProvider = "linkedin"): Promis
 
   const body = new URLSearchParams({
     grant_type: "refresh_token",
-    refresh_token: row.refresh_token,
+    refresh_token: decryptToken(row.refresh_token),
     client_id: clientId,
     client_secret: clientSecret,
   });
@@ -100,7 +128,7 @@ async function ensureFreshToken(provider: LinkedInProvider = "linkedin"): Promis
     .prepare(
       `UPDATE oauth_tokens SET access_token = ?, refresh_token = COALESCE(?, refresh_token), expires_at = ?, updated_at = datetime('now') WHERE provider = ?`
     )
-    .run(data.access_token, data.refresh_token || null, newExpiresAt, provider);
+    .run(data.access_token, data.refresh_token ? encryptToken(data.refresh_token) : null, newExpiresAt, provider);
 
   return data.access_token;
 }

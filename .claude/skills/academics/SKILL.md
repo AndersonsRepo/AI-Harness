@@ -10,6 +10,8 @@ allowed-tools:
   - Bash
   - Glob
   - Grep
+  - mcp__vault__vault_search
+  - mcp__vault__vault_read
 ---
 
 # Academic Tracker — Canvas iCal + GoodNotes
@@ -84,11 +86,38 @@ Search PDF filenames for the query term:
 ls ~/Documents/GoodNotes-Export/ | grep -i "<query>"
 ```
 
-### `study <topic>` — Generate study summary
-1. Search GoodNotes exports for PDFs related to the topic
-2. Read the most relevant PDFs (up to 3)
-3. Check Canvas feed for related upcoming events/deadlines
-4. Create a concise study summary with key concepts, definitions, and practice questions
+### `study <topic>` — Generate study material from ingested notes
+
+The vault contains structured course notes at `vault/shared/course-notes/`. Each subdirectory is a course:
+
+| Directory | Course |
+|-----------|--------|
+| `numerical-methods/` | Numerical Methods |
+| `philosophy/` | Intro to Philosophy |
+| `systems-programming/` | Systems Programming (CS 2600) |
+| `comp-society/` | Computers and Society |
+
+**Steps:**
+1. Identify which course the topic belongs to (or search all if ambiguous)
+2. Use Grep to search vault course notes for the topic:
+   ```bash
+   grep -ril "<topic>" vault/shared/course-notes/
+   ```
+3. Read the most relevant note files (up to 5) — these are already structured markdown with concepts, definitions, and examples extracted from lecture notes
+4. Check Canvas feed for related upcoming events/deadlines (exams, homework due)
+5. Check `vault/shared/course-notes/systems-programming/exam-schedule.md` if the topic is CS 2600
+6. Generate a study summary with:
+   - **Key concepts** from the matched notes
+   - **Definitions** and formulas
+   - **Practice questions** (generate 3-5 based on the material)
+   - **Upcoming deadlines** related to this topic
+   - **Cross-references** to related notes the student should review
+
+If no vault notes match, fall back to searching raw GoodNotes PDFs at `~/Library/CloudStorage/GoogleDrive-$GOOGLE_DRIVE_ACCOUNT/My Drive/GoodNotes 6/`.
+
+### `study <course>` — Full course review
+
+If the argument matches a course name (e.g., `study numerical-methods`), read ALL notes for that course and generate a comprehensive review covering all topics covered so far.
 
 ## Notes
 
@@ -97,3 +126,5 @@ ls ~/Documents/GoodNotes-Export/ | grep -i "<query>"
 - Other events (lectures, office hours, campus events) will show up too
 - The assignment-reminder heartbeat checks for events due in the next 3 days every 12h
 - The goodnotes-watch heartbeat detects new PDF exports every hour
+- The notes-ingest heartbeat processes new GoodNotes PDFs every 4h into vault course notes
+- The cs2600-watch heartbeat crawls the CS 2600 website weekly for updates

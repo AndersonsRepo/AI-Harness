@@ -1,0 +1,12 @@
+{
+  "name": "code-review",
+  "description": "Daily hybrid code review: static analysis + Claude deep analysis with fix plan",
+  "type": "script",
+  "script": "code-review.py",
+  "schedule": "24h",
+  "enabled": true,
+  "activeHours": {"start": "07:00", "end": "23:00"},
+  "notify": "discord",
+  "discord_channel": "notifications",
+  "timeout": 180
+}

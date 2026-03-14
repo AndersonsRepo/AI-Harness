@@ -1,0 +1,12 @@
+{
+  "name": "lead-gen-pipeline",
+  "description": "Run lead generation pipeline on a rotating schedule — processes niches/cities in batches to spread Bright Data costs",
+  "type": "script",
+  "script": "lead-gen-runner.py",
+  "schedule": "12h",
+  "enabled": true,
+  "activeHours": {"start": "07:00", "end": "23:00"},
+  "notify": "discord",
+  "discord_channel": "lead-gen-pipeline",
+  "timeout": 1800
+}

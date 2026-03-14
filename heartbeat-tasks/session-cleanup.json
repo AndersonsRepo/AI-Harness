@@ -1,11 +1,11 @@
 {
   "name": "session-cleanup",
-  "prompt": "Open the SQLite database at bridges/discord/harness.db using the Bash tool with: sqlite3 bridges/discord/harness.db. Delete sessions older than 7 days: DELETE FROM sessions WHERE last_used < datetime('now', '-7 days'); Report how many were removed using: SELECT changes();",
-  "interval_minutes": 1440,
+  "description": "Clean up stale sessions (>7 days) and old dead letters (>30 days)",
+  "type": "script",
+  "script": "session-cleanup.py",
+  "schedule": "24h",
+  "enabled": true,
   "notify": null,
   "discord_channel": null,
-  "allowed_tools": ["Bash"],
-  "enabled": true,
-  "timeout": 120,
-  "created": "2025-03-10T00:00:00"
+  "timeout": 30
 }

@@ -12,6 +12,7 @@ import { getChannelConfig } from "./channel-config-store.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
+import { AGENT_TOOL_RESTRICTIONS } from "./agent-loader.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -107,12 +108,30 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
     args.push("--permission-mode", channelConfig.permissionMode);
   }
 
-  // Disallowed tools (global safety + channel-specific)
-  let disallowed = GLOBAL_DISALLOWED;
-  if (channelConfig?.disallowedTools?.length) {
-    disallowed += "," + channelConfig.disallowedTools.join(",");
+  // Merge all tool restrictions into single flags
+  const allDisallowed: string[] = [GLOBAL_DISALLOWED];
+  const allAllowed: string[] = [];
+
+  // Agent-specific tool restrictions (deterministic, enforced at CLI level)
+  if (agentName) {
+    const restrictions = AGENT_TOOL_RESTRICTIONS[agentName];
+    if (restrictions?.disallowed?.length) {
+      allDisallowed.push(restrictions.disallowed.join(","));
+    }
+    if (restrictions?.allowed?.length) {
+      allAllowed.push(...restrictions.allowed);
+    }
   }
-  args.push("--disallowedTools", disallowed);
+
+  // Channel-specific overrides
+  if (channelConfig?.disallowedTools?.length) {
+    allDisallowed.push(channelConfig.disallowedTools.join(","));
+  }
+
+  args.push("--disallowedTools", allDisallowed.join(","));
+  if (allAllowed.length) {
+    args.push("--allowedTools", allAllowed.join(","));
+  }
 
   // Model override
   if (channelConfig?.model) {

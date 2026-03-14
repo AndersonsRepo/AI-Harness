@@ -15,6 +15,7 @@ import os
 import json
 import datetime
 import traceback
+import time
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
@@ -44,18 +45,21 @@ def load_config(task_name):
 
 
 def load_state(task_name):
-    """Load task state, or return defaults if none exists."""
-    state_path = os.path.join(TASKS_DIR, f"{task_name}.state.json")
-    if os.path.exists(state_path):
-        with open(state_path) as f:
-            return json.load(f)
-    return {
+    """Load task state, merging with defaults to ensure required keys exist."""
+    defaults = {
         "last_run": None,
         "last_result": None,
         "last_output_summary": None,
         "consecutive_failures": 0,
         "total_runs": 0,
     }
+    state_path = os.path.join(TASKS_DIR, f"{task_name}.state.json")
+    if os.path.exists(state_path):
+        with open(state_path) as f:
+            saved = json.load(f)
+        # Merge: saved values override defaults, but defaults fill missing keys
+        defaults.update(saved)
+    return defaults
 
 
 def save_state(task_name, state):
@@ -203,6 +207,28 @@ def run_task(task_name):
     if not config.get("enabled", True):
         log(task_name, "Task is disabled, skipping")
         return
+
+    # Check active hours — skip if outside configured window
+    active_hours = config.get("activeHours")
+    if active_hours:
+        now = datetime.datetime.now()
+        start_str = active_hours.get("start", "00:00")
+        end_str = active_hours.get("end", "24:00")
+        start_h, start_m = map(int, start_str.split(":"))
+        end_h, end_m = map(int, end_str.split(":"))
+        start_minutes = start_h * 60 + start_m
+        end_minutes = end_h * 60 + end_m
+        now_minutes = now.hour * 60 + now.minute
+        if start_minutes < end_minutes:
+            # Normal range (e.g., 08:00-22:00)
+            if not (start_minutes <= now_minutes < end_minutes):
+                log(task_name, f"Outside active hours ({start_str}-{end_str}), skipping")
+                return
+        else:
+            # Overnight range (e.g., 22:00-06:00)
+            if end_minutes <= now_minutes < start_minutes:
+                log(task_name, f"Outside active hours ({start_str}-{end_str}), skipping")
+                return
 
     # Load state
     state = load_state(task_name)

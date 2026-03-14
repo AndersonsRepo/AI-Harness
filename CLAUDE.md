@@ -56,13 +56,15 @@ Every Claude invocation gets a deterministic context block injected via `--appen
 **Injected at**: `task-runner.ts` (spawnTask), `handoff-router.ts` (executeHandoff), `subagent-manager.ts` (spawnSubagent)
 
 Priority-ordered sections (trimmed if over budget):
-1. Active project + channel config
-2. Relevant learnings (hybrid: semantic embeddings + keyword)
-3. Project-specific knowledge
-4. Task history (last 5)
-5. Conventions + tool gotchas
-6. Heartbeat status
-7. Pending work (notifications, dead letters)
+1. Active project + channel config (600 chars)
+2. Relevant learnings — hybrid: semantic embeddings + keyword (8000 chars)
+3. Project-specific knowledge (3000 chars)
+4. Task history — last 5 (1200 chars)
+5. Recent Outlook — last 24h email summary, watched sender alerts (800 chars)
+5.5. Recent academic notes — course note counts, recent notes if in course channel (1200 chars)
+6. Conventions + tool gotchas (2000 + 2000 chars)
+7. Heartbeat status (800 chars)
+8. Pending work — notifications, dead letters (600 chars)
 
 **Semantic Search**: `bridges/discord/embeddings.ts` — Ollama + nomic-embed-text (768d, local, free). Embeddings stored in `vault/vault-embeddings.json`. Synced on bot startup and when files are written via MCP.
 
@@ -97,6 +99,7 @@ Discord user → bot.ts (queue + command dispatch)
 ### Data Layer
 
 **SQLite** (`bridges/discord/harness.db`) — all bot operational state:
+- `schema_version` — migration tracking (current: v2)
 - `sessions` — channelId → sessionId mapping (compound keys for projects: `channelId:agentName`)
 - `channel_configs` — per-channel agent/model/permission/tools settings
 - `subagents` — background task tracking (spawn, status, PID)
@@ -139,7 +142,11 @@ Discord user → bot.ts (queue + command dispatch)
 | `bridges/discord/oauth-setup.ts` | One-time interactive OAuth flow for Microsoft + LinkedIn |
 | `heartbeat-tasks/scripts/oauth_helper.py` | Python OAuth helper for heartbeat scripts |
 | `bridges/discord/agent-loader.ts` | Shared agent loading, tool restriction definitions |
-| `.claude/agents/*.md` | Agent personalities (orchestrator, researcher, reviewer, builder, ops, commands, project) |
+| `.claude/agents/*.md` | Agent personalities (orchestrator, researcher, reviewer, builder, ops, commands, project, education, hey-lexxi) |
+| `heartbeat-tasks/scripts/session-debrief.py` | Knowledge extraction from Claude Code transcripts |
+| `heartbeat-tasks/scripts/repo-scanner.py` | Security scanning for registered projects |
+| `heartbeat-tasks/scripts/notes-ingest.py` | GoodNotes PDF → vault course notes pipeline |
+| `heartbeat-tasks/scripts/cs2600-watch.py` | Weekly CS 2600 website crawler |
 
 ### Critical: Claude CLI Spawning Rules
 
@@ -163,7 +170,7 @@ These rules are hard-won from debugging. Violating any of them will cause silent
 
 Heartbeat scripts write to `pending-notifications.jsonl`. The bot's `drainNotifications()` reads the `"channel"` field and resolves it by name against Discord guild channels. **Each script's `notify()` function must set the correct channel name** — the `discord_channel` field in heartbeat JSON configs is metadata only, not used by the drain logic.
 
-Channel mapping: goodnotes-watch → `goodnotes`, assignment-reminder → `calendar`, deploy-monitor → `notifications`, repo-scanner → `notifications`.
+Channel mapping: goodnotes-watch → `goodnotes`, assignment-reminder → `calendar`, deploy-monitor → `notifications`, repo-scanner → `notifications`, email-monitor → `outlook`, calendar-sync → `calendar`, cs2600-watch → `systems-programming`, notes-ingest → per-course channel (numerical-methods, philosophy, systems-programming, comp-society), code-review → `notifications`, lead-gen-pipeline → `notifications`.
 
 ### GitHub Webhooks
 
@@ -223,8 +230,9 @@ Defined in `bridges/discord/agent-loader.ts` (`AGENT_TOOL_RESTRICTIONS`). Applie
 | Agent | Restriction | Tools |
 |-------|------------|-------|
 | `orchestrator` | disallowed | Edit, Write, NotebookEdit, git commit/push, npm/npx |
-| `researcher` | allowed (whitelist) | Read, Grep, Glob, WebSearch, WebFetch, vault MCP (read-only) |
-| `reviewer` | allowed (whitelist) | Read, Grep, Glob, git diff/log/show |
+| `researcher` | allowed (whitelist) | Read, Grep, Glob, WebSearch, WebFetch, cat/ls/find/wc/head/tail, vault MCP (read-only), projects MCP (read-only) |
+| `reviewer` | allowed (whitelist) | Read, Grep, Glob, cat/ls, git diff/log/show |
+| `education` | allowed (whitelist) | Read, Grep, Glob, cat/ls/curl/python3, vault MCP (search/read/list) |
 | `builder` | global guardrails only | All tools |
 | `ops` | global guardrails only | All tools |
 | `project` | global guardrails only | All tools |
@@ -315,9 +323,28 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 | GitHub | `/github` | — | github-server | fork, confirmation for merges |
 | Vercel | `/vercel` | deploy-monitor (30m) | — | confirmation for deploy/rollback |
 | Supabase | `/supabase` | — | supabase (postgres) | fork, SQL whitelist, no DELETEs |
-| Canvas+GoodNotes | `/academics` | assignment-reminder (12h), goodnotes-watch (1h) | canvas | fork, read-only |
+| Canvas+GoodNotes | `/academics` | assignment-reminder (12h), goodnotes-watch (1h), notes-ingest (4h) | canvas | fork, read-only |
+| CS 2600 Website | `/academics` | cs2600-watch (168h) | — | read-only crawl |
 | Outlook | — | email-monitor (15m), calendar-sync (2h) | outlook (5 tools) | OAuth token encryption, auto-refresh |
 | LinkedIn | — | — | linkedin (4 tools) | approval token flow, !approve/!reject in Discord |
+
+### Internal Heartbeat Tasks
+
+| Task | Schedule | Purpose |
+|------|----------|---------|
+| session-debrief | 3h | Extract learnings from Claude Code transcripts → vault |
+| session-cleanup | 24h | Clean stale sessions (>7d) and old dead letters (>30d) |
+| health-check | 6h | Bot process, DB, launchd status checks |
+| daily-digest | 24h | Summarize vault activity and learnings |
+| code-review | 12h | Automated code review of registered projects |
+| lead-gen-pipeline | 12h | Lead generation scanning |
+| repo-scanner | 6h | Security scanning (secrets, debug artifacts, npm audit) |
+| learning-pruner | 24h | Archive stale/duplicate vault learnings |
+| promotion-check | 12h | Detect recurring learnings for CLAUDE.md promotion |
+| notification-drain | 5m | Drain pending-notifications.jsonl → Discord |
+| vault-backup | 24h | Auto-commit vault changes to git |
+| token-expiry-check | 24h | Warn about expiring OAuth tokens |
+| lattice-evolve | 1h | Autonomous lattice evolution cycle |
 
 ### Outlook Integration
 
@@ -340,6 +367,48 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 **Approval Flow**: Agent generates content → `linkedin_draft` stores with random approval token → notification to `#linkedin` → user types `!approve <token>` or `!reject <token>` → bot publishes or rejects. Token is single-use and random.
 
 **Data**: `linkedin_posts` table (draft/pending_approval/approved/published/rejected states).
+
+### Academic Integration
+
+**Vault Structure**: `vault/shared/course-notes/<course>/` — structured markdown extracted from GoodNotes PDFs.
+
+| Course | Vault Dir | Discord Channel | Agent |
+|--------|-----------|-----------------|-------|
+| Numerical Methods | `numerical-methods/` | `#numerical-methods` | education |
+| Intro to Philosophy | `philosophy/` | `#philosophy` | education |
+| Systems Programming (CS 2600) | `systems-programming/` | `#systems-programming` | education |
+| Computers and Society | `comp-society/` | `#comp-society` | education |
+
+**Notes Ingestion Pipeline** (`notes-ingest.py`, 4h):
+- Reads new PDFs from goodnotes-watch state → calls Claude Sonnet with `--allowedTools Read --max-turns 15` → writes structured vault markdown
+- COURSE_MAP maps GoodNotes folder names → vault dirs and Discord channels
+- Max 10 PDFs per run (cost control), failure tracking with MAX_FAILURES = 3
+
+**CS 2600 Website Crawler** (`cs2600-watch.py`, weekly):
+- Fetches `profg.codeberg.page/CS_2600.04_Spring_2026/`, content-hash diff, Claude Sonnet summary
+- Maintains exam schedule in `vault/shared/course-notes/systems-programming/exam-schedule.md`
+
+**Education Agent**: Read-only tutor assigned to all course channels. Searches vault notes before answering, generates practice questions, checks Canvas for deadlines. Tool-restricted to Read, Grep, Glob, curl, python3, and vault MCP.
+
+**Context Injection**: `recentAcademic` section (priority 5.5, 1200 chars) — note counts per course, and if in a course channel, lists the 5 most recent notes. Uses `COURSE_CHANNEL_MAP` in `context-assembler.ts`.
+
+### Auto-Created Discord Channels
+
+On bot startup, `bot.ts` ensures these channels exist:
+
+**School Category**:
+- `#calendar` — Canvas iCal feed (assignments, events, due dates)
+- `#goodnotes` — GoodNotes PDF export notifications
+- `#outlook` — Outlook email alerts, calendar notifications
+- `#numerical-methods` — Numerical Methods course (education agent auto-assigned)
+- `#philosophy` — Intro to Philosophy course (education agent auto-assigned)
+- `#systems-programming` — Systems Programming CS 2600 (education agent auto-assigned)
+- `#comp-society` — Computers and Society (education agent auto-assigned)
+
+**Top-level**:
+- `#linkedin` — LinkedIn post drafts, approvals, confirmations
+
+Course channels auto-assign the `education` agent via `setChannelConfig()` on creation or first startup detection.
 
 ### OAuth Infrastructure
 
