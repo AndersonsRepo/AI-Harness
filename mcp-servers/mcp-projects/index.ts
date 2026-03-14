@@ -23,7 +23,7 @@ import {
   renameSync,
 } from "fs";
 import { join } from "path";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 
 // ─── Configuration ───────────────────────────────────────────────────
 
@@ -461,12 +461,21 @@ server.tool(
       return { content: [{ type: "text" as const, text: "repo-scanner.py not found in heartbeat-tasks/scripts/" }] };
     }
 
-    let cmd = `HARNESS_ROOT="${HARNESS_ROOT}" python3 "${scannerScript}" --project "${name}" --json`;
+    const args = [scannerScript, "--project", name, "--json"];
     if (checks && checks.length > 0) {
-      cmd += ` --checks ${checks.join(",")}`;
+      args.push("--checks", checks.join(","));
     }
 
-    const output = safeExec(cmd, { timeout: 60000 });
+    let output: string;
+    try {
+      output = execFileSync("python3", args, {
+        timeout: 60000,
+        encoding: "utf-8",
+        env: { ...process.env, HARNESS_ROOT },
+      }).trim();
+    } catch {
+      output = "";
+    }
     if (!output) {
       return { content: [{ type: "text" as const, text: `Security scan failed or timed out for "${name}".` }] };
     }

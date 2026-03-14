@@ -11,7 +11,7 @@
  *   - Upgrade path: swap JSON store for sqlite-vec when vault exceeds 500 files
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, watch } from "fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, watch, FSWatcher } from "fs";
 import { join, relative } from "path";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
@@ -91,6 +91,10 @@ function discoverVaultFiles(): string[] {
     "shared",
     join("shared", "project-knowledge"),
     join("shared", "scouted"),
+    join("shared", "course-notes", "numerical-methods"),
+    join("shared", "course-notes", "philosophy"),
+    join("shared", "course-notes", "systems-programming"),
+    join("shared", "course-notes", "comp-society"),
     "agents",
     "daily",
   ];
@@ -179,33 +183,47 @@ export async function syncEmbeddings(): Promise<{ added: number; updated: number
 
 // ─── Embed Single File (for post-write hooks) ───────────────────────
 
+// Mutex to prevent concurrent load/modify/save races on the embedding store
+let embedLock: Promise<void> = Promise.resolve();
+
 export async function embedFile(relPath: string): Promise<boolean> {
-  const fullPath = join(VAULT_DIR, relPath);
-  if (!existsSync(fullPath)) return false;
+  // Serialize access to the embedding store
+  const prev = embedLock;
+  let resolve: () => void;
+  embedLock = new Promise<void>((r) => { resolve = r; });
 
-  const content = readFileSync(fullPath, "utf-8");
-  const text = prepareText(content);
-  if (!text) return false;
+  try {
+    await prev; // Wait for any in-flight embedFile to finish
 
-  const embedding = await generateEmbedding(text);
-  if (!embedding) return false;
+    const fullPath = join(VAULT_DIR, relPath);
+    if (!existsSync(fullPath)) return false;
 
-  const store = loadStore();
-  const hash = simpleHash(content);
-  const idx = store.findIndex((e) => e.path === relPath);
-  const entry: EmbeddingEntry = {
-    path: relPath,
-    hash,
-    embedding: normalizeVector(embedding),
-    text: text.slice(0, 200),
-    updatedAt: Date.now(),
-  };
+    const content = readFileSync(fullPath, "utf-8");
+    const text = prepareText(content);
+    if (!text) return false;
 
-  if (idx >= 0) store[idx] = entry;
-  else store.push(entry);
+    const embedding = await generateEmbedding(text);
+    if (!embedding) return false;
 
-  saveStore(store);
-  return true;
+    const store = loadStore();
+    const hash = simpleHash(content);
+    const idx = store.findIndex((e) => e.path === relPath);
+    const entry: EmbeddingEntry = {
+      path: relPath,
+      hash,
+      embedding: normalizeVector(embedding),
+      text: text.slice(0, 200),
+      updatedAt: Date.now(),
+    };
+
+    if (idx >= 0) store[idx] = entry;
+    else store.push(entry);
+
+    saveStore(store);
+    return true;
+  } finally {
+    resolve!();
+  }
 }
 
 // ─── Semantic Search ─────────────────────────────────────────────────
@@ -228,6 +246,32 @@ export async function semanticSearch(query: string, limit: number = 5): Promise<
 
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, limit);
+}
+
+// ─── Temporal Decay ──────────────────────────────────────────────────
+// Recent learnings rank higher. score × e^(-λ × ageInDays)
+// Half-life of 30 days: λ = ln(2) / 30 ≈ 0.0231
+
+const DECAY_HALF_LIFE_DAYS = 30;
+const DECAY_LAMBDA = Math.LN2 / DECAY_HALF_LIFE_DAYS;
+
+// Files exempt from temporal decay (always relevant regardless of age)
+const EVERGREEN_PATTERNS = [
+  /^shared\//, // shared knowledge, project knowledge, course notes
+  /^agents\//, // agent working memory
+];
+
+function applyTemporalDecay(score: number, updatedAt: number, path: string): number {
+  // Skip decay for evergreen files
+  for (const pattern of EVERGREEN_PATTERNS) {
+    if (pattern.test(path)) return score;
+  }
+
+  const ageMs = Date.now() - updatedAt;
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  if (ageDays <= 0) return score;
+
+  return score * Math.exp(-DECAY_LAMBDA * ageDays);
 }
 
 // ─── Hybrid Search (semantic + keyword) ──────────────────────────────
@@ -273,7 +317,10 @@ export async function hybridSearch(
     }
   }
 
-  // Merge: 70% semantic + 30% keyword (when both available)
+  // Build path→entry lookup for temporal decay
+  const entryMap = new Map(store.map((e) => [e.path, e]));
+
+  // Merge: 70% semantic + 30% keyword (when both available), then apply temporal decay
   const allPaths = new Set([...semanticScores.keys(), ...keywordScores.keys()]);
   const results: SearchResult[] = [];
 
@@ -296,7 +343,12 @@ export async function hybridSearch(
       matchType = "keyword";
     }
 
-    const entry = store.find((e) => e.path === path);
+    // Apply temporal decay — recent entries rank higher
+    const entry = entryMap.get(path);
+    if (entry) {
+      score = applyTemporalDecay(score, entry.updatedAt, path);
+    }
+
     results.push({
       path,
       text: entry?.text || "",
@@ -342,6 +394,10 @@ export function getStoreStats(): { fileCount: number; lastSync: number | null } 
 
 // ─── Vault File Watcher ──────────────────────────────────────────────
 
+// Track watchers and intervals for clean shutdown
+const activeWatchers: FSWatcher[] = [];
+let debounceInterval: ReturnType<typeof setInterval> | null = null;
+
 /**
  * Watches vault directories for new/changed .md files and auto-generates
  * embeddings. Uses fs.watch with debouncing to avoid duplicate events.
@@ -352,6 +408,10 @@ export function watchVaultForEmbeddings(): void {
     join(VAULT_DIR, "shared"),
     join(VAULT_DIR, "shared", "project-knowledge"),
     join(VAULT_DIR, "shared", "scouted"),
+    join(VAULT_DIR, "shared", "course-notes", "numerical-methods"),
+    join(VAULT_DIR, "shared", "course-notes", "philosophy"),
+    join(VAULT_DIR, "shared", "course-notes", "systems-programming"),
+    join(VAULT_DIR, "shared", "course-notes", "comp-society"),
     join(VAULT_DIR, "agents"),
     join(VAULT_DIR, "daily"),
   ];
@@ -364,7 +424,7 @@ export function watchVaultForEmbeddings(): void {
     if (!existsSync(dir)) continue;
 
     try {
-      watch(dir, (eventType, filename) => {
+      const watcher = watch(dir, (eventType, filename) => {
         if (!filename || !filename.endsWith(".md")) return;
 
         const relPath = join(relative(VAULT_DIR, dir), filename);
@@ -382,6 +442,7 @@ export function watchVaultForEmbeddings(): void {
         });
       });
 
+      activeWatchers.push(watcher);
       console.log(`[EMBEDDINGS] Watching: ${relative(VAULT_DIR, dir)}/`);
     } catch (err: any) {
       console.error(`[EMBEDDINGS] Failed to watch ${dir}: ${err.message}`);
@@ -389,10 +450,25 @@ export function watchVaultForEmbeddings(): void {
   }
 
   // Clean up debounce map periodically
-  setInterval(() => {
+  debounceInterval = setInterval(() => {
     const cutoff = Date.now() - 60000;
     for (const [key, ts] of recentlyProcessed) {
       if (ts < cutoff) recentlyProcessed.delete(key);
     }
   }, 60000);
+}
+
+/**
+ * Stop all vault embedding watchers and intervals. Call on shutdown.
+ */
+export function stopEmbeddingWatchers(): void {
+  for (const watcher of activeWatchers) {
+    watcher.close();
+  }
+  activeWatchers.length = 0;
+  if (debounceInterval) {
+    clearInterval(debounceInterval);
+    debounceInterval = null;
+  }
+  console.log("[EMBEDDINGS] All watchers stopped");
 }

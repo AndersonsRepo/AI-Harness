@@ -13,7 +13,7 @@ import { getSession, setSession } from "./session-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
 import { monitor } from "./truncation-monitor.js";
-import { readAgentPrompt, getToolRestrictionArgs } from "./agent-loader.js";
+import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS } from "./agent-loader.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -284,12 +284,22 @@ export async function executeHandoff(
     args.push("--append-system-prompt", daemonContext);
   }
 
-  // Safety guardrails
-  args.push("--disallowedTools", GLOBAL_DISALLOWED_TOOLS);
+  // Merge all tool restrictions into single flags
+  const allDisallowed: string[] = [GLOBAL_DISALLOWED_TOOLS];
+  const allAllowed: string[] = [];
 
-  // Agent-specific tool restrictions (deterministic, enforced at CLI level)
-  const restrictionArgs = getToolRestrictionArgs(toAgent);
-  args.push(...restrictionArgs);
+  const restrictions = AGENT_TOOL_RESTRICTIONS[toAgent];
+  if (restrictions?.disallowed?.length) {
+    allDisallowed.push(restrictions.disallowed.join(","));
+  }
+  if (restrictions?.allowed?.length) {
+    allAllowed.push(...restrictions.allowed);
+  }
+
+  args.push("--disallowedTools", allDisallowed.join(","));
+  if (allAllowed.length) {
+    args.push("--allowedTools", allAllowed.join(","));
+  }
 
   // Session resume with compound key
   const sessionKey = getProjectSessionKey(channel.id, toAgent);

@@ -8,7 +8,7 @@ import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { getProjectSessionKey } from "./handoff-router.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
-import { readAgentPrompt, getToolRestrictionArgs } from "./agent-loader.js";
+import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS } from "./agent-loader.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -26,6 +26,56 @@ const GLOBAL_DISALLOWED_TOOLS = [
 
 // Retry backoff: 5s, 25s, 125s (exponential base-5)
 const RETRY_BACKOFF_BASE = 5;
+
+// ─── Loop Detection ──────────────────────────────────────────────────
+// Track recent tool calls per task to detect stuck agents repeating the same actions.
+const LOOP_HISTORY_SIZE = 30;
+const LOOP_WARNING_THRESHOLD = 4;  // warn after 4 repeats of same tool+args pattern
+const taskToolHistory = new Map<string, string[]>();
+
+function checkForLoops(taskId: string, stdout: string): string | null {
+  // Extract tool_use events from stream-json output
+  const toolCalls: string[] = [];
+  for (const line of stdout.split("\n")) {
+    try {
+      const event = JSON.parse(line);
+      if (event.type === "tool_use" || event.type === "tool_result") {
+        // Create a signature from tool name + truncated input
+        const sig = `${event.name || event.tool || "unknown"}:${JSON.stringify(event.input || "").slice(0, 100)}`;
+        toolCalls.push(sig);
+      }
+    } catch {}
+  }
+
+  if (toolCalls.length === 0) return null;
+
+  // Append to history
+  const history = taskToolHistory.get(taskId) || [];
+  history.push(...toolCalls);
+  // Keep only last N entries
+  if (history.length > LOOP_HISTORY_SIZE) {
+    history.splice(0, history.length - LOOP_HISTORY_SIZE);
+  }
+  taskToolHistory.set(taskId, history);
+
+  // Check for repeated patterns
+  const counts = new Map<string, number>();
+  for (const sig of history) {
+    counts.set(sig, (counts.get(sig) || 0) + 1);
+  }
+
+  for (const [sig, count] of counts) {
+    if (count >= LOOP_WARNING_THRESHOLD) {
+      return `Loop detected: "${sig.slice(0, 80)}" repeated ${count} times in last ${history.length} tool calls`;
+    }
+  }
+
+  return null;
+}
+
+function clearLoopHistory(taskId: string): void {
+  taskToolHistory.delete(taskId);
+}
 
 export interface TaskConfig {
   channelId: string;
@@ -80,6 +130,9 @@ export type TaskDeadLetterHandler = (
 
 let outputHandler: TaskOutputHandler | null = null;
 let deadLetterHandler: TaskDeadLetterHandler | null = null;
+
+// Track stream dirs per task for continuation steps
+const taskStreamDirs = new Map<string, string>();
 
 export function onTaskOutput(handler: TaskOutputHandler): void {
   outputHandler = handler;
@@ -201,7 +254,7 @@ function updateTask(id: string, updates: Partial<TaskRecord>): void {
 
 // --- Spawn & execute ---
 
-export async function spawnTask(taskId: string): Promise<{ pid: number; outputFile: string; streamDir: string } | null> {
+export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string }): Promise<{ pid: number; outputFile: string; streamDir: string } | null> {
   const task = getTask(taskId);
   if (!task) return null;
 
@@ -210,7 +263,8 @@ export async function spawnTask(taskId: string): Promise<{ pid: number; outputFi
 
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const outputFile = join(TEMP_DIR, `response-${requestId}.json`);
-  const streamDir = join(STREAM_DIR, requestId);
+  // Reuse the same stream dir for continuation steps so the StreamPoller keeps working
+  const streamDir = opts?.reuseStreamDir || join(STREAM_DIR, requestId);
 
   // Build claude command args
   const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
@@ -249,23 +303,32 @@ export async function spawnTask(taskId: string): Promise<{ pid: number; outputFi
     args.push("--model", channelConfig.model);
   }
 
-  // Safety guardrails
-  args.push("--disallowedTools", GLOBAL_DISALLOWED_TOOLS);
+  // Merge all tool restrictions into single flags to avoid Commander.js last-wins behavior
+  const allDisallowed: string[] = [GLOBAL_DISALLOWED_TOOLS];
+  const allAllowed: string[] = [];
 
   // Agent-specific tool restrictions (deterministic, enforced at CLI level)
   if (agentName) {
-    const restrictionArgs = getToolRestrictionArgs(agentName);
-    args.push(...restrictionArgs);
+    const restrictions = AGENT_TOOL_RESTRICTIONS[agentName];
+    if (restrictions?.disallowed?.length) {
+      allDisallowed.push(restrictions.disallowed.join(","));
+    }
+    if (restrictions?.allowed?.length) {
+      allAllowed.push(...restrictions.allowed);
+    }
   }
 
-  // Channel-specific allowed tools
-  if (channelConfig?.allowedTools?.length) {
-    args.push("--allowedTools", channelConfig.allowedTools.join(","));
-  }
-
-  // Channel-specific disallowed tools
+  // Channel-specific overrides
   if (channelConfig?.disallowedTools?.length) {
-    args.push("--disallowedTools", channelConfig.disallowedTools.join(","));
+    allDisallowed.push(channelConfig.disallowedTools.join(","));
+  }
+  if (channelConfig?.allowedTools?.length) {
+    allAllowed.push(...channelConfig.allowedTools);
+  }
+
+  args.push("--disallowedTools", allDisallowed.join(","));
+  if (allAllowed.length) {
+    args.push("--allowedTools", allAllowed.join(","));
   }
 
   // Session resume
@@ -334,6 +397,9 @@ export async function spawnTask(taskId: string): Promise<{ pid: number; outputFi
   trackWatcher(watcher);
   watcher.start();
 
+  // Track stream dir for continuation steps
+  taskStreamDirs.set(taskId, streamDir);
+
   return { pid, outputFile, streamDir };
 }
 
@@ -382,6 +448,23 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     const responseText = extractResponse(stdout);
     const sessionId = extractSessionId(stdout);
 
+    // Loop detection — check for repeated tool call patterns
+    const loopWarning = checkForLoops(taskId, stdout);
+    if (loopWarning) {
+      console.warn(`[TASK] ${taskId} ${loopWarning}`);
+      // Kill the task if looping — don't allow continuation
+      updateTask(taskId, { status: "completed", last_error: loopWarning });
+      clearLoopHistory(taskId);
+      taskStreamDirs.delete(taskId);
+      if (outputHandler) {
+        const warningText = responseText
+          ? `${responseText}\n\n⚠️ Task stopped: ${loopWarning}`
+          : `⚠️ Task stopped: ${loopWarning}`;
+        await outputHandler(taskId, warningText, null, sessionId, raw);
+      }
+      return;
+    }
+
     // Save session
     if (sessionId) {
       const sessionKey = task.session_key || task.channel_id;
@@ -398,13 +481,16 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
         await outputHandler(taskId, responseText, null, sessionId, raw);
       }
 
-      // Spawn next step
-      await spawnTask(taskId);
+      // Spawn next step — reuse stream dir so StreamPoller keeps working
+      const existingStreamDir = taskStreamDirs.get(taskId);
+      await spawnTask(taskId, existingStreamDir ? { reuseStreamDir: existingStreamDir } : undefined);
       return;
     }
 
     // Task completed
     updateTask(taskId, { status: "completed" });
+    taskStreamDirs.delete(taskId);
+    clearLoopHistory(taskId);
     console.log(`[TASK] ${taskId} completed after ${task.step_count} steps`);
 
     if (outputHandler) {
@@ -429,6 +515,8 @@ async function handleFailure(taskId: string, error: string): Promise<void> {
     // Move to dead letter
     console.log(`[TASK] ${taskId} exhausted all ${task.max_attempts} attempts, moving to dead letter`);
     updateTask(taskId, { status: "dead", last_error: error });
+    taskStreamDirs.delete(taskId);
+    clearLoopHistory(taskId);
 
     const db = getDb();
     const dlId = `dl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -573,9 +661,10 @@ export function cancelTask(taskId: string): boolean {
     } catch {}
   }
 
-  updateTask(taskId, { status: "failed", last_error: "Cancelled by user" });
-  // Set max_attempts to prevent retry
-  getDb().prepare("UPDATE task_queue SET max_attempts = attempt WHERE id = ?").run(taskId);
+  // Atomic update: set failed + prevent retry in a single statement
+  getDb().prepare(
+    "UPDATE task_queue SET status = 'failed', last_error = 'Cancelled by user', max_attempts = attempt, updated_at = ? WHERE id = ?"
+  ).run(new Date().toISOString(), taskId);
   return true;
 }
 

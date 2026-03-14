@@ -88,13 +88,39 @@ def get_tokens(provider):
         conn.close()
 
 
+def _encrypt_refresh_token(plaintext):
+    """
+    Encrypt refresh token with AES-256-GCM to match TypeScript oauth-store format.
+    Falls back to plaintext if OAUTH_ENCRYPTION_KEY is not set.
+    """
+    key_hex = os.environ.get("OAUTH_ENCRYPTION_KEY", "")
+    if not key_hex or len(key_hex) != 64:
+        return plaintext  # No encryption key — store as plaintext
+
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        key = bytes.fromhex(key_hex)
+        aesgcm = AESGCM(key)
+        iv = os.urandom(12)  # 96-bit nonce
+        ciphertext_and_tag = aesgcm.encrypt(iv, plaintext.encode("utf-8"), None)
+        # Split: ciphertext is all but last 16 bytes, tag is last 16 bytes
+        ciphertext = ciphertext_and_tag[:-16]
+        tag = ciphertext_and_tag[-16:]
+        return f"{iv.hex()}:{tag.hex()}:{ciphertext.hex()}"
+    except ImportError:
+        print("WARNING: cryptography package not installed, storing refresh token as plaintext", file=sys.stderr)
+        return plaintext
+    except Exception as e:
+        print(f"WARNING: Failed to encrypt refresh token: {e}", file=sys.stderr)
+        return plaintext
+
+
 def _save_tokens(provider, tokens):
-    """Save tokens back to SQLite (no encryption — heartbeat scripts don't encrypt)."""
+    """Save tokens back to SQLite with encrypted refresh token."""
     conn = _get_db()
     try:
-        # We don't re-encrypt because Python heartbeat scripts should read-only refresh
-        # The TypeScript oauth-store handles encryption on save
-        # For refresh, we store the new encrypted token from the API response
+        # Re-encrypt the refresh token so TypeScript side can read it
+        encrypted_refresh = _encrypt_refresh_token(tokens["refresh_token"])
         conn.execute(
             """INSERT INTO oauth_tokens (provider, access_token, refresh_token, token_type, expires_at, scopes, extra, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -107,7 +133,7 @@ def _save_tokens(provider, tokens):
             (
                 provider,
                 tokens["access_token"],
-                tokens["refresh_token"],  # Keep existing encrypted value
+                encrypted_refresh,
                 tokens.get("token_type", "Bearer"),
                 tokens["expires_at"],
                 tokens["scopes"],

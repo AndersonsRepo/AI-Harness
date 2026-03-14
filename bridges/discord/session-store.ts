@@ -38,6 +38,19 @@ export function clearSession(channelId: string): boolean {
   return result.changes > 0;
 }
 
+/**
+ * Clear all sessions for a channel, including compound keys (channelId:agentName).
+ * Used by /new in project channels where each agent has its own session.
+ */
+export function clearChannelSessions(channelId: string): number {
+  const db = getDb();
+  // Clear exact match + compound keys starting with channelId:
+  const result = db.prepare(
+    "DELETE FROM sessions WHERE channel_id = ? OR channel_id LIKE ?"
+  ).run(channelId, `${channelId}:%`);
+  return result.changes;
+}
+
 export function validateSession(channelId: string): boolean {
   const db = getDb();
   const row = db.prepare("SELECT channel_id FROM sessions WHERE channel_id = ?").get(channelId);

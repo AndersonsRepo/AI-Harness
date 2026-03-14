@@ -213,6 +213,11 @@ server.tool(
     id: z.string().describe("Learning ID (e.g., LRN-20250309-001) or relative path (e.g., learnings/LRN-20250309-001.md)"),
   },
   async ({ id }) => {
+    // Sanitize: reject path traversal attempts
+    if (id.includes("..") || id.startsWith("/")) {
+      return { content: [{ type: "text" as const, text: `Invalid ID: path traversal not allowed` }] };
+    }
+
     // Try as direct path first
     let filePath = join(VAULT_DIR, id);
     if (!existsSync(filePath)) {
@@ -246,6 +251,11 @@ server.tool(
     project: z.string().optional().default("ai-harness").describe("Project name"),
   },
   async ({ id, type, title, area, tags, patternKey, body, severity, priority, project }) => {
+    // Sanitize: reject path traversal attempts
+    if (id.includes("..") || id.startsWith("/")) {
+      return { content: [{ type: "text" as const, text: `Invalid ID: path traversal not allowed` }] };
+    }
+
     mkdirSync(LEARNINGS_DIR, { recursive: true });
 
     // --- Dedup: check for existing entry with same pattern-key ---

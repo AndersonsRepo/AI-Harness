@@ -10,7 +10,7 @@ import {
 } from "discord.js";
 import { spawn } from "child_process";
 import { config } from "dotenv";
-import { getSession, setSession, clearSession, validateSession } from "./session-store.js";
+import { getSession, setSession, clearSession, clearChannelSessions, validateSession } from "./session-store.js";
 import {
   getChannelConfig,
   setChannelConfig,
@@ -58,6 +58,7 @@ import {
   unlinkSync,
   mkdirSync,
   writeFileSync,
+  appendFileSync,
   readdirSync,
 } from "fs";
 import { join } from "path";
@@ -87,7 +88,7 @@ import {
   type TaskRecord,
   type DeadLetterRecord,
 } from "./task-runner.js";
-import { syncEmbeddings, watchVaultForEmbeddings } from "./embeddings.js";
+import { syncEmbeddings, watchVaultForEmbeddings, stopEmbeddingWatchers } from "./embeddings.js";
 
 config();
 
@@ -110,6 +111,7 @@ try {
       unlinkSync(PID_FILE);
     } catch {}
     stopAllWatchers();
+    stopEmbeddingWatchers();
     closeDb();
   });
   process.on("SIGINT", () => process.exit(0));
@@ -496,8 +498,30 @@ async function invokeOrchestratorDebrief(
     return;
   }
 
-  // Store context so it gets handled by the normal onTaskOutput flow
-  // We need a synthetic message — use the channel to send updates
+  // Store context so the normal onTaskOutput flow posts the debrief to Discord.
+  // Use a synthetic "message" that supports .reply() via the channel.
+  const syntheticMessage = {
+    channel,
+    reply: (content: any) => channel.send(content),
+  } as unknown as Message;
+
+  const activity: AgentActivity = {
+    channelId: channel.id,
+    agent: "orchestrator",
+    prompt: "[CHAIN_COMPLETE] debrief",
+    startedAt: Date.now(),
+  };
+
+  pendingTaskContexts.set(taskId, {
+    message: syntheticMessage,
+    channelId: channel.id,
+    userText: "[CHAIN_COMPLETE]",
+    agentName: "orchestrator",
+    streamDir: spawnResult.streamDir,
+    isRetry: false,
+    activity,
+  });
+
   console.log(`[DEBRIEF] Orchestrator debrief spawned as ${taskId}`);
 }
 
@@ -633,12 +657,12 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     return true;
   }
 
-  // /new — clear session
+  // /new — clear session (handles compound keys for project channels)
   if (content === "/new") {
-    const cleared = clearSession(channelId);
+    const cleared = clearChannelSessions(channelId);
     await message.reply(
-      cleared
-        ? "Session cleared. Next message starts a fresh conversation."
+      cleared > 0
+        ? `Cleared ${cleared} session(s). Next message starts a fresh conversation.`
         : "No active session in this channel."
     );
     return true;
@@ -1113,7 +1137,7 @@ async function handleLinkedInApproval(message: Message, token: string, approve: 
         timestamp: new Date().toISOString(),
       });
       const notifyPath = join(HARNESS_ROOT, "heartbeat-tasks", "pending-notifications.jsonl");
-      writeFileSync(notifyPath, readFileSync(notifyPath, "utf-8") + publishNotif + "\n");
+      appendFileSync(notifyPath, publishNotif + "\n");
     } else {
       db.prepare("UPDATE linkedin_posts SET status = 'rejected', approval_token = NULL WHERE id = ?").run(post.id);
 
@@ -1143,8 +1167,22 @@ async function drainNotifications(): Promise<void> {
   try {
     if (!existsSync(NOTIFY_FILE)) return;
 
-    const raw = readFileSync(NOTIFY_FILE, "utf-8").trim();
-    if (!raw) return;
+    // Atomic claim: rename the file so new writes go to a fresh file
+    // This prevents TOCTOU races with heartbeat scripts appending concurrently
+    const claimedFile = NOTIFY_FILE + ".draining";
+    try {
+      const { renameSync } = await import("fs");
+      renameSync(NOTIFY_FILE, claimedFile);
+    } catch (err: any) {
+      if (err.code === "ENOENT") return; // File disappeared between check and rename
+      throw err;
+    }
+
+    const raw = readFileSync(claimedFile, "utf-8").trim();
+    if (!raw) {
+      unlinkSync(claimedFile);
+      return;
+    }
 
     const lines = raw.split("\n").filter(Boolean);
     const failed: string[] = [];
@@ -1155,7 +1193,6 @@ async function drainNotifications(): Promise<void> {
         const channelName: string = notif.channel || "general";
         const task: string = notif.task || "unknown";
         const summary: string = notif.summary || "No summary";
-        const ts: string = (notif.timestamp || "").slice(0, 16);
 
         let targetChannel: TextChannel | null = null;
         for (const guild of client.guilds.cache.values()) {
@@ -1192,7 +1229,9 @@ async function drainNotifications(): Promise<void> {
           .setTimestamp(new Date(notif.timestamp || Date.now()))
           .setFooter({ text: "AI Harness Heartbeat" });
 
-        await targetChannel.send({ embeds: [embed] });
+        await targetChannel.send({ embeds: [embed] }).catch((err: any) =>
+          console.error(`[NOTIFY] Discord send failed: ${err.message}`)
+        );
         console.log(`[NOTIFY] Sent '${task}' to #${channelName}`);
       } catch (err: any) {
         console.error(`[NOTIFY] Failed to process: ${err.message}`);
@@ -1201,10 +1240,10 @@ async function drainNotifications(): Promise<void> {
     }
 
     if (failed.length > 0) {
-      writeFileSync(NOTIFY_FILE, failed.join("\n") + "\n");
-    } else {
-      unlinkSync(NOTIFY_FILE);
+      // Write back failed items to the main file (append, not overwrite, in case new items arrived)
+      appendFileSync(NOTIFY_FILE, failed.join("\n") + "\n");
     }
+    unlinkSync(claimedFile);
   } catch (err: any) {
     if (err.code !== "ENOENT") {
       console.error(`[NOTIFY] Error: ${err.message}`);
@@ -1325,6 +1364,36 @@ client.on("clientReady", async () => {
           reason: "AI Harness Outlook integration",
         });
         console.log(`[SCHOOL] Created #outlook channel in ${guild.name}`);
+      }
+      // Per-course channels under School
+      const courseChannels = [
+        { name: "numerical-methods", topic: "Numerical Methods — notes, assignments, study material" },
+        { name: "philosophy", topic: "Intro to Philosophy — notes, assignments, study material" },
+        { name: "systems-programming", topic: "Systems Programming (CS 2600) — notes, assignments, study material" },
+        { name: "comp-society", topic: "Computers and Society — notes, assignments, study material" },
+      ];
+      for (const cc of courseChannels) {
+        const existing = guild.channels.cache.find(
+          (c) => c.name === cc.name && c.parentId === schoolCat!.id
+        );
+        if (!existing) {
+          const newCh = await guild.channels.create({
+            name: cc.name,
+            type: ChannelType.GuildText,
+            parent: schoolCat.id,
+            topic: cc.topic,
+            reason: "AI Harness per-course academic channel",
+          });
+          setChannelConfig(newCh.id, { agent: "education" });
+          console.log(`[SCHOOL] Created #${cc.name} channel with education agent in ${guild.name}`);
+        } else {
+          // Ensure education agent is assigned to existing course channels
+          const cfg = getChannelConfig(existing.id);
+          if (!cfg?.agent) {
+            setChannelConfig(existing.id, { agent: "education" });
+            console.log(`[SCHOOL] Assigned education agent to existing #${cc.name}`);
+          }
+        }
       }
     } catch (err: any) {
       console.error(`[SCHOOL] Failed to create school channels: ${err.message}`);

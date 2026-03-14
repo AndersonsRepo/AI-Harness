@@ -304,7 +304,11 @@ export function resolveProjectWorkdir(projectName: string): string | null {
     if (!existsSync(projectsFile)) return null;
 
     const data = JSON.parse(readFileSync(projectsFile, "utf-8"));
-    const entry = data.projects?.[projectName];
+    // Case-insensitive lookup: Discord channel names may differ in case from projects.json keys
+    const projectKey = Object.keys(data.projects || {}).find(
+      (k) => k.toLowerCase() === projectName.toLowerCase()
+    );
+    const entry = projectKey ? data.projects[projectKey] : null;
     if (!entry?.path) return null;
 
     // Resolve environment variables in path
