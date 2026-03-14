@@ -10,6 +10,11 @@
         "matcher": "Bash",
         "command": "bash .claude/skills/self-improve/scripts/error-detector.sh \"$EXIT_CODE\" \"$STDOUT\" \"$STDERR\""
       }
+    ],
+    "Stop": [
+      {
+        "command": "bash .claude/skills/self-improve/scripts/session-flush.sh"
+      }
     ]
   }
 }

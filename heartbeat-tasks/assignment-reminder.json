@@ -3,7 +3,7 @@
   "description": "Check Canvas iCal feed for events due in the next 3 days",
   "type": "script",
   "script": "assignment-reminder.py",
-  "schedule": "12h",
+  "cron": "0 8 * * *",
   "enabled": true,
   "notify": "discord",
   "discord_channel": "calendar",

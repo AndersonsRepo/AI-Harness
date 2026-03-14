@@ -27,6 +27,56 @@ const GLOBAL_DISALLOWED_TOOLS = [
 // Retry backoff: 5s, 25s, 125s (exponential base-5)
 const RETRY_BACKOFF_BASE = 5;
 
+// ─── Model Failover / Cooldown ───────────────────────────────────────
+// Track consecutive API failures across all tasks. When Claude is repeatedly
+// unavailable, pause new task submission and notify Discord.
+
+const COOLDOWN_THRESHOLD = 3;         // consecutive API failures to trigger cooldown
+const COOLDOWN_DURATION_MS = 5 * 60 * 1000;  // 5 minutes cooldown
+let consecutiveApiFailures = 0;
+let cooldownUntil = 0;
+let cooldownNotified = false;
+
+function isTransientApiError(stderr: string): boolean {
+  const lower = stderr.toLowerCase();
+  return ["429", "rate limit", "503", "502", "500", "overloaded", "connection", "econnreset"].some(
+    (s) => lower.includes(s)
+  );
+}
+
+function recordApiSuccess(): void {
+  if (consecutiveApiFailures > 0) {
+    console.log(`[COOLDOWN] API recovered after ${consecutiveApiFailures} consecutive failures`);
+  }
+  consecutiveApiFailures = 0;
+  cooldownNotified = false;
+}
+
+function recordApiFailure(): { shouldCooldown: boolean } {
+  consecutiveApiFailures++;
+  if (consecutiveApiFailures >= COOLDOWN_THRESHOLD) {
+    cooldownUntil = Date.now() + COOLDOWN_DURATION_MS;
+    console.warn(`[COOLDOWN] ${consecutiveApiFailures} consecutive API failures — pausing tasks for ${COOLDOWN_DURATION_MS / 1000}s`);
+    return { shouldCooldown: true };
+  }
+  return { shouldCooldown: false };
+}
+
+export function isInCooldown(): boolean {
+  if (Date.now() < cooldownUntil) return true;
+  // Cooldown expired — reset
+  if (cooldownUntil > 0 && Date.now() >= cooldownUntil) {
+    cooldownUntil = 0;
+    consecutiveApiFailures = 0;
+    console.log("[COOLDOWN] Cooldown period expired, resuming tasks");
+  }
+  return false;
+}
+
+export function getCooldownStatus(): { inCooldown: boolean; failureCount: number; expiresAt: number } {
+  return { inCooldown: isInCooldown(), failureCount: consecutiveApiFailures, expiresAt: cooldownUntil };
+}
+
 // ─── Loop Detection ──────────────────────────────────────────────────
 // Track recent tool calls per task to detect stuck agents repeating the same actions.
 const LOOP_HISTORY_SIZE = 30;
@@ -149,6 +199,21 @@ function generateId(): string {
 // --- Extract helpers (shared with bot.ts) ---
 
 export function extractResponse(output: string): string | null {
+  // Stream-json output: multiple JSON lines. Find the "result" type line.
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.type === "result") {
+        if (parsed.is_error) return `Error: ${parsed.result || "Unknown error"}`;
+        const text = parsed.result || parsed.text || parsed.content;
+        return text ? text.trim() : null;
+      }
+    } catch {}
+  }
+
+  // Fallback: single JSON object (non-streaming output format)
   try {
     const jsonStart = output.indexOf('{"type"');
     if (jsonStart !== -1) {
@@ -159,6 +224,8 @@ export function extractResponse(output: string): string | null {
       return text ? text.trim() : null;
     }
   } catch {}
+
+  // Last resort: regex match
   const match = output.match(/"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   if (match) {
     return match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').trim();
@@ -167,6 +234,16 @@ export function extractResponse(output: string): string | null {
 }
 
 export function extractSessionId(output: string): string | null {
+  // Stream-json: find session_id in the result or system init line
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.session_id) return parsed.session_id;
+    } catch {}
+  }
+  // Fallback regex
   const match = output.match(/"session_id"\s*:\s*"([^"]+)"/);
   return match ? match[1] : null;
 }
@@ -257,6 +334,13 @@ function updateTask(id: string, updates: Partial<TaskRecord>): void {
 export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string }): Promise<{ pid: number; outputFile: string; streamDir: string } | null> {
   const task = getTask(taskId);
   if (!task) return null;
+
+  // Check cooldown — don't spawn if Claude API is repeatedly failing
+  if (isInCooldown()) {
+    console.warn(`[TASK] ${taskId} skipped — API cooldown active (${consecutiveApiFailures} failures)`);
+    updateTask(taskId, { status: "pending", last_error: "API cooldown — will retry when service recovers" });
+    return null;
+  }
 
   try { mkdirSync(TEMP_DIR, { recursive: true }); } catch {}
   try { mkdirSync(STREAM_DIR, { recursive: true }); } catch {}
@@ -437,6 +521,15 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
 
     if (returncode !== 0) {
       const errorMsg = stderr?.trim() || `Claude exited with code ${returncode}`;
+      // Track API failures for cooldown
+      if (isTransientApiError(errorMsg)) {
+        const { shouldCooldown } = recordApiFailure();
+        if (shouldCooldown && !cooldownNotified && outputHandler) {
+          cooldownNotified = true;
+          // Notify via the output handler (bot.ts will post to Discord)
+          await outputHandler(taskId, `⚠️ Claude API appears down (${consecutiveApiFailures} consecutive failures). Tasks paused for ${COOLDOWN_DURATION_MS / 60000} minutes.`, null, null, raw);
+        }
+      }
       await handleFailure(taskId, errorMsg);
       // Notify handler of the error
       if (outputHandler) {
@@ -444,6 +537,9 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
       }
       return;
     }
+
+    // Successful response — reset API failure counter
+    recordApiSuccess();
 
     const responseText = extractResponse(stdout);
     const sessionId = extractSessionId(stdout);

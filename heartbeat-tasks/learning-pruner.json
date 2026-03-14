@@ -6,6 +6,7 @@
   "discord_channel": "notifications",
   "allowed_tools": ["Read", "Write", "Glob", "Grep"],
   "enabled": true,
+  "activeHours": {"start": "07:00", "end": "23:00"},
   "timeout": 300,
   "created": "2026-03-10T00:00:00"
 }

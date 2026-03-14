@@ -5,6 +5,7 @@
   "script": "session-debrief.py",
   "schedule": "3h",
   "enabled": true,
+  "activeHours": {"start": "07:00", "end": "23:00"},
   "notify": "discord",
   "discord_channel": "notifications",
   "timeout": 180

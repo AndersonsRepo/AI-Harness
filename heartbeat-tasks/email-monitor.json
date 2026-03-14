@@ -4,7 +4,7 @@
   "type": "script",
   "script": "email-monitor.py",
   "schedule": "15m",
-  "enabled": true,
+  "enabled": false,
   "notify": "discord",
   "discord_channel": "outlook",
   "timeout": 60
