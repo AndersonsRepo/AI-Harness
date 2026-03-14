@@ -21,7 +21,8 @@ Create, list, pause, and delete recurring background tasks that run Claude on a 
 
 ## Commands
 
-- `/heartbeat create <name> "<prompt>" --interval <minutes>` — Create a new scheduled task
+- `/heartbeat create <name> "<prompt>" --interval <minutes>` — Create a new scheduled task (interval-based)
+- `/heartbeat create <name> "<prompt>" --cron "0 8 * * 1-5"` — Create a new scheduled task (cron-based)
 - `/heartbeat list` — Show all heartbeat tasks and their status
 - `/heartbeat pause <name>` — Disable a task without deleting it
 - `/heartbeat resume <name>` — Re-enable a paused task
@@ -54,14 +55,31 @@ Each task is defined in `heartbeat-tasks/<task-name>.json`:
 ```json
 {
   "name": "daily-digest",
-  "prompt": "Read all files in vault/learnings/ with today's date. Summarize what was learned, any patterns approaching promotion (recurrence-count >= 2), and any quick-win feature requests. Write the summary to vault/daily/<today>.md.",
-  "interval_minutes": 1440,
+  "prompt": "Read all files in vault/learnings/ with today's date...",
+  "schedule": "24h",
   "notify": "discord",
   "discord_channel": "general",
   "allowed_tools": ["Read", "Write", "Glob", "Grep"],
   "enabled": true,
-  "created": "2025-03-10T09:00:00"
+  "activeHours": {"start": "07:00", "end": "23:00"}
 }
+```
+
+**Schedule formats** (use ONE):
+- `"schedule": "30m"` — Interval-based (minutes/hours). Maps to launchd `StartInterval`.
+- `"cron": "0 8 * * 1-5"` — Cron expression (min hour day month weekday). Maps to launchd `StartCalendarInterval`.
+
+**Cron examples:**
+- `"0 8 * * 1-5"` — Weekdays at 8:00 AM
+- `"0 10 * * 0"` — Sundays at 10:00 AM
+- `"30 9 1 * *"` — 1st of every month at 9:30 AM
+- `"0 */6 * * *"` — Every 6 hours on the hour
+
+When generating a plist for a cron-based task, convert the cron expression to `StartCalendarInterval`.
+For day-of-week ranges like `1-5`, create an **array** of dicts (one per weekday).
+Cron weekday: 0=Sunday, 1=Monday ... 6=Saturday (matches launchd convention).
+
+**activeHours** (optional): `{"start": "HH:MM", "end": "HH:MM"}` — heartbeat-runner skips execution outside this window. Useful for tasks that shouldn't run overnight.
 ```
 
 ## State Format
@@ -115,8 +133,27 @@ Generate a plist at `~/Library/LaunchAgents/com.aiharness.heartbeat.<name>.plist
         <string>$HOME</string>
     </dict>
 
+    <!-- Use ONE of StartInterval OR StartCalendarInterval, not both -->
+
+    <!-- Option A: Interval-based (e.g., every 60 minutes) -->
     <key>StartInterval</key>
     <integer><!-- interval_minutes * 60 --></integer>
+
+    <!-- Option B: Cron-based (e.g., weekdays at 8am) -->
+    <!-- Parse cron expression: "minute hour day month weekday" -->
+    <!-- Weekday: 0=Sunday, 1=Monday, ..., 6=Saturday -->
+    <!--
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+        <key>Weekday</key>
+        <integer>1</integer>
+    </dict>
+    -->
+    <!-- For multiple schedules (e.g., Mon-Fri), use an array of dicts -->
 
     <key>RunAtLoad</key>
     <false/>

@@ -266,6 +266,13 @@ Run `HARNESS_ROOT=/path/to/AI-Harness npx tsx bridges/discord/test-upgrade.ts` t
 - **HARNESS_ROOT required**: Always set `HARNESS_ROOT=/path/to/AI-Harness` when starting the bot. Without it, `db.ts` resolves `./bridges/discord/harness.db` relative to cwd, which fails if cwd is `bridges/discord/`.
 - **Google Drive CloudStorage latency**: `~/Library/CloudStorage/GoogleDrive-*/` is a virtual filesystem. `os.walk()` can take 60-90s with many files. Set heartbeat timeouts accordingly (goodnotes-watch uses 120s).
 - **Heartbeat auto-pause**: 3 consecutive failures auto-disables a task. Reset by setting `consecutive_failures: 0` and `enabled: true` in both the `.state.json` and task `.json` config.
+- **Active hours**: Heartbeat configs can include `"activeHours": {"start": "07:00", "end": "23:00"}` to skip overnight runs. Checked by `heartbeat-runner.py` before execution.
+- **Cron scheduling**: Heartbeat configs can use `"cron": "0 8 * * 1-5"` (5-field expression) instead of `"schedule": "12h"` for exact-time scheduling. Use `heartbeat-tasks/scripts/generate-plist.py <name> --install` to generate and install the plist with `StartCalendarInterval`.
+- **API cooldown**: `task-runner.ts` tracks consecutive API failures. After 3 failures, tasks pause for 5 minutes with a Discord notification. Auto-resumes when cooldown expires.
+- **Retry with backoff**: `claude-runner.py` retries transient errors (429, 5xx, connection resets) up to 3 times with 5s/15s/45s delays before reporting failure.
+- **Loop detection**: `task-runner.ts` tracks the last 30 tool calls per task. If the same tool+args pattern repeats 4+ times, the task is killed with a warning.
+- **Temporal decay**: Embedding search scores decay with a 30-day half-life (`score × e^(-λ × age)`). Files under `shared/` and `agents/` are exempt (evergreen).
+- **Pre-compaction flush**: A `Stop` hook runs `session-debrief.py` when a Claude Code conversation ends, capturing learnings before context is lost.
 
 ---
 
@@ -284,6 +291,7 @@ Skills are Claude Code's mechanism for reusable, structured capabilities. Each s
 | `test-harness` | `/test-harness` | Automated + manual test checklist; `!command` injects changed files |
 | `vault-query` | `/vault-query` | CLI vault search (stats, promotions, by-tag, free-form); `context: fork` + `model: sonnet` |
 | `health-report` | `/health-report` | System health checks (bot, db, heartbeat, vault); `context: fork` + `agent: ops` |
+| `security-audit` | `/security-audit` | Security posture check (credentials, git, heartbeat, config drift); `context: fork` + `agent: ops` + `model: sonnet` |
 | `review-changes` | `/review-changes` | Code review for uncommitted changes; `context: fork` + `agent: reviewer` |
 | `digest` | `/digest` | On-demand learning summaries with date ranges; `context: fork` + `model: sonnet` |
 | `github` | `/github` | GitHub PR/issue/repo management via `gh` CLI; `context: fork` + `agent: ops` |
