@@ -65,9 +65,20 @@ export class StreamPoller {
       clearInterval(this.fallbackInterval);
       this.fallbackInterval = null;
     }
-    // Final flush
-    if (this.accumulatedText) {
-      this.callback(this.accumulatedText);
+    // Don't flush if the result event already arrived — the onTaskOutput
+    // handler will post the final response to avoid duplicates.
+  }
+
+  /** Stop without flushing — used when the result event arrives,
+   *  since the onTaskOutput handler will post the final response. */
+  private stopWithoutFlush(): void {
+    if (this.watcher) {
+      this.watcher.close();
+      this.watcher = null;
+    }
+    if (this.fallbackInterval) {
+      clearInterval(this.fallbackInterval);
+      this.fallbackInterval = null;
     }
   }
 
@@ -124,10 +135,10 @@ export class StreamPoller {
         break;
       case "result":
         this.done = true;
-        if (event.result) {
-          this.accumulatedText = event.result;
-        }
-        this.stop();
+        // Don't update accumulatedText or flush — the onTaskOutput handler
+        // will post the final response. The stream poller only handles
+        // progressive updates during execution.
+        this.stopWithoutFlush();
         break;
     }
   }
