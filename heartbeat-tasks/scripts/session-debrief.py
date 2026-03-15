@@ -223,6 +223,129 @@ def load_existing_pattern_keys():
     return keys
 
 
+def load_existing_entries():
+    """Load existing vault entries with metadata for semantic dedup.
+
+    Returns a list of dicts with: file_path, pattern_key, title, tags, body_preview, status.
+    """
+    entries = []
+    if not os.path.exists(LEARNINGS_DIR):
+        return entries
+    for fname in os.listdir(LEARNINGS_DIR):
+        if not fname.endswith(".md"):
+            continue
+        try:
+            fpath = os.path.join(LEARNINGS_DIR, fname)
+            with open(fpath) as f:
+                content = f.read(3000)
+
+            # Skip archived entries — don't match against stale knowledge
+            status_match = re.search(r'^status:\s*(.+)$', content, re.MULTILINE)
+            if status_match and status_match.group(1).strip() == "archived":
+                continue
+
+            pk_match = re.search(r'^pattern-key:\s*(.+)$', content, re.MULTILINE)
+            title_match = re.search(r'^# (.+)$', content, re.MULTILINE)
+            tags_match = re.search(r'^tags:\s*\[(.+)\]$', content, re.MULTILINE)
+
+            # Extract body (everything after frontmatter and title)
+            body = re.sub(r'^---\n[\s\S]*?\n---\n*', '', content).strip()
+            body = re.sub(r'^# .+\n*', '', body).strip()
+
+            entries.append({
+                "file_path": fpath,
+                "pattern_key": pk_match.group(1).strip() if pk_match else "",
+                "title": title_match.group(1).strip() if title_match else "",
+                "tags": set(t.strip() for t in tags_match.group(1).split(",")) if tags_match else set(),
+                "body_preview": body[:300],
+                "status": status_match.group(1).strip() if status_match else "new",
+            })
+        except Exception:
+            continue
+    return entries
+
+
+def _tokenize(text):
+    """Split text into lowercase tokens for similarity comparison."""
+    return set(re.findall(r'[a-z0-9]+', text.lower()))
+
+
+def find_similar_entry(item, existing_entries):
+    """Find an existing vault entry that's semantically similar to a new item.
+
+    Uses a weighted score from three signals:
+    1. Pattern-key token overlap (strongest — these are curated identifiers)
+    2. Title token overlap (strong — captures the core concept)
+    3. Tag overlap (supporting — confirms domain match)
+
+    Returns (entry, score) if score >= 0.5, else (None, 0).
+    """
+    new_pk_tokens = _tokenize(item.get("pattern_key", ""))
+    new_title_tokens = _tokenize(item.get("title", ""))
+    new_tags = set(t.lower().strip() for t in item.get("tags", []))
+
+    best_match = None
+    best_score = 0
+
+    for entry in existing_entries:
+        # Pattern-key similarity (Jaccard)
+        pk_tokens = _tokenize(entry["pattern_key"])
+        pk_union = new_pk_tokens | pk_tokens
+        pk_sim = len(new_pk_tokens & pk_tokens) / len(pk_union) if pk_union else 0
+
+        # Title similarity (Jaccard)
+        title_tokens = _tokenize(entry["title"])
+        title_union = new_title_tokens | title_tokens
+        title_sim = len(new_title_tokens & title_tokens) / len(title_union) if title_union else 0
+
+        # Tag overlap (Jaccard)
+        tag_union = new_tags | entry["tags"]
+        tag_sim = len(new_tags & entry["tags"]) / len(tag_union) if tag_union else 0
+
+        # Weighted score: pattern-key and title matter most
+        score = (pk_sim * 0.4) + (title_sim * 0.4) + (tag_sim * 0.2)
+
+        if score > best_score:
+            best_score = score
+            best_match = entry
+
+    if best_score >= 0.5:
+        return best_match, best_score
+    return None, 0
+
+
+def bump_recurrence(entry):
+    """Increment recurrence-count and update last-seen on an existing vault entry."""
+    fpath = entry["file_path"]
+    try:
+        with open(fpath) as f:
+            content = f.read()
+
+        # Bump recurrence-count
+        content = re.sub(
+            r'^(recurrence-count:\s*)(\d+)$',
+            lambda m: f"{m.group(1)}{int(m.group(2)) + 1}",
+            content, count=1, flags=re.MULTILINE,
+        )
+
+        # Update last-seen
+        today = datetime.date.today().isoformat()
+        content = re.sub(
+            r'^(last-seen:\s*).+$',
+            f"\\g<1>{today}",
+            content, count=1, flags=re.MULTILINE,
+        )
+
+        tmp = fpath + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(content)
+        os.rename(tmp, fpath)
+        return True
+    except Exception as e:
+        print(f"  Failed to bump recurrence for {fpath}: {e}", file=sys.stderr)
+        return False
+
+
 def next_learning_id(prefix="LRN"):
     """Generate the next available learning ID for today."""
     today = datetime.date.today().strftime("%Y%m%d")
@@ -248,6 +371,7 @@ CONVERSATION:
 
 PROJECTS DISCUSSED: {projects}
 EXISTING PATTERN KEYS (do NOT duplicate these): {existing_keys}
+EXISTING ENTRY TITLES (reuse similar pattern-keys if the concept overlaps): {existing_titles}
 
 Extract knowledge in the following categories. Only include items that are genuinely useful for future work — skip trivial observations.
 
@@ -275,12 +399,14 @@ If nothing worth extracting, return an empty array: []
 IMPORTANT: Return ONLY valid JSON. No markdown, no explanation, just the array."""
 
 
-def extract_knowledge_via_llm(conversation_text, projects, existing_keys, timeout=120):
+def extract_knowledge_via_llm(conversation_text, projects, existing_keys, existing_entries, timeout=120):
     """Send conversation to Claude for knowledge extraction. Returns parsed JSON."""
+    existing_titles = [e["title"] for e in existing_entries if e["title"]][:50]
     prompt = EXTRACTION_PROMPT.format(
         conversation=conversation_text,
         projects=", ".join(projects) if projects else "none detected",
         existing_keys=", ".join(list(existing_keys)[:50]) if existing_keys else "none",
+        existing_titles=", ".join(existing_titles) if existing_titles else "none",
     )
 
     clean_env = {
@@ -517,7 +643,7 @@ def promote_recurring_to_conventions(project_name, knowledge_content):
 
 # ─── Main ─────────────────────────────────────────────────────────────
 
-def process_transcript(transcript_path, existing_keys, dry_run=False):
+def process_transcript(transcript_path, existing_keys, existing_entries, dry_run=False):
     """Process a single transcript. Returns list of created IDs."""
     transcript_id = os.path.basename(transcript_path).replace(".jsonl", "")
     print(f"Processing: {transcript_id}", file=sys.stderr)
@@ -542,19 +668,38 @@ def process_transcript(transcript_path, existing_keys, dry_run=False):
         return []
 
     # 4. LLM extraction (non-deterministic — the one LLM step)
-    items = extract_knowledge_via_llm(conversation_text, projects, existing_keys)
+    items = extract_knowledge_via_llm(conversation_text, projects, existing_keys, existing_entries)
     print(f"  LLM extracted: {len(items)} items", file=sys.stderr)
 
     if not items:
         return []
 
-    # 5. Write to vault (deterministic)
+    # 5. Write to vault — dedup against existing entries (deterministic)
     created = []
     for item in items:
+        # Check for semantic similarity with existing entries
+        match, score = find_similar_entry(item, existing_entries)
+        if match:
+            bumped = bump_recurrence(match)
+            if bumped:
+                print(f"  Bumped: {os.path.basename(match['file_path'])} "
+                      f"(score={score:.2f}, matched '{item.get('title', '?')}')", file=sys.stderr)
+                existing_keys.add(item.get("pattern_key", ""))
+                continue
+
         entry_id = write_vault_entry(item, existing_keys)
         if entry_id:
             created.append(entry_id)
             existing_keys.add(item.get("pattern_key", ""))
+            # Add new entry to existing_entries so subsequent items can match against it
+            existing_entries.append({
+                "file_path": os.path.join(LEARNINGS_DIR, f"{entry_id}.md"),
+                "pattern_key": item.get("pattern_key", ""),
+                "title": item.get("title", ""),
+                "tags": set(t.lower().strip() for t in item.get("tags", [])),
+                "body_preview": item.get("body", "")[:300],
+                "status": "new",
+            })
             print(f"  Created: {entry_id} — {item.get('title', '?')}", file=sys.stderr)
 
     # 6. Append to project knowledge files (deterministic)
@@ -573,7 +718,8 @@ def main():
 
     state = load_state()
     processed = set(state.get("processed_transcripts", []))
-    existing_keys = load_existing_pattern_keys()
+    existing_entries = load_existing_entries()
+    existing_keys = set(e["pattern_key"] for e in existing_entries if e["pattern_key"])
 
     # Find transcripts to process
     if args.transcript:
@@ -614,7 +760,7 @@ def main():
     total_created = []
     for transcript_path in transcripts:
         tid = os.path.basename(transcript_path).replace(".jsonl", "")
-        created = process_transcript(transcript_path, existing_keys, dry_run=args.dry_run)
+        created = process_transcript(transcript_path, existing_keys, existing_entries, dry_run=args.dry_run)
         total_created.extend(created)
 
         if not args.dry_run:
