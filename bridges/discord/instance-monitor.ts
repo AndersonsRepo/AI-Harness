@@ -182,15 +182,22 @@ export function processMonitorEvent(taskId: string, event: MonitorEvent): void {
 
   switch (event.type) {
     case "assistant": {
-      // Extract text content from assistant message
+      // Claude CLI stream-json nests tool calls inside assistant message content blocks
       if (event.message?.content) {
         for (const block of event.message.content) {
           if (block.type === "text" && block.text) {
             instance.assistantText += block.text;
             instance.estimatedOutputTokens = Math.round(instance.assistantText.length / 4);
+          } else if (block.type === "tool_use" && block.name) {
+            // Tool call inside assistant message — this is the primary format
+            handleToolUse(instance, block.name, block.input || {});
+          } else if (block.type === "tool_result") {
+            // Tool result inside assistant message
+            handleToolResult(instance, (block as any).output || (block as any).content || "");
           }
         }
       }
+      // Fallback: raw content field (older format)
       if (event.content) {
         instance.assistantText += event.content;
         instance.estimatedOutputTokens = Math.round(instance.assistantText.length / 4);
@@ -198,43 +205,16 @@ export function processMonitorEvent(taskId: string, event: MonitorEvent): void {
       break;
     }
 
+    // Top-level tool events (may appear in some output formats)
     case "tool_use": {
-      // Close any pending tool call
-      if (instance.currentTool) {
-        instance.currentTool.durationMs = Date.now() - instance.currentTool.timestamp;
-        instance.toolCalls.push(instance.currentTool);
-        if (instance.toolCalls.length > MAX_TOOL_HISTORY) {
-          instance.toolCalls.shift();
-        }
-      }
-
       const toolName = event.tool_name || (event as any).name || "unknown";
       const toolInput = event.tool_input || (event as any).input || {};
-
-      instance.currentTool = {
-        timestamp: Date.now(),
-        toolName,
-        toolInput,
-        displaySummary: formatToolSummary(toolName, toolInput),
-      };
+      handleToolUse(instance, toolName, toolInput);
       break;
     }
 
     case "tool_result": {
-      if (instance.currentTool) {
-        instance.currentTool.durationMs = Date.now() - instance.currentTool.timestamp;
-        instance.currentTool.resultPreview = (
-          (event as any).output ||
-          (event as any).content ||
-          event.result ||
-          ""
-        ).toString().slice(0, 200);
-        instance.toolCalls.push(instance.currentTool);
-        if (instance.toolCalls.length > MAX_TOOL_HISTORY) {
-          instance.toolCalls.shift();
-        }
-        instance.currentTool = null;
-      }
+      handleToolResult(instance, (event as any).output || (event as any).content || event.result || "");
       break;
     }
 
@@ -242,7 +222,7 @@ export function processMonitorEvent(taskId: string, event: MonitorEvent): void {
       instance.status = event.is_error ? "failed" : "completed";
       if (instance.currentTool) {
         instance.currentTool.durationMs = Date.now() - instance.currentTool.timestamp;
-        instance.toolCalls.push(instance.currentTool);
+        pushToolCall(instance, instance.currentTool);
         instance.currentTool = null;
       }
       break;
@@ -250,6 +230,37 @@ export function processMonitorEvent(taskId: string, event: MonitorEvent): void {
   }
 
   if (onUpdateCallback) onUpdateCallback(instance);
+}
+
+function handleToolUse(instance: MonitoredInstance, toolName: string, toolInput: Record<string, unknown>): void {
+  // Close any pending tool call
+  if (instance.currentTool) {
+    instance.currentTool.durationMs = Date.now() - instance.currentTool.timestamp;
+    pushToolCall(instance, instance.currentTool);
+  }
+
+  instance.currentTool = {
+    timestamp: Date.now(),
+    toolName,
+    toolInput,
+    displaySummary: formatToolSummary(toolName, toolInput),
+  };
+}
+
+function handleToolResult(instance: MonitoredInstance, result: unknown): void {
+  if (instance.currentTool) {
+    instance.currentTool.durationMs = Date.now() - instance.currentTool.timestamp;
+    instance.currentTool.resultPreview = String(result).slice(0, 200);
+    pushToolCall(instance, instance.currentTool);
+    instance.currentTool = null;
+  }
+}
+
+function pushToolCall(instance: MonitoredInstance, tool: ToolCallEvent): void {
+  instance.toolCalls.push(tool);
+  if (instance.toolCalls.length > MAX_TOOL_HISTORY) {
+    instance.toolCalls.shift();
+  }
 }
 
 // ─── Intervention Controls ───────────────────────────────────────────
