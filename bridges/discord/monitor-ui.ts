@@ -365,23 +365,42 @@ async function doUpdate(instance: MonitoredInstance): Promise<void> {
     }
   }
 
-  // Post new tool calls to the thread
+  // Post new thinking + tool calls to the thread
   const thread = monitorThreads.get(instance.taskId);
   if (thread) {
+    const lines: string[] = [];
+
+    // Post new thinking content (if substantial new text since last post)
+    const thinkingLen = instance.thinkingText.length;
+    if (thinkingLen > instance.lastPostedThinkingLen + 50) {
+      // Get the new portion of thinking text
+      const newThinking = instance.thinkingText.slice(-200).trim();
+      if (newThinking) {
+        // Take the last meaningful line/sentence
+        const lastLine = newThinking.split("\n").filter(l => l.trim()).pop() || newThinking;
+        const elapsed = ((Date.now() - instance.startedAt) / 1000).toFixed(0);
+        lines.push(`\`[${elapsed}s]\` 💭 ${lastLine.slice(0, 150)}`);
+      }
+      instance.lastPostedThinkingLen = thinkingLen;
+    }
+
+    // Post new tool calls
     const lastPosted = threadToolCounts.get(instance.taskId) || 0;
     const newTools = instance.toolCalls.slice(lastPosted);
+    for (const tc of newTools.slice(0, 5)) {
+      const elapsed = ((tc.timestamp - instance.startedAt) / 1000).toFixed(0);
+      const duration = tc.durationMs ? ` (${(tc.durationMs / 1000).toFixed(1)}s)` : "";
+      lines.push(`\`[${elapsed}s]\` 🔧 ${tc.displaySummary.slice(0, 80)}${duration}`);
+    }
     if (newTools.length > 0) {
-      // Batch tool calls into one message (max 5 per message to avoid spam)
-      const lines: string[] = [];
-      for (const tc of newTools.slice(0, 5)) {
-        const elapsed = ((tc.timestamp - instance.startedAt) / 1000).toFixed(0);
-        const duration = tc.durationMs ? ` (${(tc.durationMs / 1000).toFixed(1)}s)` : "";
-        lines.push(`\`[${elapsed}s]\` ${tc.displaySummary.slice(0, 80)}${duration}`);
-      }
+      threadToolCounts.set(instance.taskId, instance.toolCalls.length);
+    }
+
+    // Send batched update to thread
+    if (lines.length > 0) {
       try {
         await thread.send(lines.join("\n"));
       } catch {}
-      threadToolCounts.set(instance.taskId, instance.toolCalls.length);
     }
   }
 }
