@@ -33,6 +33,7 @@ export interface MonitoredInstance {
   toolCalls: ToolCallEvent[];
   currentTool: ToolCallEvent | null;
   assistantText: string;
+  thinkingText: string;
   lastActivityAt: number;
 
   // Resource tracking
@@ -102,6 +103,7 @@ export function registerInstance(config: {
     toolCalls: [],
     currentTool: null,
     assistantText: "",
+    thinkingText: "",
     lastActivityAt: Date.now(),
 
     chunkCount: 0,
@@ -185,7 +187,10 @@ export function processMonitorEvent(taskId: string, event: MonitorEvent): void {
       // Claude CLI stream-json nests tool calls inside assistant message content blocks
       if (event.message?.content) {
         for (const block of event.message.content) {
-          if (block.type === "text" && block.text) {
+          if (block.type === "thinking" && block.text) {
+            // Capture thinking/reasoning — keep last 500 chars for display
+            instance.thinkingText = block.text.slice(-500);
+          } else if (block.type === "text" && block.text) {
             instance.assistantText += block.text;
             instance.estimatedOutputTokens = Math.round(instance.assistantText.length / 4);
           } else if (block.type === "tool_use" && block.name) {
