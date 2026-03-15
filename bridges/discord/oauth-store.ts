@@ -10,7 +10,7 @@
 import { getDb } from "./db.js";
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
 
-export type OAuthProvider = "microsoft" | "linkedin" | "linkedin-community";
+export type OAuthProvider = "microsoft" | "linkedin" | "linkedin-community" | "gmail";
 
 export interface TokenRecord {
   provider: OAuthProvider;
@@ -267,6 +267,52 @@ export async function refreshLinkedInCommunityToken(): Promise<TokenRecord> {
   return getTokens("linkedin-community")!;
 }
 
+export async function refreshGmailToken(): Promise<TokenRecord> {
+  const record = getTokens("gmail");
+  if (!record) throw new Error("No Gmail tokens stored — run: npx tsx oauth-setup.ts gmail");
+
+  const clientId = process.env.GMAIL_CLIENT_ID;
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error("GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET must be set");
+
+  const body = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: record.refreshToken,
+    grant_type: "refresh_token",
+  });
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Gmail token refresh failed (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as {
+    access_token: string;
+    expires_in: number;
+    token_type: string;
+    scope?: string;
+  };
+
+  const expiresAt = new Date(Date.now() + data.expires_in * 1000).toISOString();
+  const newTokens = {
+    accessToken: data.access_token,
+    refreshToken: record.refreshToken, // Google doesn't return a new refresh token on refresh
+    tokenType: data.token_type,
+    expiresAt,
+    scopes: data.scope || record.scopes,
+  };
+
+  saveTokens("gmail", newTokens);
+  return getTokens("gmail")!;
+}
+
 export async function ensureFreshToken(provider: OAuthProvider): Promise<string> {
   if (!isExpired(provider)) {
     return getTokens(provider)!.accessToken;
@@ -277,6 +323,8 @@ export async function ensureFreshToken(provider: OAuthProvider): Promise<string>
     refreshed = await refreshMicrosoftToken();
   } else if (provider === "linkedin-community") {
     refreshed = await refreshLinkedInCommunityToken();
+  } else if (provider === "gmail") {
+    refreshed = await refreshGmailToken();
   } else {
     refreshed = await refreshLinkedInToken();
   }

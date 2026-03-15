@@ -239,11 +239,80 @@ async function exchangeLinkedInCommunityCode(code: string): Promise<void> {
   }
 }
 
+// ─── Gmail ────────────────────────────────────────────────────────────
+
+const GMAIL_SCOPES = "https://www.googleapis.com/auth/gmail.readonly";
+
+function getGmailAuthUrl(): string {
+  const clientId = process.env.GMAIL_CLIENT_ID;
+  if (!clientId) throw new Error("GMAIL_CLIENT_ID env var required");
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    response_type: "code",
+    redirect_uri: REDIRECT_URI,
+    scope: GMAIL_SCOPES,
+    access_type: "offline",
+    prompt: "consent",
+  });
+
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
+}
+
+async function exchangeGmailCode(code: string): Promise<void> {
+  const clientId = process.env.GMAIL_CLIENT_ID!;
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET;
+  if (!clientSecret) throw new Error("GMAIL_CLIENT_SECRET env var required");
+
+  const body = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    code,
+    redirect_uri: REDIRECT_URI,
+    grant_type: "authorization_code",
+  });
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Gmail token exchange failed (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as {
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+    token_type: string;
+    scope: string;
+  };
+
+  if (!data.refresh_token) {
+    console.warn("WARNING: No refresh token received. You may need to revoke access at https://myaccount.google.com/permissions and re-run this setup.");
+  }
+
+  saveTokens("gmail", {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || "none",
+    tokenType: data.token_type,
+    expiresAt: new Date(Date.now() + data.expires_in * 1000).toISOString(),
+    scopes: data.scope,
+  });
+
+  console.log("Gmail tokens saved successfully.");
+}
+
 // ─── Server ─────────────────────────────────────────────────────────
 
 async function run(provider: OAuthProvider): Promise<void> {
   const authUrl = provider === "microsoft"
     ? getMicrosoftAuthUrl()
+    : provider === "gmail"
+    ? getGmailAuthUrl()
     : provider === "linkedin-community"
     ? getLinkedInCommunityAuthUrl()
     : getLinkedInAuthUrl();
@@ -280,6 +349,8 @@ async function run(provider: OAuthProvider): Promise<void> {
       try {
         if (provider === "microsoft") {
           await exchangeMicrosoftCode(code);
+        } else if (provider === "gmail") {
+          await exchangeGmailCode(code);
         } else if (provider === "linkedin-community") {
           await exchangeLinkedInCommunityCode(code);
         } else {
@@ -322,8 +393,8 @@ async function run(provider: OAuthProvider): Promise<void> {
 // ─── CLI ────────────────────────────────────────────────────────────
 
 const provider = process.argv[2] as OAuthProvider;
-if (provider !== "microsoft" && provider !== "linkedin" && provider !== "linkedin-community") {
-  console.error("Usage: npx tsx oauth-setup.ts <microsoft|linkedin|linkedin-community>");
+if (provider !== "microsoft" && provider !== "linkedin" && provider !== "linkedin-community" && provider !== "gmail") {
+  console.error("Usage: npx tsx oauth-setup.ts <microsoft|linkedin|linkedin-community|gmail>");
   process.exit(1);
 }
 
