@@ -125,11 +125,17 @@ export async function onInstanceCompleted(instance: MonitoredInstance): Promise<
   pendingUpdates.delete(instance.taskId);
   await doUpdate(instance);
 
-  // Clean up after 30 seconds
-  setTimeout(() => {
+  // Delete the embed after 2 minutes (keep it visible briefly for review)
+  const msg = monitorMessages.get(instance.taskId);
+  setTimeout(async () => {
+    if (msg) {
+      try {
+        await msg.delete();
+      } catch {}
+    }
     monitorMessages.delete(instance.taskId);
     lastUpdateTimes.delete(instance.taskId);
-  }, 30000);
+  }, 120_000);
 }
 
 // ─── Embed Builder ───────────────────────────────────────────────────
@@ -176,6 +182,7 @@ function buildInstanceEmbed(instance: MonitoredInstance): {
 
   const embed = new EmbedBuilder()
     .setTitle(`${statusEmoji} ${agentDisplay} Agent`)
+    .setDescription(`<#${instance.channelId}>`)
     .setColor(
       instance.status === "running" ? 0x3498db :
       instance.status === "paused_continue" ? 0xf39c12 :
@@ -186,7 +193,7 @@ function buildInstanceEmbed(instance: MonitoredInstance): {
     .addFields(
       {
         name: "Prompt",
-        value: `\`\`\`${instance.prompt.slice(0, 200)}${instance.prompt.length > 200 ? "..." : ""}\`\`\``,
+        value: instance.prompt.slice(0, 200) + (instance.prompt.length > 200 ? "..." : ""),
         inline: false,
       },
       {
@@ -196,7 +203,7 @@ function buildInstanceEmbed(instance: MonitoredInstance): {
       },
       {
         name: "Tools Used",
-        value: `${instance.toolCalls.length}`,
+        value: `${instance.toolCalls.length}${instance.currentTool ? " (+1 running)" : ""}`,
         inline: true,
       },
       {
