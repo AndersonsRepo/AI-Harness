@@ -16,9 +16,14 @@ TASK_CONFIG = HARNESS_ROOT / "heartbeat-tasks" / "enrichment-monitor.json"
 NOTIFICATIONS = HARNESS_ROOT / "pending-notifications.jsonl"
 
 
-def notify(message, channel="lead-gen-pipeline"):
+def notify(message, channel="notifications"):
     with open(NOTIFICATIONS, "a") as f:
-        f.write(json.dumps({"channel": channel, "message": message}) + "\n")
+        f.write(json.dumps({
+            "channel": channel,
+            "task": "enrichment-monitor",
+            "summary": message,
+            "timestamp": datetime.now().isoformat(),
+        }) + "\n")
 
 
 def main():
@@ -62,22 +67,61 @@ def main():
         notify(msg)
         print(msg)
     else:
-        msg = (
-            f"**Enrichment Complete**\n"
-            f"Final: {emails}/{total} emails ({email_pct}%)\n"
-            f"Facebook URLs: {fb} | Google Maps: {gmap}\n"
-            f"Avg Score: {avg_score}\n"
-            f"Auto-disabling enrichment-monitor task."
-        )
-        notify(msg)
-        print(msg)
+        # Check if SMTP pass is running or needs to start
+        smtp_running = subprocess.run(
+            ["pgrep", "-f", "smtp_verify_pass"], capture_output=True, text=True
+        ).stdout.strip()
 
-        # Auto-disable this heartbeat task
-        if TASK_CONFIG.exists():
-            config = json.loads(TASK_CONFIG.read_text())
-            config["enabled"] = False
-            TASK_CONFIG.write_text(json.dumps(config, indent=2))
-            print("Task auto-disabled.")
+        smtp_done_file = PIPELINE_ROOT / ".smtp-verify-done"
+
+        if smtp_running:
+            msg = (
+                f"**BD Enrichment Done — SMTP Verification Running**\n"
+                f"Emails: {emails}/{total} ({email_pct}%)\n"
+                f"Facebook URLs: {fb} | Google Maps: {gmap}\n"
+                f"Avg Score: {avg_score}"
+            )
+            notify(msg)
+            print(msg)
+        elif smtp_done_file.exists():
+            # Both passes complete
+            msg = (
+                f"**All Enrichment Complete**\n"
+                f"Final: {emails}/{total} emails ({email_pct}%)\n"
+                f"Facebook URLs: {fb} | Google Maps: {gmap}\n"
+                f"Avg Score: {avg_score}\n"
+                f"Auto-disabling enrichment-monitor task."
+            )
+            notify(msg)
+            print(msg)
+
+            # Auto-disable this heartbeat task
+            if TASK_CONFIG.exists():
+                cfg = json.loads(TASK_CONFIG.read_text())
+                cfg["enabled"] = False
+                TASK_CONFIG.write_text(json.dumps(cfg, indent=2))
+                print("Task auto-disabled.")
+        else:
+            # BD enrichment done, kick off SMTP pass
+            msg = (
+                f"**BD Enrichment Complete — Starting SMTP Verification**\n"
+                f"Emails so far: {emails}/{total} ({email_pct}%)\n"
+                f"Facebook URLs: {fb}\n"
+                f"Now running SMTP pattern verification on remaining leads..."
+            )
+            notify(msg)
+            print(msg)
+
+            # Launch SMTP pass in background
+            smtp_script = PIPELINE_ROOT / "smtp_verify_pass.py"
+            log_file = open(PIPELINE_ROOT / "smtp_verify.log", "w")
+            subprocess.Popen(
+                [sys.executable, str(smtp_script)],
+                stdout=log_file, stderr=log_file,
+                cwd=str(PIPELINE_ROOT),
+                start_new_session=True,
+            )
+            print("SMTP verification launched.")
 
 
 if __name__ == "__main__":

@@ -362,7 +362,9 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
         // Clear stream message ref so next step creates a fresh one
         activeStreamMessages.delete(taskId);
       }
-    } catch {}
+    } catch (err: any) {
+      console.warn(`[BOT] Failed to update continuation stream message: ${err.message}`);
+    }
     return;
   }
 
@@ -402,7 +404,9 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
     const files = readdirSync(ctx.streamDir);
     for (const f of files) unlinkSync(join(ctx.streamDir, f));
     unlinkSync(ctx.streamDir);
-  } catch {}
+  } catch (err: any) {
+    console.warn(`[BOT] Stream dir cleanup failed: ${err.message}`);
+  }
 
   if (error && !response) {
     const errorReply = `Something went wrong:\n\`\`\`\n${error.slice(0, 500)}\n\`\`\``;
@@ -456,26 +460,30 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
     }
 
     // Check for handoff in project channels
-    if (project && agentName && parseHandoff(response)) {
-      const handoff = parseHandoff(response)!;
-      if (handoff.preHandoffText) {
-        const preChunks = splitMessage(
-          `**${agentName.charAt(0).toUpperCase() + agentName.slice(1)}:** ${handoff.preHandoffText}`
-        );
-        if (streamMessage) {
-          await streamMessage.edit(preChunks[0]);
-          for (let i = 1; i < preChunks.length; i++) {
-            await (channel as TextChannel).send(preChunks[i]);
+    const handoff = parseHandoff(response);
+    if (project && agentName && handoff) {
+      try {
+        if (handoff.preHandoffText) {
+          const preChunks = splitMessage(
+            `**${agentName.charAt(0).toUpperCase() + agentName.slice(1)}:** ${handoff.preHandoffText}`
+          );
+          if (streamMessage) {
+            await streamMessage.edit(preChunks[0]);
+            for (let i = 1; i < preChunks.length; i++) {
+              await (channel as TextChannel).send(preChunks[i]);
+            }
+          } else {
+            for (const chunk of preChunks) {
+              await (channel as TextChannel).send(chunk);
+            }
           }
-        } else {
-          for (const chunk of preChunks) {
-            await (channel as TextChannel).send(chunk);
-          }
+        } else if (streamMessage) {
+          await streamMessage.delete().catch(() => {});
         }
-      } else if (streamMessage) {
-        await streamMessage.delete().catch(() => {});
+      } catch (err: any) {
+        console.error(`[BOT] Failed to send handoff pre-text: ${err.message}`);
       }
-      releaseChannel(channelId);
+
       const chainResult = await runHandoffChain(
         channel as TextChannel,
         agentName,
@@ -489,6 +497,7 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
       }
 
       postAgentComplete(ctx.activity, response).catch(() => {});
+      releaseChannel(channelId);
       return;
     }
 
@@ -644,7 +653,7 @@ async function handleClaude(
   };
   postAgentStart(activity).then((msgId) => {
     if (msgId) activity.streamMessageId = msgId;
-  });
+  }).catch((err) => console.error(`[BOT] Failed to post agent start: ${err.message}`));
 
   // Store context for the task output handler
   pendingTaskContexts.set(taskId, {

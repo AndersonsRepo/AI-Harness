@@ -223,7 +223,7 @@ export async function executeHandoff(
   if (!project.agents.includes(toAgent)) {
     await channel.send(
       `**System:** Agent \`${toAgent}\` is not assigned to this project. Available: ${project.agents.join(", ")}`
-    );
+    ).catch((err) => console.error(`[HANDOFF] Failed to send invalid-agent notice: ${err.message}`));
     return null;
   }
 
@@ -231,7 +231,7 @@ export async function executeHandoff(
   if (fromAgent === toAgent) {
     await channel.send(
       `**System:** ${fromAgent} tried to hand off to itself. Skipping.`
-    );
+    ).catch((err) => console.error(`[HANDOFF] Failed to send self-handoff notice: ${err.message}`));
     return null;
   }
 
@@ -242,19 +242,23 @@ export async function executeHandoff(
   if (depth > maxDepth) {
     await channel.send(
       `**Handoff limit reached (${maxDepth}).** The agents have been collaborating for a while.\n\nLast handoff: ${fromAgent} → ${toAgent}: "${handoffMessage.slice(0, 200)}"\n\nPlease direct the next step or type a message to continue.`
-    );
+    ).catch((err) => console.error(`[HANDOFF] Failed to send depth-limit notice: ${err.message}`));
     resetHandoffDepth(channel.id);
     return null;
   }
 
   // Post the originating agent's message to the channel
-  if (preHandoffText) {
-    const chunks = monitor.splitForDiscord(`**${capitalize(fromAgent)}:** ${preHandoffText}`, 1900, "handoff:pre-text");
-    for (const chunk of chunks) await channel.send(chunk);
+  try {
+    if (preHandoffText) {
+      const chunks = monitor.splitForDiscord(`**${capitalize(fromAgent)}:** ${preHandoffText}`, 1900, "handoff:pre-text");
+      for (const chunk of chunks) await channel.send(chunk);
+    }
+    await channel.send(
+      `*${capitalize(fromAgent)} → ${capitalize(toAgent)}:* ${handoffMessage.slice(0, 500)}`
+    );
+  } catch (err: any) {
+    console.error(`[HANDOFF] Failed to post pre-handoff text: ${err.message}`);
   }
-  await channel.send(
-    `*${capitalize(fromAgent)} → ${capitalize(toAgent)}:* ${handoffMessage.slice(0, 500)}`
-  );
 
   // Update active agent
   updateProject(channel.id, { activeAgent: toAgent });
@@ -361,7 +365,7 @@ export async function executeHandoff(
             const errorMsg = stderr?.trim() || `Agent exited with code ${returncode}`;
             await channel.send(
               `**${capitalize(toAgent)}:** Something went wrong:\n\`\`\`\n${errorMsg.slice(0, 500)}\n\`\`\``
-            );
+            ).catch((err) => console.error(`[HANDOFF] Failed to send error notice: ${err.message}`));
             resolve(null);
             return;
           }
@@ -376,7 +380,7 @@ export async function executeHandoff(
           if (!responseText) {
             await channel.send(
               `**${capitalize(toAgent)}:** Got a response but couldn't parse it.`
-            );
+            ).catch((err) => console.error(`[HANDOFF] Failed to send parse-error notice: ${err.message}`));
             resolve(null);
             return;
           }
@@ -398,7 +402,7 @@ export async function executeHandoff(
         untrackWatcher(watcher);
         await channel.send(
           `**${capitalize(toAgent)}:** Timed out after 3 minutes.`
-        );
+        ).catch((err) => console.error(`[HANDOFF] Failed to send timeout notice: ${err.message}`));
         resolve(null);
       },
       timeoutMs: 180_000,
@@ -458,19 +462,23 @@ export async function runHandoffChain(
     });
 
     // Post the responding agent's non-handoff text
-    if (result.nextHandoff) {
-      if (result.nextHandoff.preHandoffText) {
+    try {
+      if (result.nextHandoff) {
+        if (result.nextHandoff.preHandoffText) {
+          const chunks = monitor.splitForDiscord(
+            `**${capitalize(result.agentName)}:** ${result.nextHandoff.preHandoffText}`, 1900, "handoff:chain-pre-text"
+          );
+          for (const chunk of chunks) await channel.send(chunk);
+        }
+      } else {
+        // No further handoff — post full response
         const chunks = monitor.splitForDiscord(
-          `**${capitalize(result.agentName)}:** ${result.nextHandoff.preHandoffText}`, 1900, "handoff:chain-pre-text"
+          `**${capitalize(result.agentName)}:** ${result.response}`, 1900, "handoff:response"
         );
         for (const chunk of chunks) await channel.send(chunk);
       }
-    } else {
-      // No further handoff — post full response
-      const chunks = monitor.splitForDiscord(
-        `**${capitalize(result.agentName)}:** ${result.response}`, 1900, "handoff:response"
-      );
-      for (const chunk of chunks) await channel.send(chunk);
+    } catch (err: any) {
+      console.error(`[HANDOFF] Failed to post chain response for ${result.agentName}: ${err.message}`);
     }
 
     fromAgent = result.agentName;
@@ -490,7 +498,8 @@ export async function runHandoffChain(
       const lastEntry = chainEntries[chainEntries.length - 1];
       const reviewPrompt = `Review the following ${finalAgent} output for quality, correctness, and potential issues:\n\n${lastEntry.response}`;
 
-      await channel.send(`*Auto-review: ${capitalize(finalAgent)} output → ${capitalize(reviewerAgent)}*`);
+      await channel.send(`*Auto-review: ${capitalize(finalAgent)} output → ${capitalize(reviewerAgent)}*`)
+        .catch((err) => console.error(`[HANDOFF] Failed to send review-gate notice: ${err.message}`));
 
       const reviewResult = await executeHandoff(
         channel,
@@ -508,10 +517,14 @@ export async function runHandoffChain(
         });
 
         // Post review output
-        const chunks = monitor.splitForDiscord(
-          `**${capitalize(reviewResult.agentName)}:** ${reviewResult.response}`, 1900, "handoff:review-gate"
-        );
-        for (const chunk of chunks) await channel.send(chunk);
+        try {
+          const chunks = monitor.splitForDiscord(
+            `**${capitalize(reviewResult.agentName)}:** ${reviewResult.response}`, 1900, "handoff:review-gate"
+          );
+          for (const chunk of chunks) await channel.send(chunk);
+        } catch (err: any) {
+          console.error(`[HANDOFF] Failed to post review output: ${err.message}`);
+        }
       }
     }
   }
