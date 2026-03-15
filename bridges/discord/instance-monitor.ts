@@ -182,6 +182,14 @@ export function processMonitorEvent(taskId: string, event: MonitorEvent): void {
   instance.chunkCount++;
   instance.lastActivityAt = Date.now();
 
+  // Debug: log event types being processed (except system/rate_limit which are noise)
+  if (event.type !== "system" && event.type !== "rate_limit_event") {
+    const toolInfo = event.message?.content?.find((b: any) => b.type === "tool_use");
+    if (toolInfo) {
+      console.log(`[MONITOR] Event ${event.type} for ${taskId}: tool_use ${(toolInfo as any).name}`);
+    }
+  }
+
   switch (event.type) {
     case "assistant": {
       // Claude CLI stream-json nests tool calls inside assistant message content blocks

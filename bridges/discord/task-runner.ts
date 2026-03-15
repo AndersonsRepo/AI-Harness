@@ -9,7 +9,7 @@ import { getProjectSessionKey } from "./handoff-router.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
 import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS } from "./agent-loader.js";
-import { isHoldingContinuation, getInterventionNote, clearInterventionNote } from "./instance-monitor.js";
+import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance } from "./instance-monitor.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -740,6 +740,16 @@ export function recoverCrashedTasks(): number {
           });
           trackWatcher(watcher);
           watcher.start();
+
+          // Register recovered task with monitor (stub — no historical tool calls)
+          registerInstance({
+            taskId: task.id,
+            channelId: task.channel_id,
+            agent: task.agent || "default",
+            prompt: task.prompt || "(recovered)",
+            pid: task.pid!,
+          });
+
           console.log(`[TASK] Re-attached watcher for alive task ${task.id} (PID ${task.pid})`);
         }
         continue;
