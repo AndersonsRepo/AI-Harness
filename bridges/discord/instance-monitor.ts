@@ -223,6 +223,18 @@ export function processMonitorEvent(taskId: string, event: MonitorEvent): void {
       break;
     }
 
+    // Tool results arrive inside "user" messages (Claude CLI format)
+    case "user": {
+      if (event.message?.content) {
+        for (const block of event.message.content) {
+          if (block.type === "tool_result") {
+            handleToolResult(instance, (block as any).output || (block as any).content || "");
+          }
+        }
+      }
+      break;
+    }
+
     case "result": {
       instance.status = event.is_error ? "failed" : "completed";
       if (instance.currentTool) {
