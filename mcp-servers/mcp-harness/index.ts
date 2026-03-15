@@ -748,6 +748,65 @@ function getVaultStats() {
   return { total: files.length, byStatus, byType, promotionCandidates, topRecurring: recurring.slice(0, 5) };
 }
 
+// ─── Tool: harness_telemetry ──────────────────────────────────────────
+
+server.tool(
+  "harness_telemetry",
+  "Query task execution telemetry — tool calls, timing, cost estimates, interventions. Use for analyzing agent performance and debugging.",
+  {
+    limit: z.number().optional().default(10).describe("Max results (default 10)"),
+    agent: z.string().optional().describe("Filter by agent name"),
+    channel_id: z.string().optional().describe("Filter by channel ID"),
+  },
+  async ({ limit, agent, channel_id }) => {
+    const dbPath = join(HARNESS_ROOT, "bridges", "discord", "harness.db");
+    if (!existsSync(dbPath)) {
+      return { content: [{ type: "text" as const, text: "Database not found." }] };
+    }
+
+    try {
+      let whereClause = "";
+      const conditions: string[] = [];
+      if (agent) conditions.push(`agent = '${agent.replace(/'/g, "''")}'`);
+      if (channel_id) conditions.push(`channel_id = '${channel_id.replace(/'/g, "''")}'`);
+      if (conditions.length > 0) whereClause = " WHERE " + conditions.join(" AND ");
+
+      const query = `SELECT * FROM task_telemetry${whereClause} ORDER BY started_at DESC LIMIT ${limit}`;
+      const raw = execSync(`sqlite3 -json "${dbPath}" "${query.replace(/"/g, '\\"')}"`, {
+        encoding: "utf-8",
+        timeout: 10000,
+      }).trim();
+
+      const rows = raw ? JSON.parse(raw) as any[] : [];
+
+      if (rows.length === 0) {
+        return { content: [{ type: "text" as const, text: "No telemetry data found." }] };
+      }
+
+      const lines = ["# Task Telemetry", ""];
+      for (const row of rows) {
+        const cost = row.est_cost_cents ? `$${(row.est_cost_cents / 100).toFixed(4)}` : "n/a";
+        const duration = row.duration_ms ? `${(row.duration_ms / 1000).toFixed(1)}s` : "n/a";
+        lines.push(`## ${row.task_id}`);
+        lines.push(`- **Agent**: ${row.agent || "default"}`);
+        lines.push(`- **Status**: ${row.status}`);
+        lines.push(`- **Duration**: ${duration}`);
+        lines.push(`- **Tools**: ${row.total_tools}`);
+        lines.push(`- **Tokens**: ~${row.est_input_tokens || 0} in / ~${row.est_output_tokens || 0} out`);
+        lines.push(`- **Cost**: ${cost}`);
+        lines.push(`- **Prompt**: ${(row.prompt || "").slice(0, 100)}`);
+        if (row.intervention) lines.push(`- **Intervention**: ${row.intervention}`);
+        if (row.error) lines.push(`- **Error**: ${row.error.slice(0, 200)}`);
+        lines.push("");
+      }
+
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error querying telemetry: ${err.message}` }] };
+    }
+  }
+);
+
 // ─── Start Server ────────────────────────────────────────────────────
 
 async function main() {

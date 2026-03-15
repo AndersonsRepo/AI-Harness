@@ -9,6 +9,7 @@ import { getProjectSessionKey } from "./handoff-router.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
 import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS } from "./agent-loader.js";
+import { isHoldingContinuation, getInterventionNote, clearInterventionNote } from "./instance-monitor.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -377,6 +378,14 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
     args.push("--append-system-prompt", context);
   }
 
+  // Monitor intervention note — inject guidance for this step
+  const interventionNote = getInterventionNote(task.id);
+  if (interventionNote) {
+    args.push("--append-system-prompt", `\n[OPERATOR GUIDANCE]: ${interventionNote}`);
+    clearInterventionNote(task.id);
+    console.log(`[TASK] ${task.id} injected intervention note: ${interventionNote.slice(0, 80)}`);
+  }
+
   // Permission mode
   if (channelConfig?.permissionMode) {
     args.push("--permission-mode", channelConfig.permissionMode);
@@ -577,6 +586,12 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
       // Notify handler of intermediate output
       if (outputHandler) {
         await outputHandler(taskId, responseText, null, sessionId, raw);
+      }
+
+      // Check if monitor is holding continuation (pause intervention)
+      if (isHoldingContinuation(taskId)) {
+        console.log(`[TASK] ${taskId} continuation held by monitor — waiting for resume`);
+        return;
       }
 
       // Spawn next step — reuse stream dir so StreamPoller keeps working

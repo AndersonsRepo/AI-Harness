@@ -7,9 +7,22 @@ export interface StreamEvent {
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   result?: string;
+  is_error?: boolean;
+  // Fields from assistant message content blocks
+  name?: string;
+  input?: Record<string, unknown>;
+  message?: {
+    content?: Array<{
+      type: string;
+      text?: string;
+      name?: string;
+      input?: Record<string, unknown>;
+    }>;
+  };
 }
 
 export type StreamCallback = (text: string, toolInfo?: string) => void;
+export type MonitorCallback = (event: StreamEvent) => void;
 
 export class StreamPoller {
   private streamDir: string;
@@ -18,6 +31,7 @@ export class StreamPoller {
   private fallbackInterval: ReturnType<typeof setInterval> | null = null;
   private accumulatedText: string = "";
   private callback: StreamCallback;
+  private monitorCallback: MonitorCallback | null;
   private lastCallbackTime: number = 0;
   private throttleMs: number;
   private done: boolean = false;
@@ -25,11 +39,12 @@ export class StreamPoller {
   constructor(
     streamDir: string,
     callback: StreamCallback,
-    throttleMs: number = 2000
+    options?: { throttleMs?: number; monitorCallback?: MonitorCallback }
   ) {
     this.streamDir = streamDir;
     this.callback = callback;
-    this.throttleMs = throttleMs;
+    this.monitorCallback = options?.monitorCallback || null;
+    this.throttleMs = options?.throttleMs || 2000;
     try {
       mkdirSync(streamDir, { recursive: true });
     } catch {}
@@ -101,6 +116,12 @@ export class StreamPoller {
         const content = readFileSync(join(this.streamDir, file), "utf-8");
         try {
           const event: StreamEvent = JSON.parse(content);
+
+          // Forward raw event to monitor before processing for display
+          if (this.monitorCallback) {
+            this.monitorCallback(event);
+          }
+
           this.processEvent(event);
         } catch {}
 
@@ -127,8 +148,10 @@ export class StreamPoller {
         }
         break;
       case "tool_use":
-        if (event.tool_name) {
-          const toolInfo = this.formatToolInfo(event.tool_name, event.tool_input);
+        if (event.tool_name || event.name) {
+          const toolName = event.tool_name || event.name || "unknown";
+          const toolInput = event.tool_input || event.input;
+          const toolInfo = this.formatToolInfo(toolName, toolInput);
           this.callback(this.accumulatedText, toolInfo);
           this.lastCallbackTime = Date.now();
         }
@@ -158,9 +181,19 @@ export class StreamPoller {
         return `Editing ${(input?.file_path as string) || "file"}...`;
       case "Write":
         return `Writing ${(input?.file_path as string) || "file"}...`;
-      case "Bash":
-        return `Running command...`;
+      case "Bash": {
+        const cmd = (input?.command as string) || "";
+        return cmd ? `Running: \`${cmd.slice(0, 80)}${cmd.length > 80 ? "..." : ""}\`` : "Running command...";
+      }
+      case "WebFetch":
+        return `Fetching ${(input?.url as string) || "URL"}...`;
+      case "WebSearch":
+        return `Searching web: "${(input?.query as string) || ""}"...`;
       default:
+        if (toolName.startsWith("mcp__")) {
+          const parts = toolName.split("__");
+          return `${parts[1]}: ${parts[2] || toolName}...`;
+        }
         return `Using ${toolName}...`;
     }
   }
