@@ -14,6 +14,7 @@
 import {
   Client,
   TextChannel,
+  ThreadChannel,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
@@ -32,8 +33,11 @@ let monitorChannel: TextChannel | null = null;
 const lastUpdateTimes = new Map<string, number>();
 // Track pending updates that were throttled
 const pendingUpdates = new Map<string, MonitoredInstance>();
-// Track monitor messages per instance
+// Track monitor messages and threads per instance
 const monitorMessages = new Map<string, Message>();
+const monitorThreads = new Map<string, ThreadChannel>();
+// Track tool calls already posted to thread (avoid duplicates)
+const threadToolCounts = new Map<string, number>();
 // Throttle flush interval
 let flushInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -101,6 +105,17 @@ export async function onInstanceRegistered(instance: MonitoredInstance): Promise
     const msg = await channel.send({ embeds: [embed], components: [row] });
     monitorMessages.set(instance.taskId, msg);
     instance.monitorMessageId = msg.id;
+
+    // Create a thread for detailed tool call log
+    try {
+      const thread = await msg.startThread({
+        name: `${instance.agent || "default"} — ${instance.prompt.slice(0, 40)}`,
+        autoArchiveDuration: 60,
+      });
+      instance.monitorThreadId = thread.id;
+      monitorThreads.set(instance.taskId, thread);
+    } catch {}
+
     console.log(`[MONITOR-UI] Created monitor embed for ${instance.taskId}`);
   } catch (err: any) {
     console.error(`[MONITOR-UI] Failed to send monitor embed: ${err.message}`);
@@ -125,20 +140,49 @@ export async function onInstanceCompleted(instance: MonitoredInstance): Promise<
   pendingUpdates.delete(instance.taskId);
   await doUpdate(instance);
 
-  // Delete the embed after 2 minutes (keep it visible briefly for review)
+  // Post completion summary to monitor channel
+  const channel = await ensureMonitorChannel();
+  if (channel) {
+    const durationSec = Math.round((Date.now() - instance.startedAt) / 1000);
+    const durationStr = durationSec >= 60
+      ? `${Math.floor(durationSec / 60)}m ${durationSec % 60}s`
+      : `${durationSec}s`;
+    const inputCost = (instance.estimatedInputTokens / 1_000_000) * 3;
+    const outputCost = (instance.estimatedOutputTokens / 1_000_000) * 15;
+    const cost = (inputCost + outputCost).toFixed(4);
+    const statusIcon = instance.status === "completed" ? "✅" : instance.status === "killed" ? "🛑" : "❌";
+    const agent = instance.agent ? instance.agent.charAt(0).toUpperCase() + instance.agent.slice(1) : "Default";
+
+    try {
+      await channel.send(
+        `${statusIcon} **${agent}** completed in ${durationStr} (${instance.toolCalls.length} tools, ~$${cost}) — <#${instance.channelId}>`
+      );
+    } catch {}
+  }
+
+  // Delete the embed + thread after 2 minutes
   const msg = monitorMessages.get(instance.taskId);
+  const thread = monitorThreads.get(instance.taskId);
   setTimeout(async () => {
+    if (thread) {
+      try { await thread.delete(); } catch {}
+    }
     if (msg) {
-      try {
-        await msg.delete();
-      } catch {}
+      try { await msg.delete(); } catch {}
     }
     monitorMessages.delete(instance.taskId);
+    monitorThreads.delete(instance.taskId);
+    threadToolCounts.delete(instance.taskId);
     lastUpdateTimes.delete(instance.taskId);
   }, 120_000);
 }
 
 // ─── Embed Builder ───────────────────────────────────────────────────
+
+// Cost thresholds for color alerting
+const COST_WARN_CENTS = 50;   // $0.50 → yellow
+const COST_ALERT_CENTS = 100; // $1.00 → red
+const STALE_THRESHOLD_MS = 60_000; // 60s no activity → stale warning
 
 function buildInstanceEmbed(instance: MonitoredInstance): {
   embed: EmbedBuilder;
@@ -160,36 +204,61 @@ function buildInstanceEmbed(instance: MonitoredInstance): {
   // Cost estimate
   const inputCost = (instance.estimatedInputTokens / 1_000_000) * 3;
   const outputCost = (instance.estimatedOutputTokens / 1_000_000) * 15;
-  const totalCost = (inputCost + outputCost).toFixed(4);
+  const totalCostNum = inputCost + outputCost;
+  const totalCost = totalCostNum.toFixed(4);
+  const costCents = Math.round(totalCostNum * 100);
 
-  // Current tool
-  let currentToolStr = "Thinking...";
+  // Stale detection
+  const timeSinceActivity = Date.now() - instance.lastActivityAt;
+  const isStale = instance.status === "running" && timeSinceActivity > STALE_THRESHOLD_MS;
+
+  // Color: status-based, but cost overrides if high
+  let embedColor = 0x3498db; // blue (running)
+  if (instance.status === "paused_continue") embedColor = 0xf39c12;
+  else if (instance.status === "completed") embedColor = 0x2ecc71;
+  else if (instance.status === "killed") embedColor = 0xe74c3c;
+  else if (instance.status === "failed") embedColor = 0xe74c3c;
+
+  // Cost alerting overrides running color
+  if (instance.status === "running") {
+    if (costCents >= COST_ALERT_CENTS) embedColor = 0xe74c3c; // red
+    else if (costCents >= COST_WARN_CENTS) embedColor = 0xf39c12; // yellow
+    else if (isStale) embedColor = 0xe67e22; // orange for stale
+  }
+
+  // Current activity display
+  let currentStr = "Thinking...";
   if (instance.currentTool) {
-    currentToolStr = instance.currentTool.displaySummary;
+    currentStr = instance.currentTool.displaySummary;
   } else if (instance.status === "completed") {
-    currentToolStr = "Done";
+    currentStr = "Done";
+  } else if (instance.status === "failed") {
+    currentStr = "Failed";
+  } else if (instance.thinkingText) {
+    // Show a snippet of what Claude is thinking about
+    const snippet = instance.thinkingText.trim().split("\n").pop() || "";
+    currentStr = snippet.slice(0, 120) || "Thinking...";
   }
 
   // Recent tool calls (last 5)
   const recentTools = instance.toolCalls.slice(-5).map((tc) => {
     const duration = tc.durationMs ? `(${(tc.durationMs / 1000).toFixed(1)}s)` : "";
-    return `✓ ${tc.displaySummary.slice(0, 60)} ${duration}`;
+    return `✓ ${tc.displaySummary.slice(0, 55)} ${duration}`;
   });
 
   const agentDisplay = instance.agent
     ? instance.agent.charAt(0).toUpperCase() + instance.agent.slice(1)
     : "Default";
 
+  // Build title with stale indicator
+  const title = isStale
+    ? `${statusEmoji} ${agentDisplay} Agent ⚠️ STALE (${Math.round(timeSinceActivity / 1000)}s idle)`
+    : `${statusEmoji} ${agentDisplay} Agent`;
+
   const embed = new EmbedBuilder()
-    .setTitle(`${statusEmoji} ${agentDisplay} Agent`)
+    .setTitle(title)
     .setDescription(`<#${instance.channelId}>`)
-    .setColor(
-      instance.status === "running" ? 0x3498db :
-      instance.status === "paused_continue" ? 0xf39c12 :
-      instance.status === "completed" ? 0x2ecc71 :
-      instance.status === "killed" ? 0xe74c3c :
-      0x95a5a6
-    )
+    .setColor(embedColor)
     .addFields(
       {
         name: "Prompt",
@@ -207,13 +276,17 @@ function buildInstanceEmbed(instance: MonitoredInstance): {
         inline: true,
       },
       {
-        name: "Tokens (est.)",
-        value: `~${(instance.estimatedInputTokens / 1000).toFixed(1)}k in / ~${(instance.estimatedOutputTokens / 1000).toFixed(1)}k out ($${totalCost})`,
+        name: "Cost (est.)",
+        value: costCents >= COST_ALERT_CENTS
+          ? `⚠️ $${totalCost}`
+          : costCents >= COST_WARN_CENTS
+            ? `⚡ $${totalCost}`
+            : `$${totalCost}`,
         inline: true,
       },
       {
         name: "Current",
-        value: `\`${currentToolStr.slice(0, 100)}\``,
+        value: currentStr.slice(0, 200),
         inline: false,
       },
     )
@@ -289,6 +362,26 @@ async function doUpdate(instance: MonitoredInstance): Promise<void> {
     // Message might have been deleted
     if (err.code === 10008) {
       monitorMessages.delete(instance.taskId);
+    }
+  }
+
+  // Post new tool calls to the thread
+  const thread = monitorThreads.get(instance.taskId);
+  if (thread) {
+    const lastPosted = threadToolCounts.get(instance.taskId) || 0;
+    const newTools = instance.toolCalls.slice(lastPosted);
+    if (newTools.length > 0) {
+      // Batch tool calls into one message (max 5 per message to avoid spam)
+      const lines: string[] = [];
+      for (const tc of newTools.slice(0, 5)) {
+        const elapsed = ((tc.timestamp - instance.startedAt) / 1000).toFixed(0);
+        const duration = tc.durationMs ? ` (${(tc.durationMs / 1000).toFixed(1)}s)` : "";
+        lines.push(`\`[${elapsed}s]\` ${tc.displaySummary.slice(0, 80)}${duration}`);
+      }
+      try {
+        await thread.send(lines.join("\n"));
+      } catch {}
+      threadToolCounts.set(instance.taskId, instance.toolCalls.length);
     }
   }
 }
