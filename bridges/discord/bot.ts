@@ -302,7 +302,30 @@ const pendingTaskContexts: Map<string, PendingTaskContext> = new Map();
 onTaskOutput(async (taskId, response, error, sessionId, raw) => {
   const ctx = pendingTaskContexts.get(taskId);
   if (!ctx) {
-    console.log(`[OUTPUT] No context for task ${taskId} — skipping (re-attached or orphaned)`);
+    // Re-attached or orphaned task — try to post response to the original channel
+    const task = getTask(taskId);
+    if (task && response) {
+      console.log(`[OUTPUT] Orphaned task ${taskId} completed with response — posting to channel ${task.channel_id}`);
+      try {
+        const channel = client.channels.cache.get(task.channel_id) as TextChannel | undefined;
+        if (channel) {
+          const chunks = splitMessage(response);
+          for (const chunk of chunks.slice(0, 5)) {
+            await channel.send(chunk);
+          }
+        }
+      } catch (err: any) {
+        console.error(`[OUTPUT] Failed to post orphaned task response: ${err.message}`);
+      }
+    } else {
+      console.log(`[OUTPUT] No context for task ${taskId} — skipping (re-attached or orphaned)`);
+    }
+    // Clean up monitor
+    const completedInstance = unregisterInstance(taskId);
+    if (completedInstance) {
+      completedInstance.status = "completed";
+      onInstanceCompleted(completedInstance).catch(() => {});
+    }
     return;
   }
 
