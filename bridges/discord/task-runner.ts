@@ -544,6 +544,8 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     const responseText = extractResponse(stdout);
     const sessionId = extractSessionId(stdout);
 
+    console.log(`[TASK] ${taskId} extractResponse: ${responseText ? responseText.length + ' chars' : 'NULL'}, sessionId: ${sessionId || 'null'}`);
+
     // Loop detection — check for repeated tool call patterns
     const loopWarning = checkForLoops(taskId, stdout);
     if (loopWarning) {

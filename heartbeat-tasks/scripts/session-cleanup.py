@@ -33,7 +33,7 @@ def main():
 
     # Also clean up dead_letter entries older than 30 days
     cursor2 = conn.execute(
-        "DELETE FROM dead_letter WHERE failed_at < datetime('now', '-30 days')"
+        "DELETE FROM dead_letter WHERE created_at < datetime('now', '-30 days')"
     )
     dead_removed = cursor2.rowcount
     conn.commit()

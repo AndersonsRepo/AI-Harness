@@ -4,7 +4,7 @@
   "type": "script",
   "script": "calendar-sync.py",
   "schedule": "2h",
-  "enabled": true,
+  "enabled": false,
   "notify": "discord",
   "discord_channel": "outlook",
   "timeout": 60

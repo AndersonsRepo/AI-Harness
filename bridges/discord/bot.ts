@@ -280,7 +280,12 @@ const pendingTaskContexts: Map<string, PendingTaskContext> = new Map();
 
 onTaskOutput(async (taskId, response, error, sessionId, raw) => {
   const ctx = pendingTaskContexts.get(taskId);
-  if (!ctx) return;
+  if (!ctx) {
+    console.log(`[OUTPUT] No context for task ${taskId} — skipping (re-attached or orphaned)`);
+    return;
+  }
+
+  console.log(`[OUTPUT] Processing task ${taskId}: response=${response ? response.length + ' chars' : 'null'}, error=${error ? error.slice(0, 100) : 'null'}`);
 
   const task = getTask(taskId);
   const isComplete = task?.status === "completed" || task?.status === "dead";
