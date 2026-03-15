@@ -11,6 +11,6 @@
     "resolveJsonModule": true,
     "declaration": true
   },
-  "include": ["*.ts"],
+  "include": ["*.ts", "tests/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
