@@ -89,6 +89,26 @@ import {
   type DeadLetterRecord,
 } from "./task-runner.js";
 import { syncEmbeddings, watchVaultForEmbeddings, stopEmbeddingWatchers } from "./embeddings.js";
+import {
+  registerInstance,
+  unregisterInstance,
+  processMonitorEvent,
+  setMonitorUpdateCallback,
+  getCompletedSummary,
+  isHoldingContinuation,
+  getInterventionNote,
+  clearInterventionNote,
+} from "./instance-monitor.js";
+import {
+  initMonitorUI,
+  ensureMonitorChannel,
+  startMonitorUI,
+  stopMonitorUI,
+  onInstanceRegistered,
+  onInstanceUpdate,
+  onInstanceCompleted,
+} from "./monitor-ui.js";
+import { handleMonitorInteraction } from "./monitor-interventions.js";
 
 config();
 
@@ -112,6 +132,7 @@ try {
     } catch {}
     stopAllWatchers();
     stopEmbeddingWatchers();
+    stopMonitorUI();
     closeDb();
   });
   process.on("SIGINT", () => process.exit(0));
@@ -326,6 +347,32 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
   pendingTaskContexts.delete(taskId);
   const streamMessage = activeStreamMessages.get(taskId);
   activeStreamMessages.delete(taskId);
+
+  // Update instance monitor + persist telemetry
+  const telemetry = getCompletedSummary(taskId);
+  const completedInstance = unregisterInstance(taskId);
+  if (completedInstance) {
+    completedInstance.status = task?.status === "dead" ? "failed" : "completed";
+    onInstanceCompleted(completedInstance).catch(() => {});
+  }
+  if (telemetry && task) {
+    try {
+      const db = getDb();
+      db.prepare(`
+        INSERT OR REPLACE INTO task_telemetry
+        (task_id, channel_id, agent, prompt, started_at, completed_at, status, tool_calls, total_tools, duration_ms, est_input_tokens, est_output_tokens, est_cost_cents, intervention, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        taskId, task.channel_id, task.agent || "default", task.prompt?.slice(0, 500) || "",
+        new Date(Date.now() - telemetry.durationMs).toISOString(), new Date().toISOString(),
+        task.status, JSON.stringify(telemetry.toolCalls.slice(-50)), telemetry.totalTools,
+        telemetry.durationMs, telemetry.estInputTokens, telemetry.estOutputTokens,
+        telemetry.estCostCents, telemetry.intervention, error || null
+      );
+    } catch (err: any) {
+      console.error(`[TELEMETRY] Failed to persist: ${err.message}`);
+    }
+  }
 
   // Clean up stream directory
   try {
@@ -597,6 +644,15 @@ async function handleClaude(
     return;
   }
 
+  // Register with instance monitor
+  registerInstance({
+    taskId,
+    channelId,
+    agent: agentName || "default",
+    prompt: userText,
+    pid: spawnResult.pid,
+  });
+
   // Set up streaming message updates using the task's stream dir
   let streamMessage: Message | null = null;
   let lastStreamText = "";
@@ -623,6 +679,8 @@ async function handleClaude(
     } catch (err: any) {
       // Rate limited or message deleted — ignore
     }
+  }, {
+    monitorCallback: (event) => processMonitorEvent(taskId, event),
   });
 
   activeStreamPollers.set(taskId, streamPoller);
@@ -1269,6 +1327,19 @@ client.on("clientReady", async () => {
   getDb(); // Force init on startup
   console.log("[DB] Database ready");
 
+  // Initialize instance monitor
+  initMonitorUI(client);
+  setMonitorUpdateCallback((instance) => {
+    if (!instance.monitorMessageId) {
+      onInstanceRegistered(instance).catch(() => {});
+    } else {
+      onInstanceUpdate(instance).catch(() => {});
+    }
+  });
+  startMonitorUI();
+  await ensureMonitorChannel();
+  console.log("[MONITOR] Instance monitor initialized");
+
   // Initialize activity stream
   initActivityStream(client);
 
@@ -1428,6 +1499,15 @@ client.on("clientReady", async () => {
   // Start notification drain polling (keep as-is)
   setInterval(drainNotifications, NOTIFY_POLL_MS);
   console.log(`[NOTIFY] Polling every ${NOTIFY_POLL_MS / 1000}s`);
+});
+
+// --- Monitor Interaction Handler (buttons, select menus, modals) ---
+client.on("interactionCreate", async (interaction) => {
+  try {
+    await handleMonitorInteraction(interaction);
+  } catch (err: any) {
+    console.error(`[MONITOR] Interaction error: ${err.message}`);
+  }
 });
 
 client.on("messageCreate", async (message: Message) => {

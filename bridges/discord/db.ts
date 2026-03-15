@@ -56,6 +56,12 @@ function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(2);
     console.log("[DB] Applied schema v2 (oauth, email, linkedin)");
   }
+
+  if (version < 3) {
+    applyV3(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(3);
+    console.log("[DB] Applied schema v3 (task telemetry)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -204,6 +210,33 @@ function applyV2(database: Database.Database): void {
       discord_message_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_linkedin_status ON linkedin_posts(status);
+  `);
+}
+
+function applyV3(database: Database.Database): void {
+  database.exec(`
+    -- Task telemetry for post-mortem analysis
+    CREATE TABLE IF NOT EXISTS task_telemetry (
+      task_id           TEXT PRIMARY KEY,
+      channel_id        TEXT NOT NULL,
+      agent             TEXT,
+      prompt            TEXT NOT NULL,
+      started_at        TEXT NOT NULL,
+      completed_at      TEXT,
+      status            TEXT NOT NULL,
+      tool_calls        TEXT NOT NULL DEFAULT '[]',
+      total_tools       INTEGER NOT NULL DEFAULT 0,
+      duration_ms       INTEGER,
+      est_input_tokens  INTEGER,
+      est_output_tokens INTEGER,
+      est_cost_cents    INTEGER,
+      intervention      TEXT,
+      loop_detected     INTEGER NOT NULL DEFAULT 0,
+      error             TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_telemetry_channel ON task_telemetry(channel_id);
+    CREATE INDEX IF NOT EXISTS idx_telemetry_agent ON task_telemetry(agent);
+    CREATE INDEX IF NOT EXISTS idx_telemetry_started ON task_telemetry(started_at);
   `);
 }
 
