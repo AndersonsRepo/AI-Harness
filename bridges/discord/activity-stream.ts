@@ -23,19 +23,24 @@ export function initActivityStream(client: Client): void {
 
 export async function postStart(entry: SubagentEntry): Promise<string | null> {
   if (!streamChannel) return null;
-  const embed = new EmbedBuilder()
-    .setTitle(`🚀 Subagent Started`)
-    .setDescription(entry.description)
-    .addFields(
-      { name: "ID", value: entry.id, inline: true },
-      { name: "Agent", value: entry.agent || "default", inline: true },
-      { name: "Channel", value: `<#${entry.parentChannelId}>`, inline: true }
-    )
-    .setColor(0x3498db)
-    .setTimestamp(new Date(entry.startedAt));
+  try {
+    const embed = new EmbedBuilder()
+      .setTitle(`🚀 Subagent Started`)
+      .setDescription(entry.description)
+      .addFields(
+        { name: "ID", value: entry.id, inline: true },
+        { name: "Agent", value: entry.agent || "default", inline: true },
+        { name: "Channel", value: `<#${entry.parentChannelId}>`, inline: true }
+      )
+      .setColor(0x3498db)
+      .setTimestamp(new Date(entry.startedAt));
 
-  const msg = await streamChannel.send({ embeds: [embed] });
-  return msg.id;
+    const msg = await streamChannel.send({ embeds: [embed] });
+    return msg.id;
+  } catch (err: any) {
+    console.error(`[STREAM] Failed to post subagent start: ${err.message}`);
+    return null;
+  }
 }
 
 export async function postUpdate(
@@ -122,18 +127,23 @@ export interface AgentActivity {
 
 export async function postAgentStart(activity: AgentActivity): Promise<string | null> {
   if (!streamChannel) return null;
-  const embed = new EmbedBuilder()
-    .setTitle(`Agent Active`)
-    .setDescription(monitor.truncate(activity.prompt, 200, "stream:agent-prompt"))
-    .addFields(
-      { name: "Agent", value: activity.agent, inline: true },
-      { name: "Channel", value: `<#${activity.channelId}>`, inline: true }
-    )
-    .setColor(0x9b59b6)
-    .setTimestamp();
+  try {
+    const embed = new EmbedBuilder()
+      .setTitle(`Agent Active`)
+      .setDescription(monitor.truncate(activity.prompt, 200, "stream:agent-prompt"))
+      .addFields(
+        { name: "Agent", value: activity.agent, inline: true },
+        { name: "Channel", value: `<#${activity.channelId}>`, inline: true }
+      )
+      .setColor(0x9b59b6)
+      .setTimestamp();
 
-  const msg = await streamChannel.send({ embeds: [embed] });
-  return msg.id;
+    const msg = await streamChannel.send({ embeds: [embed] });
+    return msg.id;
+  } catch (err: any) {
+    console.error(`[STREAM] Failed to post agent start: ${err.message}`);
+    return null;
+  }
 }
 
 export async function postAgentComplete(

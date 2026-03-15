@@ -480,9 +480,14 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
     filePath: outputFile,
     onFile: (content: string) => {
       untrackWatcher(watcher);
-      handleTaskOutput(taskId, content).catch((err) =>
-        console.error(`[TASK] Output handler error for ${taskId}: ${err.message}`)
-      );
+      handleTaskOutput(taskId, content).catch((err) => {
+        console.error(`[TASK] Output handler error for ${taskId}: ${err.message}`);
+        // Ensure task doesn't hang in 'running' state if handleTaskOutput itself throws
+        updateTask(taskId, { status: "failed", last_error: `Output handler crash: ${err.message}` });
+        handleFailure(taskId, `Output handler crash: ${err.message}`).catch((e) =>
+          console.error(`[TASK] Recovery also failed for ${taskId}: ${e.message}`)
+        );
+      });
     },
     fallbackPollMs: 2000,
     retryReadMs: 100,
@@ -522,6 +527,7 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
       console.log(`[TASK] ${taskId} stale session detected, clearing and retrying`);
       const sessionKey = task.session_key || task.channel_id;
       validateSession(sessionKey);
+      clearLoopHistory(taskId);
       // Immediate retry (counts as attempt 1)
       updateTask(taskId, { attempt: 1, status: "pending", last_error: "Stale session - retrying" });
       await spawnTask(taskId);
@@ -668,11 +674,13 @@ async function handleFailure(taskId: string, error: string): Promise<void> {
   });
 
   // Schedule the retry
-  setTimeout(async () => {
+  setTimeout(() => {
     const current = getTask(taskId);
     if (current && current.status === "failed") {
       updateTask(taskId, { status: "pending", step_count: 0 });
-      await spawnTask(taskId);
+      spawnTask(taskId).catch((err) =>
+        console.error(`[TASK] Retry spawn failed for ${taskId}: ${err.message}`)
+      );
     }
   }, backoffSeconds * 1000);
 }

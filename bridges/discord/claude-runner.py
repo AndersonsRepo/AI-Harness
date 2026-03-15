@@ -106,7 +106,8 @@ def main():
             stderr_thread = threading.Thread(target=read_stderr, args=(proc, stderr_container))
             stderr_thread.start()
 
-            # Enforce timeout on streaming stdout reads via a watchdog thread
+            # Enforce timeout on streaming stdout reads via a watchdog thread.
+            # Timer resets on each stdout line so active-but-slow streams aren't killed.
             timed_out = [False]
             def watchdog():
                 timed_out[0] = True
@@ -124,6 +125,11 @@ def main():
                     if not decoded:
                         continue
                     all_stdout.append(decoded)
+
+                    # Reset watchdog on each output line (active stream = not stalled)
+                    timer.cancel()
+                    timer = threading.Timer(timeout, watchdog)
+                    timer.start()
 
                     # Write chunk file for the stream poller
                     try:
