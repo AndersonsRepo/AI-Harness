@@ -44,6 +44,7 @@ export interface MonitoredInstance {
   // Discord state
   monitorMessageId: string | null;
   monitorThreadId: string | null;
+  lastPostedThinkingLen: number;
 
   // Intervention state
   holdContinuation: boolean;
@@ -112,6 +113,7 @@ export function registerInstance(config: {
 
     monitorMessageId: null,
     monitorThreadId: null,
+    lastPostedThinkingLen: 0,
 
     holdContinuation: false,
     interventionNote: null,
