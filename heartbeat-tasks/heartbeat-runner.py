@@ -281,12 +281,15 @@ def run_task(task_name):
 
     save_state(task_name, state)
 
-    # Write to daily vault
+    # Write to daily vault — skip no-change outputs to reduce noise
     summary = output[:1000] if output else "No output"
-    append_to_daily_vault(summary, task_name)
+    no_change_phrases = ["no new", "no changes", "nothing to", "0 new", "already up to date", "no output"]
+    is_noise = any(phrase in summary.lower() for phrase in no_change_phrases)
+    if not is_noise:
+        append_to_daily_vault(summary, task_name)
 
-    # Discord notification
-    if config.get("notify") == "discord" and success:
+    # Discord notification — only on failure (scripts handle their own success notifications)
+    if config.get("notify") == "discord" and not success:
         send_discord_notification(config, summary)
 
     log(task_name, "Task complete")
