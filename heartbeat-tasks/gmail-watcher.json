@@ -1,0 +1,11 @@
+{
+  "name": "gmail-watcher",
+  "description": "Monitor forwarded Outlook emails via Gmail API — indexes new messages, checks watched senders",
+  "type": "script",
+  "script": "gmail-watcher.py",
+  "schedule": "15m",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "outlook",
+  "timeout": 60
+}
