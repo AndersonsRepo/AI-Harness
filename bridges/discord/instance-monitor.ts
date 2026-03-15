@@ -203,6 +203,8 @@ export function processMonitorEvent(taskId: string, event: MonitorEvent): void {
           } else if (block.type === "text" && block.text) {
             instance.assistantText += block.text;
             instance.estimatedOutputTokens = Math.round(instance.assistantText.length / 4);
+            // Use visible text as "thinking" preview since thinking blocks aren't in stream-json
+            instance.thinkingText = block.text.slice(-500);
           } else if (block.type === "tool_use" && block.name) {
             // Tool call inside assistant message — this is the primary format
             handleToolUse(instance, block.name, block.input || {});
