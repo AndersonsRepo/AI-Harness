@@ -16,6 +16,7 @@ import json
 import datetime
 import re
 import subprocess
+import sqlite3
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
@@ -24,7 +25,20 @@ HARNESS_ROOT = os.environ.get(
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 STATE_FILE = os.path.join(TASKS_DIR, "assignment-reminder.state.json")
+DB_PATH = os.path.join(HARNESS_ROOT, "bridges", "discord", "harness.db")
 ICAL_URL = os.environ.get("CANVAS_ICAL_URL", "")
+
+# Semester end date — filter out events beyond this
+SEMESTER_END = datetime.datetime(2026, 5, 23)
+
+# Keywords for extracting events/deadlines from emails
+EMAIL_EVENT_PATTERNS = re.compile(
+    r"\b(deadline|due date|due by|submit by|interview|career fair|"
+    r"info session|internship|workshop|hackathon|orientation|"
+    r"meeting|appointment|rsvp|register by|office hours|"
+    r"application deadline|event|seminar|webinar)\b",
+    re.IGNORECASE,
+)
 if not ICAL_URL:
     print("CANVAS_ICAL_URL not set — skipping")
     sys.exit(0)
@@ -153,7 +167,7 @@ def fetch_all_events():
         # Clean up iCal line folding
         description = re.sub(r"\n ", "", description)
 
-        if dt and now <= dt <= window:
+        if dt and now <= dt <= window and dt <= SEMESTER_END:
             course_code, course_info = extract_course(name)
             event_name = extract_event_name(name)
             upcoming.append({
@@ -171,7 +185,54 @@ def fetch_all_events():
     return upcoming, None
 
 
-def generate_morning_summary(events):
+def scan_emails_for_events():
+    """Scan recent indexed emails for event/deadline keywords."""
+    if not os.path.exists(DB_PATH):
+        return []
+
+    email_events = []
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        # Get emails from the last 7 days
+        cutoff = (datetime.datetime.now() - datetime.timedelta(days=7)).isoformat()
+        rows = db.execute(
+            "SELECT subject, sender_name, sender_email, snippet, received_at FROM email_index WHERE indexed_at > ? ORDER BY received_at DESC LIMIT 50",
+            (cutoff,),
+        ).fetchall()
+        db.close()
+
+        for row in rows:
+            subject = row["subject"] or ""
+            snippet = row["snippet"] or ""
+            combined = f"{subject} {snippet}"
+
+            if EMAIL_EVENT_PATTERNS.search(combined):
+                # Categorize the email event
+                category = "event"
+                lower = combined.lower()
+                if any(w in lower for w in ["internship", "career", "interview", "application"]):
+                    category = "career"
+                elif any(w in lower for w in ["deadline", "due", "submit"]):
+                    category = "deadline"
+                elif any(w in lower for w in ["hackathon", "workshop", "seminar", "webinar"]):
+                    category = "event"
+
+                email_events.append({
+                    "subject": subject,
+                    "sender": row["sender_name"],
+                    "snippet": snippet[:150],
+                    "received": row["received_at"],
+                    "category": category,
+                })
+
+    except Exception as e:
+        print(f"Email scan error: {e}", file=sys.stderr)
+
+    return email_events
+
+
+def generate_morning_summary(events, email_events=None):
     """Build the daily morning summary for #calendar."""
     today = datetime.datetime.now().date()
 
@@ -212,6 +273,27 @@ def generate_morning_summary(events):
             lines.append(f"**Heads up:** {quiz_count} quiz{'es' if quiz_count > 1 else ''} in the next 48h!")
         if hw_count:
             lines.append(f"**Due soon:** {hw_count} assignment{'s' if hw_count > 1 else ''} in the next 48h")
+
+    # Email-sourced events (career, deadlines, events from inbox)
+    if email_events:
+        career = [e for e in email_events if e["category"] == "career"]
+        deadlines = [e for e in email_events if e["category"] == "deadline"]
+        other_events = [e for e in email_events if e["category"] == "event"]
+
+        if career:
+            lines.append("\n**From your inbox — Career/Internships:**")
+            for e in career[:5]:
+                lines.append(f"  {e['subject']} (from {e['sender']})")
+
+        if deadlines:
+            lines.append("\n**From your inbox — Deadlines:**")
+            for e in deadlines[:5]:
+                lines.append(f"  {e['subject']} (from {e['sender']})")
+
+        if other_events:
+            lines.append("\n**From your inbox — Events:**")
+            for e in other_events[:5]:
+                lines.append(f"  {e['subject']} (from {e['sender']})")
 
     return "\n".join(lines)
 
@@ -337,15 +419,30 @@ def main():
         print(f"Error fetching Canvas feed: {error}", file=sys.stderr)
         return
 
+    # Check emails even if no Canvas events
+    email_events = scan_emails_for_events()
+
+    if not events and not email_events:
+        print("No Canvas events or email events in the next 7 days")
+        return
+
     if not events:
-        print("No Canvas events in the next 7 days")
+        events = []
+        # Still generate a summary with email events only
+        if email_events:
+            summary = generate_morning_summary([], email_events)
+            print(summary)
+            notify(summary, channel="calendar")
+            print(f"Posted email-only summary ({len(email_events)} email events)")
         return
 
     state = load_state()
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
 
+    # email_events already scanned above
+
     # --- 1. Morning summary → #calendar ---
-    summary = generate_morning_summary(events)
+    summary = generate_morning_summary(events, email_events)
     print(summary)
     notify(summary, channel="calendar")
 
