@@ -154,7 +154,7 @@ Specialized personalities that hand off work to each other:
 | **Ops** | Infrastructure, deployment, database operations | All tools |
 | **Project** | Auto-configures for any codebase via scanning | All tools |
 | **Commands** | Helps users navigate bot capabilities | Limited |
-| **Hey Lexxi** | Domain-specific (HIPAA compliance) | Custom |
+| *(custom)* | Domain-specific agents for projects with compliance requirements | Custom |
 
 **Review Gate**: When a builder agent finishes work, a reviewer agent is automatically injected if one hasn't participated in the chain. This is infrastructure-enforced — the LLM cannot skip review.
 

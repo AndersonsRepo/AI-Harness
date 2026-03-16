@@ -1582,10 +1582,10 @@ client.on("messageCreate", async (message: Message) => {
     }
   }
 
-  // Build prompt with image references
+  // Build prompt with image references — instruct Claude to use Read tool on each image
   let promptText = content;
   if (attachmentPaths.length > 0) {
-    const imgRefs = attachmentPaths.map((p) => `[Attached image: ${p}]`).join("\n");
+    const imgRefs = attachmentPaths.map((p) => `Use the Read tool to view this image: ${p}`).join("\n");
     promptText = `${imgRefs}\n\n${content || "What do you see in this image?"}`;
   }
 
