@@ -22,6 +22,18 @@ HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
+
+# Load .env file for vars not in launchd environment
+_env_path = os.path.join(HARNESS_ROOT, "bridges", "discord", ".env")
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _key, _val = _line.split("=", 1)
+                if _key not in os.environ:  # Don't override existing env
+                    os.environ[_key] = _val
+
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 STATE_FILE = os.path.join(TASKS_DIR, "assignment-reminder.state.json")

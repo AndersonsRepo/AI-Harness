@@ -16,6 +16,7 @@ import type {
   PendingTaskEntry,
   CommandResult,
 } from "./core-types.js";
+import { executeCommand, type CommandContext } from "./core-commands.js";
 
 import {
   submitTask,
@@ -25,21 +26,15 @@ import {
   getRunningCountForChannel,
   getTaskPidForChannel,
   cancelChannelTasks,
-  cancelTask,
   onTaskOutput,
   onTaskDeadLetter,
   recoverCrashedTasks,
-  extractResponse,
-  extractSessionId,
-  type TaskRecord,
   type DeadLetterRecord,
 } from "./task-runner.js";
 
-import { getSession, setSession, clearChannelSessions } from "./session-store.js";
-import { getChannelConfig, setChannelConfig } from "./channel-config-store.js";
-import { getProject, isProjectChannel } from "./project-manager.js";
+import { getChannelConfig } from "./channel-config-store.js";
+import { getProject } from "./project-manager.js";
 import { getProjectSessionKey } from "./handoff-router.js";
-import { listAgentNames, readAgentPrompt } from "./agent-loader.js";
 import {
   registerInstance,
   unregisterInstance,
@@ -60,6 +55,18 @@ interface QueuedTask {
 
 // ─── Gateway Class ───────────────────────────────────────────────────
 
+/**
+ * Hook called after a successful task response, before the default send.
+ * If it returns true, the response was handled (e.g., handoff chain started)
+ * and the gateway skips its default send logic.
+ */
+export type PostOutputHook = (
+  channelId: string,
+  response: string,
+  agentName: string | undefined,
+  originMessageId: string
+) => Promise<boolean>;
+
 export class Gateway {
   private adapter: TransportAdapter;
   private config: GatewayConfig;
@@ -68,6 +75,7 @@ export class Gateway {
   private pendingTasks = new Map<string, PendingTaskEntry>();
   private activeStreamMessageIds = new Map<string, string>(); // taskId → messageId
   private activeStreamPollers = new Map<string, StreamPoller>();
+  private postOutputHook: PostOutputHook | null = null;
   private tempDir: string;
   private streamDir: string;
   private started = false;
@@ -77,6 +85,14 @@ export class Gateway {
     this.config = config;
     this.tempDir = join(config.harnessRoot, "bridges", "discord", ".tmp");
     this.streamDir = join(this.tempDir, "streams");
+  }
+
+  /**
+   * Register a hook that intercepts successful task output before default send.
+   * Used by transports to handle handoffs, create-channel directives, etc.
+   */
+  setPostOutputHook(hook: PostOutputHook): void {
+    this.postOutputHook = hook;
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────
@@ -146,59 +162,15 @@ export class Gateway {
   // ─── Command Handling ────────────────────────────────────────────
 
   async onCommand(channelId: string, command: string, args: string[], msg: GatewayMessage): Promise<CommandResult | null> {
-    switch (command) {
-      case "stop": {
-        const pid = getTaskPidForChannel(channelId);
-        if (!pid) return { text: "Nothing running in this channel." };
-        try { process.kill(pid, "SIGTERM"); } catch {}
-        cancelChannelTasks(channelId);
-        this.releaseChannel(channelId);
-        return { text: "Stopped the active request." };
-      }
+    const ctx: CommandContext = {
+      channelId,
+      userId: msg.userId,
+      guildId: msg.guildId,
+      rawText: msg.text.trim(),
+      releaseChannel: () => this.releaseChannel(channelId),
+    };
 
-      case "new": {
-        const cleared = clearChannelSessions(channelId);
-        return {
-          text: cleared > 0
-            ? `Cleared ${cleared} session(s). Next message starts a fresh conversation.`
-            : "No active session in this channel.",
-        };
-      }
-
-      case "status": {
-        const session = getSession(channelId);
-        return {
-          text: session
-            ? `Active session: \`${session}\``
-            : "No active session in this channel.",
-        };
-      }
-
-      case "agent": {
-        const name = args[0]?.toLowerCase();
-        if (!name) {
-          const agents = listAgentNames();
-          return { text: `**Available agents:**\n${agents.map(a => `• \`${a}\``).join("\n")}` };
-        }
-        if (name === "clear" || name === "reset") {
-          setChannelConfig(channelId, { agent: undefined } as any);
-          return { text: "Agent cleared. Using default." };
-        }
-        const agentPrompt = readAgentPrompt(name);
-        if (!agentPrompt) return { text: `Agent \`${name}\` not found.` };
-        setChannelConfig(channelId, { agent: name });
-        return { text: `Agent set to **${name}**` };
-      }
-
-      case "agents": {
-        const agents = listAgentNames();
-        return { text: `**Available agents:**\n${agents.map(a => `• \`${a}\``).join("\n")}` };
-      }
-
-      default:
-        // Unknown command — let it pass through to Claude as a normal message
-        return null;
-    }
+    return executeCommand(ctx);
   }
 
   // ─── Core Message Processing ─────────────────────────────────────
@@ -417,6 +389,21 @@ export class Gateway {
 
     // Success response
     if (response) {
+      // Let the transport intercept for handoffs, create-channel, etc.
+      if (this.postOutputHook) {
+        const handled = await this.postOutputHook(
+          entry.channelId, response, entry.agentName, entry.originMessageId
+        );
+        if (handled) {
+          // Delete stream message if transport handled the response
+          if (streamMsgId) {
+            try { await this.adapter.deleteMessage(entry.channelId, streamMsgId); } catch {}
+          }
+          this.releaseChannel(entry.channelId);
+          return;
+        }
+      }
+
       const chunks = this.splitMessage(response).slice(0, 5);
       if (streamMsgId) {
         await this.adapter.editMessage(entry.channelId, streamMsgId, chunks[0]);
