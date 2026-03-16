@@ -1558,35 +1558,38 @@ client.on("messageCreate", async (message: Message) => {
 
   const content = message.content.trim();
 
-  // Download image attachments so Claude can read them
-  const imageAttachments = message.attachments.filter(
-    (a) => a.contentType?.startsWith("image/") || /\.(png|jpg|jpeg|gif|webp)$/i.test(a.name || "")
-  );
+  // Download ALL attachments (images, PDFs, files) so Claude can read them
   let attachmentPaths: string[] = [];
-  if (imageAttachments.size > 0) {
-    const imgDir = join(HARNESS_ROOT, "bridges", "discord", ".tmp", "images");
-    mkdirSync(imgDir, { recursive: true });
-    for (const [, attachment] of imageAttachments) {
+  if (message.attachments.size > 0) {
+    const attachDir = join(HARNESS_ROOT, "bridges", "discord", ".tmp", "images");
+    mkdirSync(attachDir, { recursive: true });
+    for (const [, attachment] of message.attachments) {
       try {
-        const ext = (attachment.name || "image.png").split(".").pop() || "png";
+        const ext = (attachment.name || "file").split(".").pop() || "bin";
         const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
-        const filepath = join(imgDir, filename);
+        const filepath = join(attachDir, filename);
         const response = await fetch(attachment.url);
         const buffer = Buffer.from(await response.arrayBuffer());
         writeFileSync(filepath, buffer);
         attachmentPaths.push(filepath);
-        console.log(`[IMG] Downloaded ${attachment.name} → ${filepath} (${buffer.length} bytes)`);
+        console.log(`[ATTACH] Downloaded ${attachment.name} (${attachment.contentType || 'unknown'}) → ${filepath} (${buffer.length} bytes)`);
       } catch (err: any) {
-        console.error(`[IMG] Failed to download ${attachment.name}: ${err.message}`);
+        console.error(`[ATTACH] Failed to download ${attachment.name}: ${err.message}`);
       }
     }
   }
 
-  // Build prompt with image references — instruct Claude to use Read tool on each image
+  // Build prompt with attachment references
   let promptText = content;
   if (attachmentPaths.length > 0) {
-    const imgRefs = attachmentPaths.map((p) => `Use the Read tool to view this image: ${p}`).join("\n");
-    promptText = `${imgRefs}\n\n${content || "What do you see in this image?"}`;
+    const refs = attachmentPaths.map((p) => {
+      const isImage = /\.(png|jpg|jpeg|gif|webp)$/i.test(p);
+      const isPdf = /\.pdf$/i.test(p);
+      if (isImage) return `Use the Read tool to view this image: ${p}`;
+      if (isPdf) return `Use the Read tool to read this PDF: ${p}`;
+      return `Use the Read tool to read this file: ${p}`;
+    }).join("\n");
+    promptText = `${refs}\n\n${content || "What do you see in the attached file(s)?"}`;
   }
 
   if (!promptText.trim()) return;
