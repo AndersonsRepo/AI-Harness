@@ -96,7 +96,7 @@ async function testDatabaseInit() {
 
   // Check schema version
   const version = db.prepare("SELECT MAX(version) as v FROM schema_version").get() as { v: number };
-  assert(version.v === 1, `Schema version is 1 (got: ${version.v})`);
+  assert(version.v === 3, `Schema version is 3 (got: ${version.v})`);
 }
 
 async function testSessionStore() {
@@ -238,7 +238,7 @@ async function testProjectManager() {
   const expectedName = projName.replace(/^proj-/, "");
   assert(project.name === expectedName, "Project name stripped of proj- prefix");
   assert(project.description === "Test project", "Description set");
-  assert(project.agents.length === 4, "Default agents assigned");
+  assert(project.agents.length === 5, "Default agents assigned");
 
   const projChId = `proj-ch-${uniqueSuffix}`;
 

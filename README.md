@@ -2,7 +2,7 @@
 
 **A self-improving AI agent system that gets smarter every time you use it.**
 
-AI Harness wraps Claude Code in a persistent infrastructure layer — Discord bot interface, recursive learning pipeline, semantic memory, scheduled background tasks, and inter-agent collaboration — so that every interaction teaches the system something it remembers forever.
+AI Harness wraps Claude Code in a persistent infrastructure layer — Discord bot interface, recursive learning pipeline, semantic memory, 21+ scheduled background tasks, real-time agent monitoring, and inter-agent collaboration — so that every interaction teaches the system something it remembers forever.
 
 > Built by [Anderson Edmond](https://github.com/AndersonsRepo) as a personal AI infrastructure project. The system manages multiple production projects, handles academic tracking, monitors deployments, and evolves its own capabilities over time.
 
@@ -12,11 +12,13 @@ AI Harness wraps Claude Code in a persistent infrastructure layer — Discord bo
 
 Claude Code is powerful, but it forgets everything between sessions. Every conversation starts from zero. AI Harness solves this by building deterministic infrastructure *around* the LLM:
 
-- **Memory that persists** — An Obsidian-compatible knowledge vault with semantic search
+- **Memory that persists** — An Obsidian-compatible knowledge vault with semantic search and temporal decay
 - **Mistakes that stick** — Errors and corrections auto-logged, deduplicated, and promoted to permanent instructions after recurring 3+ times
-- **Skills that grow** — Reusable workflows extracted into standalone skill files
-- **Agents that collaborate** — Specialized personalities (builder, researcher, reviewer, ops) that hand off work to each other
-- **Background autonomy** — 13 scheduled tasks running via macOS launchd: deployment monitoring, assignment reminders, vault maintenance, and more
+- **Skills that grow** — 16 reusable workflows extracted into standalone skill files
+- **Agents that collaborate** — 9 specialized personalities (builder, researcher, reviewer, ops, education, and more) that hand off work to each other with review gates
+- **Background autonomy** — 21+ scheduled tasks running via macOS launchd: deployment monitoring, assignment reminders, email watching, vault maintenance, and more
+- **Real-time monitoring** — Live Discord embeds showing every Claude instance's tool calls, thinking, cost, and intervention buttons (Kill/Redirect/Inject/Pause)
+- **Transport-agnostic core** — Gateway abstraction separates orchestration from Discord, enabling future iMessage/web adapters
 
 The core philosophy: **the LLM handles language; deterministic infrastructure handles everything else** — memory retrieval, context assembly, routing, scheduling, and state management.
 
@@ -38,22 +40,25 @@ The core philosophy: **the LLM handles language; deterministic infrastructure ha
               +------+------+------+------+
                      |             |
               context-assembler   embeddings.ts
-              (deterministic)     (Ollama + nomic-embed-text)
-                     |             |
+              (deterministic)     (Ollama + nomic-embed-text
+                     |             + temporal decay)
               +------v------+------v------+
               |         SQLite            |
               |     (sessions, tasks,     |
-              |      projects, config)    |
+              |    projects, telemetry)   |
               +---------------------------+
               |     Obsidian Vault        |
               |  (learnings, knowledge,   |
-              |   agent memory, daily)    |
+              |   course notes, daily)    |
               +---------------------------+
                             |
               +---------------------------+
               |       MCP Servers         |
               |  mcp-vault (7 tools)      |
-              |  mcp-harness (9 tools)    |
+              |  mcp-harness (10 tools)   |
+              |  mcp-projects (6 tools)   |
+              |  mcp-outlook (5 tools)    |
+              |  mcp-linkedin (4 tools)   |
               +---------------------------+
 ```
 
@@ -63,7 +68,7 @@ The core philosophy: **the LLM handles language; deterministic infrastructure ha
 User interacts with Claude
   -> Hooks auto-capture learnings, errors, corrections
     -> Dedup engine increments recurrence (not duplicates)
-      -> Embeddings generated (Ollama, 768d vectors)
+      -> Embeddings generated (Ollama, 768d vectors, temporal decay)
         -> Next invocation: context daemon injects relevant knowledge
           -> Claude performs better, avoids past mistakes
             -> Recurrence hits 3+ -> promoted to CLAUDE.md
@@ -82,19 +87,39 @@ This is a **closed feedback loop**: the system literally rewrites its own instru
 | **Obsidian vault for knowledge** | Human-readable markdown with YAML frontmatter. Works with Obsidian's graph view. Not a database — a knowledge base. |
 | **Deterministic context injection** | The LLM never decides what to look up. A daemon assembles ~5000 tokens of relevant context before every invocation. |
 | **Local embeddings (Ollama)** | Free, fast on Apple Silicon, no API calls. nomic-embed-text: 768 dimensions, 8K context window. |
+| **Transport-agnostic gateway** | Core orchestration separated from Discord specifics. Same engine can serve iMessage, web, or other transports. |
+| **Retry with backoff** | Transient API errors (429, 5xx) are retried 3x with exponential backoff before failing. |
 
 ---
 
 ## Features
 
-### Discord Bot Interface
-- Message routing with request queue (no race conditions)
-- Live streaming responses with progressive message editing
-- Multi-channel support with per-channel configuration
-- Project channels with agent assignment and handoff chains
-- 14+ slash commands for task management, vault queries, health checks
+### Real-Time Agent Monitor (`#monitor` channel)
+Live-updating Discord embeds for every running Claude instance:
+- **Thinking preview** — See what Claude is reasoning about between tool calls
+- **Tool call thread** — Timestamped log of every tool invocation with actual commands
+- **Cost tracking** — Token estimates with color alerts (yellow at $0.50, red at $1.00)
+- **Stale detection** — Warning when an instance goes idle for 60+ seconds
+- **Intervention buttons** — Kill, Redirect (to different agent), Inject (guidance via modal), Pause/Resume
+- **Completion summaries** — Persistent one-line summary when embeds auto-delete
 
-### Skill System (15 Skills)
+### Discord Bot Interface
+- Message routing with per-channel task queue (no race conditions)
+- Live streaming responses with progressive message editing
+- Multi-channel support with per-channel agent/model configuration
+- Project channels with agent assignment and handoff chains
+- 20+ commands for task management, vault queries, health checks
+- Orphaned task recovery — responses still delivered after bot restart
+
+### Gateway Abstraction (Transport-Agnostic Core)
+The orchestration engine is fully decoupled from Discord:
+- **`core-types.ts`** — `TransportAdapter` interface, `GatewayMessage`, `PendingTaskEntry`
+- **`core-gateway.ts`** — Task queue, stream polling, output routing, notification drain, telemetry
+- **`core-commands.ts`** — 20+ commands as pure functions returning `CommandResult`
+- **`discord-transport.ts`** — Discord adapter implementing `TransportAdapter`
+- **139 tests** across 4 test suites validating the abstraction
+
+### Skill System (16 Skills)
 Skills are reusable, structured capabilities with YAML frontmatter:
 
 | Skill | Description | Key Feature |
@@ -102,11 +127,12 @@ Skills are reusable, structured capabilities with YAML frontmatter:
 | `/github` | PR, issue, and repo management | Uses `gh` CLI |
 | `/vercel` | Deployment monitoring for production apps | Confirmation required for deploys |
 | `/supabase` | Safe database queries with SQL guardrails | Blocks DROP/DELETE/ALTER |
-| `/academics` | Canvas LMS + GoodNotes academic tracking | PDF reading, due date alerts |
+| `/academics` | Canvas LMS + GoodNotes academic tracking | PDF reading, due date alerts, study guides |
 | `/scout` | Evaluate URLs and tech against all projects | Writes scouting reports to vault |
 | `/learned` | Explicitly capture mid-conversation knowledge | Writes complete vault entries |
-| `/heartbeat` | Manage scheduled background tasks | LaunchAgent CRUD |
+| `/heartbeat` | Manage scheduled background tasks | LaunchAgent CRUD, cron expressions |
 | `/health-report` | System health: bot, DB, heartbeat, vault, truncation | One-command diagnostics |
+| `/security-audit` | Security posture: credentials, git, heartbeat, config | Automated self-assessment |
 | `/vault-query` | Search and analyze the knowledge base | Stats, promotions, tags |
 | `/digest` | Summarize learnings for a date range | Daily/weekly rollups |
 | `/review-changes` | Code review for uncommitted changes | Runs in isolated fork |
@@ -115,96 +141,86 @@ Skills are reusable, structured capabilities with YAML frontmatter:
 | `self-improve` | Auto-triggered on errors and corrections | Hook-driven |
 | `doc-on-success` | Auto-update docs after confirmed changes | Git-diff aware |
 
-### Agent System (6 Core + Custom)
+### Agent System (9 Agents)
 Specialized personalities that hand off work to each other:
 
-- **Builder** — Implementation-focused, writes production code
-- **Researcher** — Deep investigation, read-only exploration
-- **Reviewer** — Code review with security and quality focus
-- **Ops** — Infrastructure, deployment, database operations
-- **Commands** — Helps users navigate bot capabilities
-- **Project** — Auto-configures for any codebase via MCP tools + living knowledge files
+| Agent | Role | Tool Restrictions |
+|-------|------|-------------------|
+| **Orchestrator** | Plans work, delegates to specialists, captures learnings | Cannot edit/write code |
+| **Builder** | Implementation-focused, writes production code | All tools |
+| **Researcher** | Deep investigation, read-only exploration | Read-only whitelist |
+| **Reviewer** | Code review with security and quality focus | Read-only + git |
+| **Education** | Course-specific tutor grounded in lecture notes | Read-only + vault |
+| **Ops** | Infrastructure, deployment, database operations | All tools |
+| **Project** | Auto-configures for any codebase via scanning | All tools |
+| **Commands** | Helps users navigate bot capabilities | Limited |
+| **Hey Lexxi** | Domain-specific (HIPAA compliance) | Custom |
 
-The Project agent reads from `vault/shared/project-knowledge/<name>.md` — a living document updated by `project_scan` (initial scan) and `session-debrief` (ongoing learnings). Each knowledge file has a **Conventions** section where recurring project-specific patterns are promoted automatically. Custom agents only exist for projects with compliance/safety requirements (e.g., Hey Lexxi for HIPAA).
+**Review Gate**: When a builder agent finishes work, a reviewer agent is automatically injected if one hasn't participated in the chain. This is infrastructure-enforced — the LLM cannot skip review.
 
-Agents communicate via `[HANDOFF:agent_name]` directives with depth limits and safety checks.
+**Orchestrator Debrief**: When a multi-agent chain completes, the orchestrator extracts learnings and posts a structured summary.
 
-### Background Tasks (13 Heartbeat Jobs)
-All managed via macOS launchd (`~/Library/LaunchAgents/`):
+### Academic Intelligence
+- **Per-course Discord channels** — `#numerical-methods`, `#philosophy`, `#systems-programming`, `#comp-society`
+- **Notes ingestion** — GoodNotes PDFs → Claude Sonnet → structured vault markdown (every 4h)
+- **Education agent** — Read-only tutor that searches vault notes before answering
+- **Assignment reminders** — Canvas iCal parsing, course routing, quiz study guide generation (daily at 8am)
+- **CS 2600 website crawler** — Weekly crawl with content-hash diffing
+- **Email scanning** — Gmail watcher indexes forwarded emails, surfaces career/internship/deadline keywords
+- **Context injection** — Course note counts and recent notes injected into agent context when in a course channel
 
-| Task | Interval | Purpose |
+### Background Tasks (21+ Heartbeat Jobs)
+All managed via macOS launchd with active hours, cron expressions, and failure auto-pause:
+
+| Task | Schedule | Purpose |
 |------|----------|---------|
-| health-check | 10 min | System health monitoring |
 | notification-drain | 5 min | Deliver pending notifications to Discord |
+| gmail-watcher | 15 min | Monitor forwarded emails via Gmail API |
 | deploy-monitor | 30 min | Watch Vercel deployments for failures |
-| session-cleanup | 1 hr | Clean stale sessions |
 | goodnotes-watch | 1 hr | Detect new GoodNotes PDF exports |
-| assignment-reminder | 12 hr | Canvas LMS due date alerts |
-| daily-digest | 24 hr | Learning summary |
-| promotion-check | 24 hr | Surface learnings ready for promotion |
-| github-watch | Disabled | Replaced by native GitHub→Discord webhooks + repo-scanner |
-| repo-scanner | 6 hr | Security/hygiene scan: secrets, debug artifacts, .env, large files, npm audit |
-| session-debrief | 3 hr | Extract knowledge from Claude Code transcripts (hybrid LLM + deterministic dedup) |
-| learning-pruner | 7 days | Clean low-value learnings |
-| vault-backup | Periodic | Vault integrity backup |
-| lattice-evolve | Periodic | Generative art evolution |
+| lattice-evolve | 1 hr | Generative art evolution |
+| calendar-sync | 2 hr | Sync Outlook calendar events |
+| session-debrief | 3 hr | Extract knowledge from Claude Code transcripts |
+| notes-ingest | 4 hr | GoodNotes PDF → vault course notes pipeline |
+| health-check | 6 hr | System health monitoring |
+| repo-scanner | 6 hr | Security scan: secrets, debug artifacts, npm audit |
+| assignment-reminder | Daily 8am | Canvas due dates + email event scanning + study guides |
+| daily-digest | Daily 10am | Learning summary |
+| code-review | 12 hr | Automated code review of registered projects |
+| lead-gen-pipeline | 12 hr | Lead generation scanning |
+| promotion-check | 12 hr | Surface learnings ready for CLAUDE.md promotion |
+| learning-pruner | 24 hr | Archive stale/duplicate learnings |
+| session-cleanup | 24 hr | Clean stale sessions and old dead letters |
+| vault-backup | 24 hr | Auto-commit vault changes to git |
+| token-expiry-check | 24 hr | Warn about expiring OAuth tokens |
+| cs2600-watch | Weekly | CS 2600 website crawler |
+
+Features: **active hours** (skip overnight), **cron expressions** (`"0 8 * * 1-5"`), **retry with backoff**, **auto-pause after 3 failures**, **noise reduction** (only notify on meaningful changes).
 
 ### Semantic Search & Embeddings
 - **Model**: nomic-embed-text via Ollama (768-dimensional, local, free)
 - **Hybrid search**: 70% semantic similarity + 30% keyword matching
+- **Temporal decay**: 30-day half-life — recent learnings rank higher (evergreen files exempt)
 - **Auto-indexing**: fs.watch on vault directories with 3-second debounce
 - **Storage**: JSON file (brute-force cosine similarity is sub-millisecond for <1000 entries)
-- **Upgrade path**: sqlite-vec when vault exceeds 500 files
 
-### MCP Servers (3 Custom)
+### MCP Servers (5 Custom)
 
-#### MCP Vault Server (`mcp-vault`)
-Custom Model Context Protocol server exposing the vault as 7 tools:
+| Server | Tools | Purpose |
+|--------|-------|---------|
+| **mcp-vault** | 7 | Vault CRUD + semantic search + embedding sync |
+| **mcp-harness** | 10 | Health, digest, heartbeat management, telemetry, context preview |
+| **mcp-projects** | 6 | Project registry, auto-scanning, security scanning |
+| **mcp-outlook** | 5 | Outlook email search, calendar, watched senders |
+| **mcp-linkedin** | 4 | Post drafting, approval flow, publishing |
 
-| Tool | Purpose |
-|------|---------|
-| `vault_search` | Semantic + keyword hybrid search |
-| `vault_read` | Read full vault entry content |
-| `vault_write` | Create entries with dedup (pattern-key matching) |
-| `vault_list` | Filter by type, status, area, tag |
-| `vault_promote_candidates` | Find learnings ready for promotion |
-| `vault_sync_embeddings` | Full re-index of vault embeddings |
-| `vault_stats` | Vault analytics |
-
-#### MCP Harness Server (`mcp-harness`)
-Infrastructure observability server exposing 9 tools for system health and diagnostics:
-
-| Tool | Purpose |
-|------|---------|
-| `harness_health` | System health: bot PID, DB tables, heartbeat states, vault stats, truncation metrics |
-| `harness_digest` | Learning summaries by date range with category breakdown |
-| `harness_heartbeat_list` | All tasks with config, state, and launchd status |
-| `harness_heartbeat_toggle` | Enable/disable a heartbeat task |
-| `harness_heartbeat_run` | Manually execute a script-type task |
-| `harness_context_preview` | Keyword extraction + vault search preview for a prompt |
-| `harness_skills` | List all skills with frontmatter metadata |
-| `harness_agents` | List all agents with descriptions and skill routing |
-| `harness_truncation_report` | Detailed truncation stats and recent events |
-
-#### MCP Projects Server (`mcp-projects`)
-Centralized project management server exposing 6 tools:
-
-| Tool | Purpose |
-|------|---------|
-| `project_list` | List all registered projects with metadata |
-| `project_register` | Add/update a project in the registry |
-| `project_scan` | Auto-scan a project directory and generate knowledge file |
-| `project_context` | Get combined registry + knowledge data for context injection |
-| `project_remove` | Unregister a project (keeps knowledge file) |
-| `project_scan_security` | Run repo security scanner — checks for secrets, debug artifacts, .env files, large files, npm vulnerabilities |
-
-### Truncation Monitor
-All truncation operations are wrapped with observability:
-- Smart boundary-aware truncation (paragraphs > headings > sentences > word boundaries)
-- Structure damage detection (unclosed code blocks, broken tables)
-- Discord messages split into multiple sends instead of hard-truncated
-- JSONL event logging with severity classification (benign/significant/critical)
-- LLM is notified when injected learnings are significantly truncated
+### Reliability Features
+- **Retry with backoff** — Claude CLI retries transient errors (429, 5xx) 3x with 5/15/45s delays
+- **API cooldown** — After 3 consecutive failures, tasks pause for 5 minutes with Discord notification
+- **Loop detection** — Kills tasks repeating the same tool call 4+ times
+- **Crash recovery** — On restart, re-attaches to alive Claude processes and registers them with the monitor
+- **Orphan task recovery** — Tasks that survive a bot restart still deliver responses to the original channel
+- **Pre-compaction flush** — Stop hook runs session-debrief when a conversation ends
 
 ### Safety Guardrails
 Every Claude invocation includes `--disallowedTools` blocking destructive commands:
@@ -236,10 +252,10 @@ npm install
 cp .env.example .env
 # Edit .env: add DISCORD_TOKEN, ALLOWED_USER_IDS, HARNESS_ROOT
 
-# Install MCP vault server
-cd ../../mcp-servers/mcp-vault
-npm install
-npx tsc
+# Install MCP servers
+cd ../../mcp-servers/mcp-vault && npm install
+cd ../mcp-harness && npm install
+cd ../mcp-projects && npm install
 
 # Start Ollama (for semantic search)
 ollama serve &
@@ -250,25 +266,25 @@ cd ../../bridges/discord
 HARNESS_ROOT=/path/to/AI-Harness npx tsx bot.ts
 ```
 
-### Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DISCORD_TOKEN` | Yes | Discord bot token |
-| `ALLOWED_USER_IDS` | Yes | Comma-separated Discord user IDs |
-| `HARNESS_ROOT` | Yes | Absolute path to AI-Harness root |
-| `STREAM_CHANNEL_ID` | No | Discord channel for agent activity stream |
-| `OLLAMA_URL` | No | Ollama API URL (default: `http://localhost:11434`) |
-| `CANVAS_ICAL_URL` | No | Canvas LMS iCal feed URL (enables assignment reminders) |
-| `CLAUDE_TRANSCRIPTS_DIR` | No | Claude Code transcripts directory (for session-debrief) |
-
 ### Load Heartbeat Tasks
 
 ```bash
-# Load all scheduled tasks
-for plist in ~/Library/LaunchAgents/com.aiharness.heartbeat.*.plist; do
-  launchctl load "$plist"
+# Generate and install all heartbeat plists
+for config in heartbeat-tasks/*.json; do
+  name=$(basename "$config" .json)
+  [[ "$name" == *.state* || "$name" == "projects" ]] && continue
+  python3 heartbeat-tasks/scripts/generate-plist.py "$name" --install
 done
+```
+
+### Run Tests
+
+```bash
+cd bridges/discord
+
+# All test suites (139 tests)
+HARNESS_ROOT=../.. npx tsx test-discord-transport.ts
+HARNESS_ROOT=../.. npx tsx --test tests/types.test.ts tests/gateway.test.ts tests/commands.test.ts tests/handoff-adapter.test.ts
 ```
 
 ---
@@ -277,59 +293,52 @@ done
 
 ```
 AI-Harness/
-├── bridges/discord/           # Discord bot + all core infrastructure
+├── bridges/discord/           # Discord bot + core infrastructure
 │   ├── bot.ts                 # Main: queue, commands, task dispatch, streaming
-│   ├── task-runner.ts         # Bounded-step execution, retry, dead-letter
-│   ├── claude-runner.py       # Python subprocess bridge to Claude CLI
+│   ├── task-runner.ts         # Bounded-step execution, retry, dead-letter, loop detection
+│   ├── claude-runner.py       # Python subprocess bridge with retry + backoff
+│   ├── core-types.ts          # Transport-agnostic types (TransportAdapter, GatewayMessage)
+│   ├── core-gateway.ts        # Gateway orchestration engine (transport-agnostic)
+│   ├── core-commands.ts       # 20+ command handlers as pure functions
+│   ├── discord-transport.ts   # Discord adapter implementing TransportAdapter
 │   ├── context-assembler.ts   # Deterministic context injection daemon
-│   ├── embeddings.ts          # Ollama embedding pipeline + hybrid search
-│   ├── truncation-monitor.ts  # Smart truncation with observability
-│   ├── handoff-router.ts      # Inter-agent handoff chains
-│   ├── subagent-manager.ts    # Background subagent lifecycle
-│   ├── db.ts                  # SQLite singleton (WAL mode)
-│   ├── session-store.ts       # Channel -> session mapping
-│   ├── channel-config-store.ts # Per-channel agent/model config
-│   ├── project-manager.ts     # Project CRUD + handoff depth
-│   ├── process-registry.ts    # Subagent tracking
-│   ├── file-watcher.ts        # Event-driven output detection
+│   ├── embeddings.ts          # Ollama embeddings + hybrid search + temporal decay
+│   ├── instance-monitor.ts    # Real-time Claude instance tracking
+│   ├── monitor-ui.ts          # Discord embeds + buttons + threads for monitoring
+│   ├── monitor-interventions.ts # Kill/Redirect/Inject/Pause handlers
+│   ├── handoff-router.ts      # Inter-agent handoff chains + review gate
 │   ├── stream-poller.ts       # Progressive stream-json parsing
-│   ├── activity-stream.ts     # Discord embeds for #agent-stream
-│   └── promotion-handler.ts   # Learning -> CLAUDE.md promotion
+│   ├── db.ts                  # SQLite singleton (WAL mode, v3 schema)
+│   └── tests/                 # Unit + integration tests (57 tests)
 │
 ├── mcp-servers/
-│   ├── mcp-vault/             # MCP server for vault operations
-│   │   └── index.ts           # 7 tools: search, read, write, list, promote, sync, stats
-│   ├── mcp-harness/           # MCP server for infrastructure observability
-│   │   └── index.ts           # 9 tools: health, digest, heartbeat, context, skills, agents, truncation
-│   └── mcp-projects/          # MCP server for project management
-│       └── index.ts           # 6 tools: list, register, scan, context, remove, scan_security
+│   ├── mcp-vault/             # 7 tools: search, read, write, list, promote, sync, stats
+│   ├── mcp-harness/           # 10 tools: health, digest, heartbeat, telemetry, context
+│   ├── mcp-projects/          # 6 tools: list, register, scan, context, remove, security
+│   ├── mcp-outlook/           # 5 tools: emails, read, calendar, senders, summary
+│   └── mcp-linkedin/          # 4 tools: draft, post, history, profile
 │
 ├── .claude/
-│   ├── skills/                # 15 skill definitions (SKILL.md + supporting scripts)
-│   ├── agents/                # 6 core + 1 custom (hey-lexxi for HIPAA). Project knowledge lives in vault.
-│   └── settings.json          # Hook configuration (activator + error-detector)
+│   ├── skills/                # 16 skill definitions
+│   ├── agents/                # 9 agent personalities
+│   └── settings.json          # Hooks: activator, error-detector, session-flush
 │
-├── heartbeat-tasks/           # Background task definitions + scripts
-│   ├── *.json                 # Task configs (schedule, type, notify channel)
-│   ├── projects.example.json  # Template for project registration (copy to projects.json)
-│   ├── scripts/*.py           # Task implementations (read from projects.json)
-│   ├── heartbeat-runner.py    # Task executor with state tracking
-│   └── logs/                  # Per-task log files
+├── heartbeat-tasks/           # 21+ background task configs + scripts
+│   ├── *.json                 # Task configs (schedule/cron, activeHours, notify)
+│   ├── scripts/*.py           # Task implementations
+│   ├── scripts/generate-plist.py # Plist generator (interval + cron support)
+│   └── heartbeat-runner.py    # Task executor with state tracking + noise reduction
 │
 ├── vault/                     # Obsidian-compatible knowledge vault
 │   ├── learnings/             # Individual LRN/ERR/FEAT entries
-│   ├── shared/                # Cross-agent knowledge
-│   │   ├── project-knowledge/ # Auto-generated by Project agent (gitignored)
+│   ├── shared/
+│   │   ├── project-knowledge/ # Auto-generated project knowledge
+│   │   ├── course-notes/      # Academic notes (4 courses)
 │   │   └── scouted/           # Tech evaluation reports
 │   ├── agents/                # Per-agent working memory
 │   └── daily/                 # Daily activity notes
 │
-├── CLAUDE.md                  # Agent instructions + promoted learnings
-├── ARCHITECTURE.md            # Technical deep dive (this project)
-└── docs/                      # Extended documentation
-    ├── SELF-IMPROVEMENT.md    # The recursive learning loop explained
-    ├── SKILLS-AND-AGENTS.md   # Skill system + agent personalities
-    └── GETTING-STARTED.md     # Detailed setup guide
+└── CLAUDE.md                  # Agent instructions + promoted learnings
 ```
 
 ---
@@ -340,24 +349,15 @@ AI-Harness/
 |-------|-----------|---------|
 | AI | Claude Code CLI (Opus 4.6) | Language model |
 | Bot | discord.js 14, TypeScript 5 | Discord interface |
-| Bridge | Python 3, subprocess | Claude CLI spawning |
-| Database | better-sqlite3 (WAL mode) | Operational state |
+| Bridge | Python 3, subprocess | Claude CLI spawning with retry |
+| Database | better-sqlite3 (WAL mode, v3) | Operational state + telemetry |
 | Knowledge | Obsidian vault (Markdown + YAML) | Long-term memory |
-| Embeddings | Ollama + nomic-embed-text | Semantic search |
-| Protocol | MCP (Model Context Protocol) | Tool exposure |
-| Scheduling | macOS launchd | Background tasks |
-| Monitoring | Custom truncation monitor | Observability |
-
----
-
-## Documentation
-
-| Document | Audience |
-|----------|----------|
-| [Architecture Deep Dive](./ARCHITECTURE.md) | Engineers wanting to understand internals |
-| [Self-Improvement Loop](./docs/SELF-IMPROVEMENT.md) | Understanding the recursive learning system |
-| [Skills & Agents](./docs/SKILLS-AND-AGENTS.md) | Extending the skill and agent systems |
-| [Getting Started](./docs/GETTING-STARTED.md) | Setting up your own instance |
+| Embeddings | Ollama + nomic-embed-text | Semantic search with temporal decay |
+| Protocol | MCP (Model Context Protocol) | Tool exposure (5 servers, 32 tools) |
+| Scheduling | macOS launchd | Background tasks (cron + interval) |
+| Monitoring | Custom instance monitor | Real-time agent observability |
+| OAuth | Google + Microsoft + LinkedIn | Email, calendar, social integrations |
+| Testing | Node.js test runner | 139 tests across 4 suites |
 
 ---
 
@@ -369,11 +369,13 @@ Most AI agent frameworks focus on prompt chaining or tool use. AI Harness focuse
 
 2. **Deterministic context injection** — The LLM never decides what to remember. A daemon assembles relevant context from SQLite + semantic search and injects it before every invocation. The AI receives knowledge; it doesn't search for it.
 
-3. **Multi-agent collaboration** — Not just routing to different prompts, but structured handoff chains with depth limits, context passing, and per-agent session isolation.
+3. **Real-time observability** — Every running Claude instance has a live Discord embed showing tool calls, thinking, cost estimates, and intervention buttons. You can kill, redirect, or inject guidance into any running agent.
 
-4. **Observable truncation** — Every truncation in the system is monitored, logged, and reported. When content is cut, the LLM is told explicitly and given tools to fetch the full version.
+4. **Transport-agnostic gateway** — The orchestration core has zero Discord imports. A typed `TransportAdapter` interface means the same engine can serve Discord, iMessage, a web UI, or any other transport. 139 tests validate the abstraction.
 
-5. **Background autonomy** — 13 scheduled tasks run independently: monitoring deployments, checking assignments, pruning the vault, draining notifications. The system works while you sleep.
+5. **Multi-agent collaboration with review gates** — Not just routing to different prompts, but structured handoff chains with depth limits, automatic code review injection, orchestrator debriefs, and per-agent session isolation.
+
+6. **Background autonomy** — 21+ scheduled tasks run independently: monitoring deployments, checking assignments, scanning emails, pruning the vault, draining notifications. The system works while you sleep.
 
 ---
 

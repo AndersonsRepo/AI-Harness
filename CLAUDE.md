@@ -317,6 +317,7 @@ Skills are Claude Code's mechanism for reusable, structured capabilities. Each s
 Hooks live in `.claude/settings.json` (NOT skill-scoped) because they must fire on every interaction:
 - `UserPromptSubmit` → `.claude/skills/self-improve/scripts/activator.sh` (detects corrections, feature requests)
 - `PostToolUse[Bash]` → `.claude/skills/self-improve/scripts/error-detector.sh` (detects command failures)
+- `Stop` → `.claude/skills/self-improve/scripts/session-flush.sh` (pre-compaction knowledge capture)
 
 ### Creating New Skills
 
@@ -333,6 +334,7 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 | Supabase | `/supabase` | — | supabase (postgres) | fork, SQL whitelist, no DELETEs |
 | Canvas+GoodNotes | `/academics` | assignment-reminder (12h), goodnotes-watch (1h), notes-ingest (4h) | canvas | fork, read-only |
 | CS 2600 Website | `/academics` | cs2600-watch (168h) | — | read-only crawl |
+| Gmail | — | gmail-watcher (15m) | — | OAuth2, readonly scope, forwarded email indexing |
 | Outlook | — | email-monitor (15m), calendar-sync (2h) | outlook (5 tools) | OAuth token encryption, auto-refresh |
 | LinkedIn | — | — | linkedin (4 tools) | approval token flow, !approve/!reject in Discord |
 
@@ -349,6 +351,7 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 | repo-scanner | 6h | Security scanning (secrets, debug artifacts, npm audit) |
 | learning-pruner | 24h | Archive stale/duplicate vault learnings |
 | promotion-check | 12h | Detect recurring learnings for CLAUDE.md promotion |
+| gmail-watcher | 15m | Monitor forwarded Outlook emails via Gmail API |
 | notification-drain | 5m | Drain pending-notifications.jsonl → Discord |
 | vault-backup | 24h | Auto-commit vault changes to git |
 | token-expiry-check | 24h | Warn about expiring OAuth tokens |
