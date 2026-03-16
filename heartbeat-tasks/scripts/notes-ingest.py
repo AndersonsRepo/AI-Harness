@@ -31,28 +31,13 @@ NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 MAX_PER_RUN = 10
 
 # Map GoodNotes folder names → vault directory names and Discord channels
-COURSE_MAP = {
-    "Numerical Methods": {
-        "vault_dir": "numerical-methods",
-        "channel": "numerical-methods",
-        "display": "Numerical Methods",
-    },
-    "Intro To PHILOSOPHY": {
-        "vault_dir": "philosophy",
-        "channel": "philosophy",
-        "display": "Intro to Philosophy",
-    },
-    "Systems Programming": {
-        "vault_dir": "systems-programming",
-        "channel": "systems-programming",
-        "display": "Systems Programming (CS 2600)",
-    },
-    "Compters And Society": {
-        "vault_dir": "comp-society",
-        "channel": "comp-society",
-        "display": "Computers and Society",
-    },
-}
+# Loaded from course-map.json (gitignored) — copy course-map.example.json to get started
+_course_map_path = os.path.join(TASKS_DIR, "course-map.json")
+if os.path.exists(_course_map_path):
+    with open(_course_map_path) as _f:
+        COURSE_MAP = json.load(_f).get("goodnotes", {})
+else:
+    COURSE_MAP = {}
 
 
 def _find_google_drive():

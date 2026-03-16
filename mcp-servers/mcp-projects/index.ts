@@ -171,7 +171,7 @@ server.tool(
   "project_register",
   "Add or update a project in the registry (projects.json).",
   {
-    name: z.string().describe("Project name (kebab-case, e.g., 'hey-lexxi')"),
+    name: z.string().describe("Project name (kebab-case, e.g., 'my-project')"),
     path: z.string().describe("Path to project directory (supports $HOME, $HARNESS_ROOT)"),
     description: z.string().describe("One-line project description"),
     repo: z.string().optional().describe("GitHub repo (owner/name)"),

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Monitor the CS 2600 Systems Programming course website for updates.
 
-Crawls https://profg.codeberg.page/CS_2600.04_Spring_2026/ weekly,
+Crawls a course website (URL from course-map.json) weekly,
 detects new or changed content, summarizes updates, and writes
 structured knowledge to the vault.
 
@@ -28,7 +28,16 @@ STATE_FILE = os.path.join(TASKS_DIR, "cs2600-watch.state.json")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 VAULT_DIR = os.path.join(HARNESS_ROOT, "vault", "shared", "course-notes", "systems-programming")
 CACHE_DIR = os.path.join(TASKS_DIR, ".cs2600-cache")
-COURSE_URL = "https://profg.codeberg.page/CS_2600.04_Spring_2026/"
+# Load course URL from config (gitignored)
+_course_map_path = os.path.join(TASKS_DIR, "course-map.json")
+if os.path.exists(_course_map_path):
+    with open(_course_map_path) as _f:
+        COURSE_URL = json.load(_f).get("cs2600_url", "")
+else:
+    COURSE_URL = ""
+if not COURSE_URL:
+    print("No cs2600_url in course-map.json — skipping")
+    sys.exit(0)
 
 
 def load_state():
@@ -108,7 +117,7 @@ def write_exam_schedule():
     content = """---
 course: Systems Programming (CS 2600)
 type: exam-schedule
-source: https://profg.codeberg.page/CS_2600.04_Spring_2026/
+source: {url}
 updated: {date}
 ---
 

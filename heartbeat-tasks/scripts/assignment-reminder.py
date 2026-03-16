@@ -41,7 +41,8 @@ DB_PATH = os.path.join(HARNESS_ROOT, "bridges", "discord", "harness.db")
 ICAL_URL = os.environ.get("CANVAS_ICAL_URL", "")
 
 # Semester end date — filter out events beyond this
-SEMESTER_END = datetime.datetime(2026, 5, 23)
+_semester_end_str = _course_data.get("semester_end", "2026-12-31") if os.path.exists(_course_map_path) else "2026-12-31"
+SEMESTER_END = datetime.datetime.strptime(_semester_end_str, "%Y-%m-%d")
 
 # Keywords for extracting events/deadlines from emails
 EMAIL_EVENT_PATTERNS = re.compile(
@@ -56,28 +57,14 @@ if not ICAL_URL:
     sys.exit(0)
 
 # Canvas course code → Discord channel + display name
-COURSE_MAP = {
-    "26S_CS3010": {
-        "channel": "numerical-methods",
-        "display": "Numerical Methods",
-        "vault_dir": "numerical-methods",
-    },
-    "26S_PHL2010": {
-        "channel": "philosophy",
-        "display": "Intro to Philosophy",
-        "vault_dir": "philosophy",
-    },
-    "26S_CS3750W": {
-        "channel": "comp-society",
-        "display": "Computers and Society",
-        "vault_dir": "comp-society",
-    },
-    "26S_CS2600": {
-        "channel": "systems-programming",
-        "display": "Systems Programming",
-        "vault_dir": "systems-programming",
-    },
-}
+# Loaded from course-map.json (gitignored) — copy course-map.example.json to get started
+_course_map_path = os.path.join(TASKS_DIR, "course-map.json")
+if os.path.exists(_course_map_path):
+    with open(_course_map_path) as _f:
+        _course_data = json.load(_f)
+    COURSE_MAP = _course_data.get("canvas", {})
+else:
+    COURSE_MAP = {}
 
 # Patterns that indicate a quiz or exam
 QUIZ_PATTERNS = re.compile(
@@ -135,7 +122,7 @@ def parse_ical_datetime(dt_str):
 
 
 def extract_course(summary):
-    """Extract course code from Canvas summary like 'Q 2 [26S_PHL2010.04-1]'."""
+    """Extract course code from Canvas summary like 'Q 2 [SEMESTER_CODE.04-1]'."""
     match = re.search(r"\[(\w+_\w+)", summary)
     if match:
         raw_code = match.group(1)

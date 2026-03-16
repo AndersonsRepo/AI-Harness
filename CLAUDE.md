@@ -142,7 +142,7 @@ Discord user → bot.ts (queue + command dispatch)
 | `bridges/discord/oauth-setup.ts` | One-time interactive OAuth flow for Microsoft + LinkedIn |
 | `heartbeat-tasks/scripts/oauth_helper.py` | Python OAuth helper for heartbeat scripts |
 | `bridges/discord/agent-loader.ts` | Shared agent loading, tool restriction definitions |
-| `.claude/agents/*.md` | Agent personalities (orchestrator, researcher, reviewer, builder, ops, commands, project, education, hey-lexxi) |
+| `.claude/agents/*.md` | Agent personalities (orchestrator, researcher, reviewer, builder, ops, commands, project, education) |
 | `heartbeat-tasks/scripts/session-debrief.py` | Knowledge extraction from Claude Code transcripts |
 | `heartbeat-tasks/scripts/repo-scanner.py` | Security scanning for registered projects |
 | `heartbeat-tasks/scripts/notes-ingest.py` | GoodNotes PDF → vault course notes pipeline |
@@ -396,7 +396,7 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 - Max 10 PDFs per run (cost control), failure tracking with MAX_FAILURES = 3
 
 **CS 2600 Website Crawler** (`cs2600-watch.py`, weekly):
-- Fetches `profg.codeberg.page/CS_2600.04_Spring_2026/`, content-hash diff, Claude Sonnet summary
+- Fetches course website (URL from `course-map.json`), content-hash diff, Claude Sonnet summary
 - Maintains exam schedule in `vault/shared/course-notes/systems-programming/exam-schedule.md`
 
 **Education Agent**: Read-only tutor assigned to all course channels. Searches vault notes before answering, generates practice questions, checks Canvas for deadlines. Tool-restricted to Read, Grep, Glob, curl, python3, and vault MCP.
@@ -430,6 +430,12 @@ Course channels auto-assign the `education` agent via `setChannelConfig()` on cr
 **Python Helper**: `heartbeat-tasks/scripts/oauth_helper.py` — self-contained module for heartbeat scripts to get valid access tokens with auto-refresh.
 
 **DB Tables** (v2 migration): `oauth_tokens` (provider, encrypted refresh token, access token, scopes, expiry).
+
+---
+
+## Cost-Sensitive Tools
+
+**Brightdata MCP** — Every call to `mcp__brightdata__*` tools costs real money (scraping credits). **Always ask the user for confirmation before using Brightdata tools.** Explain what you're about to scrape and why. Never use Brightdata in loops, bulk operations, or speculative searches without explicit approval.
 
 ---
 

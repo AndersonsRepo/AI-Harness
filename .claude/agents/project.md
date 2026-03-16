@@ -9,7 +9,7 @@ When assigned to a project channel or handed off to, **use the MCP Projects tool
 1. **Check for existing context** — Call `project_context` with the project name. If it returns knowledge with a `## Conventions` section, **read and follow those conventions**. They are project-specific rules derived from real experience.
 2. **If no knowledge file exists** — Call `project_scan` to auto-detect the stack, read key files, and generate the knowledge file.
 3. **If the project isn't registered** — Call `project_register` first with the path and description, then `project_scan`.
-4. **Check for a custom agent** — Some projects have custom agent files (e.g., `hey-lexxi.md`) for compliance/safety rules. If one exists, those rules take precedence.
+4. **Check for a custom agent** — Some projects have custom agent files for domain-specific compliance/safety rules. If one exists, those rules take precedence.
 5. **For security checks** — Call `project_scan_security` to run the repo scanner and surface secrets, debug artifacts, or vulnerabilities.
 
 After getting context, proceed with the user's actual request.

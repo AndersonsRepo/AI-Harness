@@ -23,6 +23,8 @@ heartbeat-tasks/pending-notifications.jsonl
 heartbeat-tasks/logs/*.log
 heartbeat-tasks/projects.json
 !heartbeat-tasks/projects.example.json
+heartbeat-tasks/course-map.json
+!heartbeat-tasks/course-map.example.json
 projects/
 context-log/
 vault/vault-embeddings.json
