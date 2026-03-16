@@ -104,12 +104,17 @@ def save_state(state):
 
 
 def parse_ical_datetime(dt_str):
-    """Parse an iCal DTSTART/DTEND value."""
+    """Parse an iCal DTSTART/DTEND value, converting UTC to local time."""
     dt_str = dt_str.strip()
-    if dt_str.endswith("Z"):
+    is_utc = dt_str.endswith("Z")
+    if is_utc:
         dt_str = dt_str[:-1]
     try:
-        return datetime.datetime.strptime(dt_str[:15], "%Y%m%dT%H%M%S")
+        dt = datetime.datetime.strptime(dt_str[:15], "%Y%m%dT%H%M%S")
+        if is_utc:
+            # Convert UTC → local time
+            dt = dt.replace(tzinfo=datetime.timezone.utc).astimezone().replace(tzinfo=None)
+        return dt
     except ValueError:
         try:
             return datetime.datetime.strptime(dt_str[:8], "%Y%m%d")
