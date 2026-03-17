@@ -40,8 +40,17 @@ STATE_FILE = os.path.join(TASKS_DIR, "assignment-reminder.state.json")
 DB_PATH = os.path.join(HARNESS_ROOT, "bridges", "discord", "harness.db")
 ICAL_URL = os.environ.get("CANVAS_ICAL_URL", "")
 
+# Canvas course code → Discord channel + display name
+# Loaded from course-map.json (gitignored) — copy course-map.example.json to get started
+_course_map_path = os.path.join(TASKS_DIR, "course-map.json")
+_course_data = {}
+if os.path.exists(_course_map_path):
+    with open(_course_map_path) as _f:
+        _course_data = json.load(_f)
+COURSE_MAP = _course_data.get("canvas", {})
+
 # Semester end date — filter out events beyond this
-_semester_end_str = _course_data.get("semester_end", "2026-12-31") if os.path.exists(_course_map_path) else "2026-12-31"
+_semester_end_str = _course_data.get("semester_end", "2026-12-31")
 SEMESTER_END = datetime.datetime.strptime(_semester_end_str, "%Y-%m-%d")
 
 # Keywords for extracting events/deadlines from emails
@@ -55,16 +64,6 @@ EMAIL_EVENT_PATTERNS = re.compile(
 if not ICAL_URL:
     print("CANVAS_ICAL_URL not set — skipping")
     sys.exit(0)
-
-# Canvas course code → Discord channel + display name
-# Loaded from course-map.json (gitignored) — copy course-map.example.json to get started
-_course_map_path = os.path.join(TASKS_DIR, "course-map.json")
-if os.path.exists(_course_map_path):
-    with open(_course_map_path) as _f:
-        _course_data = json.load(_f)
-    COURSE_MAP = _course_data.get("canvas", {})
-else:
-    COURSE_MAP = {}
 
 # Patterns that indicate a quiz or exam
 QUIZ_PATTERNS = re.compile(
