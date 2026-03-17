@@ -434,7 +434,7 @@ Output ONLY the markdown plan — no preamble, no explanation."""
         result = subprocess.run(
             [CLAUDE_PATH, "-p", "--output-format", "json",
              "--model", "sonnet",
-             "--max-turns", "3",
+             "--max-turns", "15",
              "--dangerously-skip-permissions",
              "--", prompt],
             capture_output=True, text=True,

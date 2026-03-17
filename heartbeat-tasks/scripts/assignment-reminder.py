@@ -356,7 +356,7 @@ def generate_study_guide(event, course_info):
             [
                 "claude", "-p",
                 "--model", "sonnet",
-                "--max-turns", "3",
+                "--max-turns", "15",
                 "--dangerously-skip-permissions",
                 "--", prompt,
             ],
@@ -396,7 +396,7 @@ def generate_homework_help(event, course_info):
             [
                 "claude", "-p",
                 "--model", "sonnet",
-                "--max-turns", "3",
+                "--max-turns", "15",
                 "--dangerously-skip-permissions",
                 "--", prompt,
             ],
