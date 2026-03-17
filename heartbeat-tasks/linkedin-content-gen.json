@@ -1,0 +1,11 @@
+{
+  "name": "linkedin-content-gen",
+  "description": "Auto-generate LinkedIn post drafts from project activity, learnings, and academics",
+  "type": "script",
+  "script": "linkedin-content-gen.py",
+  "cron": "0 9 * * 3",
+  "enabled": true,
+  "activeHours": {"start": "07:00", "end": "23:00"},
+  "notify": null,
+  "timeout": 180
+}
