@@ -342,7 +342,7 @@ Guidelines:
             [
                 os.path.join(os.environ.get("HOME", ""), ".local", "bin", "claude"),
                 "-p", "--model", "sonnet",
-                "--max-turns", "3",
+                "--max-turns", "15",
                 "--dangerously-skip-permissions",
                 "--", prompt,
             ],
