@@ -5,7 +5,6 @@
   "script": "notes-ingest.py",
   "schedule": "4h",
   "enabled": true,
-  "activeHours": {"start": "07:00", "end": "23:00"},
   "notify": "discord",
   "discord_channel": "goodnotes",
   "timeout": 600

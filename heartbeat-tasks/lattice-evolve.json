@@ -1,13 +1,19 @@
 {
   "name": "lattice-evolve",
-  "description": "Autonomous lattice evolution cycle — runs hourly",
+  "description": "Autonomous lattice evolution cycle \u2014 runs hourly",
   "type": "claude",
   "prompt": "You are running an autonomous development cycle. Check the project at $HARNESS_ROOT/projects/lattice, run one evolution generation with `npx tsx src/evolve.ts`, report results. Commit and push if interesting changes occurred.",
   "schedule": "1h",
   "enabled": true,
-  "activeHours": {"start": "07:00", "end": "23:00"},
   "notify": "discord",
   "discord_channel": "notifications",
-  "allowed_tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Glob",
+    "Grep"
+  ],
   "timeout": 600
 }

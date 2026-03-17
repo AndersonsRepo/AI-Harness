@@ -1,11 +1,10 @@
 {
   "name": "session-debrief",
-  "description": "Extract knowledge from recent Claude Code conversations — bugs, decisions, project facts, patterns. LLM-assisted extraction with deterministic dedup and vault writing.",
+  "description": "Extract knowledge from recent Claude Code conversations \u2014 bugs, decisions, project facts, patterns. LLM-assisted extraction with deterministic dedup and vault writing.",
   "type": "script",
   "script": "session-debrief.py",
   "schedule": "3h",
   "enabled": true,
-  "activeHours": {"start": "07:00", "end": "23:00"},
   "notify": "discord",
   "discord_channel": "notifications",
   "timeout": 180
