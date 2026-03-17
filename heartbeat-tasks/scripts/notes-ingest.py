@@ -115,6 +115,158 @@ def make_vault_filename(rel_path, course_info):
     return f"{subfolder}{clean}"
 
 
+def extract_pptx_text(pptx_path):
+    """Extract text from a PowerPoint file using python-pptx.
+    Returns (slides_text, has_substantial_text) tuple.
+    """
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches
+    except ImportError:
+        print("  python-pptx not installed — skipping PPTX extraction", file=sys.stderr)
+        return None, False
+
+    prs = Presentation(pptx_path)
+    slides_text = []
+    total_chars = 0
+
+    for i, slide in enumerate(prs.slides, 1):
+        slide_lines = [f"## Slide {i}"]
+
+        # Extract title
+        if slide.shapes.title and slide.shapes.title.text.strip():
+            slide_lines.append(f"**{slide.shapes.title.text.strip()}**\n")
+
+        # Extract all text from shapes
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    text = para.text.strip()
+                    if text:
+                        slide_lines.append(text)
+                        total_chars += len(text)
+
+            # Extract table data
+            if shape.has_table:
+                table = shape.table
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    slide_lines.append("| " + " | ".join(cells) + " |")
+                    total_chars += sum(len(c) for c in cells)
+
+        # Extract speaker notes
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+            notes = slide.notes_slide.notes_text_frame.text.strip()
+            if notes:
+                slide_lines.append(f"\n*Speaker notes:* {notes}")
+                total_chars += len(notes)
+
+        slides_text.append("\n".join(slide_lines))
+
+    full_text = "\n\n".join(slides_text)
+    # Consider "substantial" if average >30 chars per slide
+    has_substantial_text = total_chars > (len(prs.slides) * 30) if prs.slides else False
+
+    return full_text, has_substantial_text
+
+
+def ingest_pptx(pptx_path, rel_path, course_info):
+    """Process a PowerPoint file — extract text directly or use Claude for visual slides."""
+    vault_dir = os.path.join(VAULT_DIR, course_info["vault_dir"])
+    os.makedirs(vault_dir, exist_ok=True)
+
+    vault_filename = make_vault_filename(rel_path, course_info)
+    vault_path = os.path.join(vault_dir, f"{vault_filename}.md")
+
+    if os.path.exists(vault_path):
+        return vault_path
+
+    # Determine content type
+    parts = rel_path.split("/")
+    content_type = "lecture slides"
+    if len(parts) >= 3:
+        sub = parts[2].lower()
+        if "homework" in sub or "hw" in sub:
+            content_type = "homework"
+        elif "discussion" in sub:
+            content_type = "discussion"
+
+    # Try text extraction first
+    extracted_text, has_text = extract_pptx_text(pptx_path)
+
+    if has_text and extracted_text:
+        # Text-heavy slides — use Claude to structure the extracted text
+        prompt = f"""Here is text extracted from PowerPoint slides for a {course_info['display']} class ({content_type}).
+Structure this into clean, organized study notes.
+
+Extracted slide content:
+{extracted_text[:8000]}
+
+Output as clean markdown with:
+1. **Topic/Title** — what these slides cover
+2. **Key Concepts** — main ideas, definitions, theorems
+3. **Formulas/Equations** — any mathematical formulas (use LaTeX notation)
+4. **Examples** — worked examples or practice problems
+5. **Key Takeaways** — what a student should remember
+
+Be thorough but concise. Do NOT include slide numbers or "Slide X" headers — reorganize by topic."""
+
+        try:
+            result = subprocess.run(
+                [
+                    "claude", "-p",
+                    "--model", "sonnet",
+                    "--output-format", "json",
+                    "--dangerously-skip-permissions",
+                    "--max-turns", "3",
+                    "--", prompt,
+                ],
+                capture_output=True, text=True, timeout=120,
+                env={k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")},
+            )
+
+            if result.returncode == 0:
+                try:
+                    output = json.loads(result.stdout)
+                    content = output.get("result", "")
+                except json.JSONDecodeError:
+                    content = result.stdout
+
+                if content and len(content) > 50:
+                    frontmatter = f"""---
+course: {course_info['display']}
+source: {rel_path}
+type: {content_type}
+format: pptx
+ingested: {datetime.datetime.now().strftime('%Y-%m-%d')}
+---
+
+"""
+                    with open(vault_path, "w") as f:
+                        f.write(frontmatter + content)
+                    return vault_path
+        except Exception as e:
+            print(f"  Claude structuring failed: {e}", file=sys.stderr)
+
+        # Fallback: write raw extracted text
+        frontmatter = f"""---
+course: {course_info['display']}
+source: {rel_path}
+type: {content_type}
+format: pptx-raw
+ingested: {datetime.datetime.now().strftime('%Y-%m-%d')}
+---
+
+"""
+        with open(vault_path, "w") as f:
+            f.write(frontmatter + extracted_text)
+        return vault_path
+
+    else:
+        # Visual/formula-heavy slides — use Claude with Read tool (same as PDF path)
+        return ingest_pdf(pptx_path, rel_path, course_info)
+
+
 def ingest_pdf(pdf_path, rel_path, course_info):
     """Call Claude Sonnet to read a PDF and extract structured notes."""
     vault_dir = os.path.join(VAULT_DIR, course_info["vault_dir"])
@@ -228,13 +380,17 @@ def main():
     with open(KNOWN_FILES_STATE) as f:
         known_files = json.load(f)
 
-    # Filter to Cal Poly Pomona academic files only
+    # Filter to Cal Poly Pomona academic files only (PDF + PPTX)
+    SUPPORTED_EXTENSIONS = (".pdf", ".pptx")
     failures = state.get("failures", {})
     to_process = []
     for rel_path in sorted(known_files):
         if rel_path in ingested:
             continue
-        # Skip PDFs that have failed too many times
+        # Only process supported file types
+        if not rel_path.lower().endswith(SUPPORTED_EXTENSIONS):
+            continue
+        # Skip files that have failed too many times
         if failures.get(rel_path, 0) >= MAX_FAILURES:
             continue
         course_info = parse_course(rel_path)
@@ -252,12 +408,16 @@ def main():
 
     # Cap per run
     batch = to_process[:MAX_PER_RUN]
-    print(f"Processing {len(batch)} of {len(to_process)} pending PDFs...")
+    print(f"Processing {len(batch)} of {len(to_process)} pending files...")
 
     results = {"success": [], "failed": []}
     for full_path, rel_path, course_info in batch:
         print(f"  Ingesting: {rel_path}")
-        vault_path = ingest_pdf(full_path, rel_path, course_info)
+        # Route to appropriate handler based on file type
+        if rel_path.lower().endswith(".pptx"):
+            vault_path = ingest_pptx(full_path, rel_path, course_info)
+        else:
+            vault_path = ingest_pdf(full_path, rel_path, course_info)
         if vault_path:
             ingested.add(rel_path)
             results["success"].append((rel_path, course_info))
