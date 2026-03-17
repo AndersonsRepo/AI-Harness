@@ -92,12 +92,11 @@ def store_draft(topic, content, signals=None):
     db.commit()
     db.close()
 
-    # Notify Discord
-    preview = content[:300] + "..." if len(content) > 300 else content
+    # Notify Discord — show full post (Discord handles splitting if needed)
     notify(
         f"**New LinkedIn Post Draft**\n\n"
         f"**Topic:** {topic}\n\n"
-        f"{preview}\n\n"
+        f"{content}\n\n"
         f"To approve: `!approve {token}`\n"
         f"To reject: `!reject {token}`"
     )
@@ -395,10 +394,25 @@ def main():
         print("Failed to generate content")
         return
 
-    # Clean up content — remove any markdown formatting Claude might add
+    # Clean up content — remove Claude's framing text and markdown artifacts
     content = content.strip()
     if content.startswith('"') and content.endswith('"'):
         content = content[1:-1]
+
+    # Strip common Claude framing patterns
+    import re as _re
+    # Remove preambles like "Here's the draft:", "post:", "Here's a post:"
+    content = _re.sub(
+        r"^(?:(?:Here'?s?\s+)?(?:the|a|my|your)?\s*(?:draft|post|content|linkedin\s*post)[:\s\-—]*\n*)+",
+        "", content, flags=_re.IGNORECASE
+    ).strip()
+    # Remove trailing "Want me to..." questions
+    content = _re.sub(r"\n+(?:Want me to|Should I|Would you like|Let me know|I can also).*$", "", content, flags=_re.IGNORECASE | _re.DOTALL).strip()
+    # Remove "---" separators Claude adds (at start and end)
+    content = _re.sub(r"^---\s*\n?", "", content).strip()
+    content = _re.sub(r"\n?---\s*$", "", content).strip()
+    # Remove leading "post:" if still there
+    content = _re.sub(r"^post\s*:\s*\n?", "", content, flags=_re.IGNORECASE).strip()
 
     # Create topic string
     topic_map = {
