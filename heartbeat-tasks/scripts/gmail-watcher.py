@@ -144,7 +144,7 @@ def gmail_api(endpoint, token, params=None):
     """Make a Gmail API request."""
     url = f"{GMAIL_API_BASE}/{endpoint}"
     if params:
-        url += "?" + urllib.parse.urlencode(params)
+        url += "?" + urllib.parse.urlencode(params, doseq=True)
 
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
 
@@ -201,7 +201,7 @@ def main():
             continue
 
         # Fetch full message
-        msg_data = gmail_api(f"messages/{msg_id}", token, {"format": "metadata", "metadataHeaders": "Subject,From,Date"})
+        msg_data = gmail_api(f"messages/{msg_id}", token, {"format": "metadata", "metadataHeaders": ["Subject", "From", "Date"]})
         if not msg_data:
             continue
 
