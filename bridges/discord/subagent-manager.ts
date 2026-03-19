@@ -12,7 +12,7 @@ import { getChannelConfig } from "./channel-config-store.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
-import { AGENT_TOOL_RESTRICTIONS } from "./agent-loader.js";
+import { AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -133,9 +133,10 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
     args.push("--allowedTools", allAllowed.join(","));
   }
 
-  // Model override
-  if (channelConfig?.model) {
-    args.push("--model", channelConfig.model);
+  // Model: channel override > agent default > CLI default
+  const model = getAgentModel(options.agent, channelConfig?.model);
+  if (model) {
+    args.push("--model", model);
   }
 
   // The prompt (-- separator prevents flags from consuming it)

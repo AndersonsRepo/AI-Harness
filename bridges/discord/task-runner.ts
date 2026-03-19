@@ -8,7 +8,7 @@ import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { getProjectSessionKey } from "./handoff-router.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
-import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS } from "./agent-loader.js";
+import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
 import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance } from "./instance-monitor.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
@@ -391,9 +391,10 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
     args.push("--permission-mode", channelConfig.permissionMode);
   }
 
-  // Model override
-  if (channelConfig?.model) {
-    args.push("--model", channelConfig.model);
+  // Model: channel override > agent default > CLI default
+  const model = getAgentModel(agentName, channelConfig?.model);
+  if (model) {
+    args.push("--model", model);
   }
 
   // Merge all tool restrictions into single flags to avoid Commander.js last-wins behavior
