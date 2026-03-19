@@ -108,8 +108,55 @@ def main():
     for check in checks:
         print(f"  {check}")
 
+    # Check 3: Detect and reload stale heartbeat agents (exit code 78)
+    stale_reloaded = reload_stale_agents()
+    if stale_reloaded:
+        checks.append(f"Reloaded {len(stale_reloaded)} stale agent(s): {', '.join(stale_reloaded)}")
+        print(f"  Reloaded {len(stale_reloaded)} stale agents: {', '.join(stale_reloaded)}")
+
     summary = "; ".join(checks)
     print(f"\nHealth: {'OK' if bot_healthy else 'RESTARTED'} — {summary}")
+
+
+def reload_stale_agents():
+    """Detect launchd agents with exit code 78 (stale from sleep) and reload them."""
+    reloaded = []
+    try:
+        result = subprocess.run(
+            ["launchctl", "list"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return reloaded
+
+        for line in result.stdout.strip().split("\n"):
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            exit_code = parts[1].strip()
+            label = parts[2].strip()
+
+            if not label.startswith("com.aiharness.heartbeat."):
+                continue
+
+            if exit_code == "78":
+                name = label.replace("com.aiharness.heartbeat.", "")
+                plist_path = os.path.expanduser(f"~/Library/LaunchAgents/{label}.plist")
+                if not os.path.exists(plist_path):
+                    continue
+
+                try:
+                    subprocess.run(["launchctl", "unload", plist_path], capture_output=True, timeout=10)
+                    subprocess.run(["launchctl", "load", plist_path], capture_output=True, timeout=10)
+                    reloaded.append(name)
+                    print(f"  Reloaded stale agent: {name} (was exit 78)")
+                except Exception as e:
+                    print(f"  Failed to reload {name}: {e}")
+
+    except Exception as e:
+        print(f"  Stale agent check failed: {e}")
+
+    return reloaded
 
 
 if __name__ == "__main__":
