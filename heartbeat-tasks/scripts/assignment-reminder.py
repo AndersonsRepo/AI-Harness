@@ -23,6 +23,10 @@ HARNESS_ROOT = os.environ.get(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
+# LLM provider — defaults to claude-cli, overridable via LLM_PROVIDER env var
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.llm_provider import get_provider, get_default_model, LLMError
+
 # Load .env file for vars not in launchd environment
 _env_path = os.path.join(HARNESS_ROOT, "bridges", "discord", ".env")
 if os.path.exists(_env_path):
@@ -352,32 +356,18 @@ def generate_study_guide(event, course_info):
     )
 
     try:
-        result = subprocess.run(
-            [
-                "claude", "-p",
-                "--model", "sonnet",
-                "--max-turns", "15",
-                "--dangerously-skip-permissions",
-                "--", prompt,
-            ],
-            capture_output=True, text=True, timeout=120,
-            env={k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")},
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            # Parse JSON output
-            try:
-                output = json.loads(result.stdout)
-                return output.get("result", result.stdout.strip())
-            except json.JSONDecodeError:
-                return result.stdout.strip()
-    except Exception as e:
+        llm = get_provider()
+        response = llm.complete(prompt, model=get_default_model(), timeout=120, max_turns=15)
+        text = response.text.strip()
+        return text if text and len(text) >= 50 else None
+    except (LLMError, Exception) as e:
         print(f"Study guide generation failed: {e}", file=sys.stderr)
 
     return None
 
 
 def generate_homework_help(event, course_info):
-    """Spawn Claude to generate homework scaffolding for an upcoming assignment."""
+    """Spawn LLM to generate homework scaffolding for an upcoming assignment."""
     prompt = (
         f"Anderson has an assignment due soon:\n"
         f"  Course: {course_info['display']}\n"
@@ -392,24 +382,11 @@ def generate_homework_help(event, course_info):
     )
 
     try:
-        result = subprocess.run(
-            [
-                "claude", "-p",
-                "--model", "sonnet",
-                "--max-turns", "15",
-                "--dangerously-skip-permissions",
-                "--", prompt,
-            ],
-            capture_output=True, text=True, timeout=120,
-            env={k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")},
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            try:
-                output = json.loads(result.stdout)
-                return output.get("result", result.stdout.strip())
-            except json.JSONDecodeError:
-                return result.stdout.strip()
-    except Exception as e:
+        llm = get_provider()
+        response = llm.complete(prompt, model=get_default_model(), timeout=120, max_turns=15)
+        text = response.text.strip()
+        return text or None
+    except (LLMError, Exception) as e:
         print(f"Homework help generation failed: {e}", file=sys.stderr)
 
     return None

@@ -38,6 +38,10 @@ TRANSCRIPTS_DIR = os.environ.get(
 )
 CLAUDE_PATH = os.path.join(os.environ.get("HOME", ""), ".local", "bin", "claude")
 
+# LLM provider — defaults to claude-cli, overridable via LLM_PROVIDER env var
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.llm_provider import get_provider, get_default_model, LLMError
+
 # Max chars of conversation to send to LLM for extraction
 MAX_CONTEXT_CHARS = 25000
 # Max messages to include
@@ -409,39 +413,12 @@ def extract_knowledge_via_llm(conversation_text, projects, existing_keys, existi
         existing_titles=", ".join(existing_titles) if existing_titles else "none",
     )
 
-    clean_env = {
-        "HOME": os.environ.get("HOME", ""),
-        "USER": os.environ.get("USER", ""),
-        "PATH": os.path.join(os.environ.get("HOME", ""), ".local", "bin")
-            + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "SHELL": os.environ.get("SHELL", "/bin/zsh"),
-        "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-        "TERM": "dumb",
-        "HARNESS_ROOT": HARNESS_ROOT,
-    }
-
     try:
-        result = subprocess.run(
-            [CLAUDE_PATH, "-p", "--dangerously-skip-permissions",
-             "--output-format", "json", "--model", "sonnet",
-             "--", prompt],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL,
-            env=clean_env, timeout=timeout, cwd=HARNESS_ROOT,
-        )
+        llm = get_provider()
+        response = llm.complete(prompt, model=get_default_model(), timeout=timeout, cwd=HARNESS_ROOT)
+        text = response.text.strip()
 
-        if result.returncode != 0:
-            print(f"Claude extraction failed: {result.stderr[:300]}", file=sys.stderr)
-            return []
-
-        # Parse Claude's JSON output wrapper
-        try:
-            wrapper = json.loads(result.stdout)
-            text = wrapper.get("result", result.stdout)
-        except (json.JSONDecodeError, TypeError):
-            text = result.stdout
-
-        # Extract JSON array from response (Claude may wrap it in markdown)
-        text = text.strip()
+        # Extract JSON array from response (LLM may wrap it in markdown)
         if text.startswith("```"):
             text = re.sub(r'^```(?:json)?\s*', '', text)
             text = re.sub(r'\s*```$', '', text)
@@ -451,8 +428,8 @@ def extract_knowledge_via_llm(conversation_text, projects, existing_keys, existi
             return []
         return items
 
-    except subprocess.TimeoutExpired:
-        print("Claude extraction timed out", file=sys.stderr)
+    except LLMError as e:
+        print(f"LLM extraction failed: {e}", file=sys.stderr)
         return []
     except (json.JSONDecodeError, Exception) as e:
         print(f"Failed to parse extraction output: {e}", file=sys.stderr)

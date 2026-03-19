@@ -19,6 +19,10 @@ import urllib.request
 import urllib.error
 import re
 
+# LLM provider — defaults to claude-cli, overridable via LLM_PROVIDER env var
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.llm_provider import get_provider, get_default_model, LLMError
+
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -192,31 +196,14 @@ Focus on:
 Output a concise markdown summary of what's currently on the page, focusing on the most recent and upcoming content. Include specific topics, code examples mentioned, and exercise names."""
 
     try:
-        result = subprocess.run(
-            [
-                "claude", "-p",
-                "--model", "sonnet",
-                "--output-format", "json",
-                "--dangerously-skip-permissions",
-                "--", prompt,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env={k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")},
-        )
-
-        if result.returncode != 0:
-            return None
-
-        try:
-            output = json.loads(result.stdout)
-            return output.get("result", "")
-        except json.JSONDecodeError:
-            return result.stdout
-
+        llm = get_provider()
+        response = llm.complete(prompt, model=get_default_model(), timeout=120)
+        return response.text.strip() or None
+    except LLMError as e:
+        print(f"LLM summarization failed: {e}", file=sys.stderr)
+        return None
     except Exception as e:
-        print(f"Claude summarization failed: {e}", file=sys.stderr)
+        print(f"LLM summarization failed: {e}", file=sys.stderr)
         return None
 
 

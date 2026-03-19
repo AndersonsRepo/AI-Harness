@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Heartbeat task runner — reads task config, runs claude -p, writes state.
+"""Heartbeat task runner — reads task config, runs LLM prompt or script, writes state.
 
 Usage: python3 heartbeat-runner.py <task-name>
 
@@ -7,6 +7,9 @@ Reads config from heartbeat-tasks/<task-name>.json
 Writes state to heartbeat-tasks/<task-name>.state.json
 Logs to heartbeat-tasks/logs/<task-name>.log
 Optionally sends summary to Discord via webhook.
+
+Per-task LLM provider routing: tasks can specify "provider" and "model" in their
+JSON config. Scripts receive these as LLM_PROVIDER and LLM_MODEL env vars.
 """
 
 import subprocess
@@ -16,6 +19,11 @@ import json
 import datetime
 import traceback
 import time
+
+# Add lib/ to path for llm_provider imports
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+
+from lib.llm_provider import get_provider, LLMError
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
@@ -71,75 +79,53 @@ def save_state(task_name, state):
     os.rename(tmp, state_path)
 
 
-def run_claude(prompt, allowed_tools=None, timeout=300, env_passthrough=None):
-    """Run claude -p with the given prompt. Returns (success, output_text)."""
-    claude_args = ["-p", "--dangerously-skip-permissions", "--output-format", "json"]
-    if allowed_tools:
-        claude_args.extend(["--allowedTools", ",".join(allowed_tools)])
-    # Use -- to separate options from the prompt positional arg
-    # (--allowedTools is variadic and will consume the prompt otherwise)
-    claude_args.extend(["--", prompt])
+def run_claude(prompt, allowed_tools=None, timeout=300, env_passthrough=None,
+               provider_name=None, model=None):
+    """Run an LLM with the given prompt. Returns (success, output_text).
 
-    clean_env = {
-        "HOME": os.environ.get("HOME", ""),
-        "USER": os.environ.get("USER", ""),
-        "PATH": os.path.join(os.environ.get("HOME", ""), ".local", "bin") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "SHELL": os.environ.get("SHELL", "/bin/zsh"),
-        "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-        "TERM": "dumb",
-        "HARNESS_ROOT": HARNESS_ROOT,
-    }
-    # Remove CLAUDECODE to avoid nested session detection
-    clean_env.pop("CLAUDECODE", None)
-
-    # Pass through integration env vars from task config
-    if env_passthrough:
-        for var in env_passthrough:
-            val = os.environ.get(var)
-            if val:
-                clean_env[var] = val
-
+    Uses the llm_provider abstraction so tasks can route to any provider.
+    Falls back to claude-cli if no provider is specified.
+    """
     try:
-        result = subprocess.run(
-            [CLAUDE_PATH] + claude_args,
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            env=clean_env,
+        provider = get_provider(provider_name)
+        response = provider.complete(
+            prompt,
+            model=model,
             timeout=timeout,
+            allowed_tools=allowed_tools,
             cwd=HARNESS_ROOT,
         )
-
-        if result.returncode == 0:
-            # Try to parse JSON output
-            try:
-                data = json.loads(result.stdout)
-                # Claude JSON output has a "result" field with the text
-                text = data.get("result", result.stdout)
-            except (json.JSONDecodeError, TypeError):
-                text = result.stdout
-            return True, text.strip() if isinstance(text, str) else str(text)
-        else:
-            return False, f"Exit code {result.returncode}: {result.stderr}"
-
-    except subprocess.TimeoutExpired:
-        return False, f"Claude timed out after {timeout}s"
+        text = response.text.strip() if response.text else ""
+        return True, text or "No output"
+    except LLMError as e:
+        return False, str(e)
     except Exception as e:
         return False, str(e)
 
 
-def run_script(script_path, timeout=300):
-    """Run a local Python script. Returns (success, output_text)."""
+def run_script(script_path, timeout=300, provider_name=None, model=None):
+    """Run a local Python script. Returns (success, output_text).
+
+    Passes LLM_PROVIDER and LLM_MODEL as env vars so scripts can use
+    get_provider() to pick up the config-driven routing.
+    """
+    env = {
+        **os.environ,
+        "HARNESS_ROOT": HARNESS_ROOT,
+    }
+    # Inject provider routing — scripts read these via get_provider()
+    if provider_name:
+        env["LLM_PROVIDER"] = provider_name
+    if model:
+        env["LLM_MODEL"] = model
+
     try:
         result = subprocess.run(
             [PYTHON, script_path],
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
-            env={
-                **os.environ,
-                "HARNESS_ROOT": HARNESS_ROOT,
-            },
+            env=env,
             timeout=timeout,
             cwd=HARNESS_ROOT,
         )
@@ -244,20 +230,26 @@ def run_task(task_name):
             send_discord_notification(config, f"Task '{task_name}' auto-paused after 3 consecutive failures.")
         return
 
-    # Determine task type
+    # Determine task type and provider routing
     task_type = config.get("type", "claude")
     timeout = config.get("timeout", 300)
+    provider_name = config.get("provider")  # None = default (claude-cli)
+    model = config.get("model")             # None = provider default
 
     if task_type == "script":
         script_path = os.path.join(TASKS_DIR, "scripts", config["script"])
         log(task_name, f"Running script: {script_path}")
-        success, output = run_script(script_path, timeout)
+        success, output = run_script(script_path, timeout,
+                                     provider_name=provider_name, model=model)
     else:
         prompt = config["prompt"]
         allowed_tools = config.get("allowed_tools")
         env_passthrough = config.get("env_passthrough")
-        log(task_name, f"Running claude with prompt: {prompt[:100]}...")
-        success, output = run_claude(prompt, allowed_tools, timeout, env_passthrough)
+        provider_label = provider_name or "claude-cli"
+        model_label = model or "default"
+        log(task_name, f"Running {provider_label}/{model_label} with prompt: {prompt[:100]}...")
+        success, output = run_claude(prompt, allowed_tools, timeout, env_passthrough,
+                                     provider_name=provider_name, model=model)
 
     # Re-load state after execution — scripts may have updated the state file
     # (e.g. github-watch.py saves SHAs). We merge runner metadata on top.

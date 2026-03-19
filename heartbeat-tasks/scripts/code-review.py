@@ -37,6 +37,10 @@ SCRIPTS_DIR = os.path.join(TASKS_DIR, "scripts")
 
 CLAUDE_PATH = os.path.join(os.environ.get("HOME", ""), ".local", "bin", "claude")
 
+# LLM provider — defaults to claude-cli, overridable via LLM_PROVIDER env var
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.llm_provider import get_provider, get_default_model, LLMError
+
 # TypeScript source files to scan
 TS_DIRS = [DISCORD_DIR, MCP_DIR]
 PY_DIRS = [SCRIPTS_DIR]
@@ -418,56 +422,19 @@ Focus on functional bugs and safety issues, not style. If the static checks foun
 
 Output ONLY the markdown plan — no preamble, no explanation."""
 
-    # Build clean env (same pattern as claude-runner.py)
-    home = os.environ.get("HOME", os.path.expanduser("~"))
-    clean_env = {
-        "HOME": home,
-        "USER": os.environ.get("USER", os.path.basename(home)),
-        "PATH": f"{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "SHELL": os.environ.get("SHELL", "/bin/zsh"),
-        "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-        "TERM": "dumb",
-        "HARNESS_ROOT": HARNESS_ROOT,
-    }
-    clean_env = {k: v for k, v in clean_env.items() if v}
-
     try:
-        result = subprocess.run(
-            [CLAUDE_PATH, "-p", "--output-format", "json",
-             "--model", "sonnet",
-             "--max-turns", "15",
-             "--dangerously-skip-permissions",
-             "--", prompt],
-            capture_output=True, text=True,
-            stdin=subprocess.DEVNULL,
-            env=clean_env,
-            timeout=150,
-            cwd=HARNESS_ROOT,
+        llm = get_provider()
+        response = llm.complete(
+            prompt, model=get_default_model(), timeout=150,
+            max_turns=15, cwd=HARNESS_ROOT,
         )
+        text = response.text.strip()
+        if not text:
+            return None, "LLM returned empty result"
+        return text, None
 
-        if result.returncode != 0:
-            return None, f"Claude exited {result.returncode}: {result.stderr[:200]}"
-
-        # Parse JSON output — Claude wraps result in {"result": "...", "type": "result"}
-        stdout = result.stdout.strip()
-        try:
-            data = json.loads(stdout)
-            text = data.get("result", "")
-            # If result is empty (e.g. max_turns hit), check if there's any useful text
-            if not text and data.get("subtype") == "error_max_turns":
-                return None, "Claude hit max turns before producing a plan — increase --max-turns"
-            if not text:
-                return None, "Claude returned empty result"
-        except (json.JSONDecodeError, TypeError):
-            # Raw text output — use as-is
-            text = stdout
-
-        return text.strip() if isinstance(text, str) else str(text), None
-
-    except subprocess.TimeoutExpired:
-        return None, "Claude analysis timed out after 150s"
-    except FileNotFoundError:
-        return None, f"Claude CLI not found at {CLAUDE_PATH}"
+    except LLMError as e:
+        return None, str(e)
     except Exception as e:
         return None, str(e)
 

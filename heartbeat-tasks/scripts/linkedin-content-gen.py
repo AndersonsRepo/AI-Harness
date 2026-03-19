@@ -26,6 +26,11 @@ HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
+
+# LLM provider — defaults to claude-cli, overridable via LLM_PROVIDER env var
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.llm_provider import get_provider, get_default_model, LLMError
+
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 STATE_FILE = os.path.join(TASKS_DIR, "linkedin-content-gen.state.json")
@@ -334,30 +339,11 @@ Guidelines:
     prompt = prompts.get(post_type, prompts["technical_insight"])
 
     try:
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
-        clean_env["HOME"] = os.environ.get("HOME", "")
-        clean_env["PATH"] = os.environ.get("PATH", "")
-
-        result = subprocess.run(
-            [
-                os.path.join(os.environ.get("HOME", ""), ".local", "bin", "claude"),
-                "-p", "--model", "sonnet",
-                "--max-turns", "15",
-                "--dangerously-skip-permissions",
-                "--", prompt,
-            ],
-            capture_output=True, text=True, timeout=120,
-            env=clean_env,
-            stdin=subprocess.DEVNULL,
-        )
-
-        if result.returncode == 0 and result.stdout.strip():
-            try:
-                data = json.loads(result.stdout)
-                return data.get("result", result.stdout.strip())
-            except json.JSONDecodeError:
-                return result.stdout.strip()
-    except Exception as e:
+        llm = get_provider()
+        response = llm.complete(prompt, model=get_default_model(), timeout=120, max_turns=15)
+        text = response.text.strip()
+        return text or None
+    except (LLMError, Exception) as e:
         print(f"Content generation failed: {e}", file=sys.stderr)
 
     return None

@@ -21,6 +21,10 @@ HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
+
+# LLM provider — defaults to claude-cli, overridable via LLM_PROVIDER env var
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.llm_provider import get_provider, get_default_model, LLMError
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 STATE_FILE = os.path.join(TASKS_DIR, "notes-ingest.state.json")
 KNOWN_FILES_STATE = os.path.join(TASKS_DIR, "goodnotes-watch.state-files.json")
@@ -212,27 +216,11 @@ Output as clean markdown with:
 Be thorough but concise. Do NOT include slide numbers or "Slide X" headers — reorganize by topic."""
 
         try:
-            result = subprocess.run(
-                [
-                    "claude", "-p",
-                    "--model", "sonnet",
-                    "--output-format", "json",
-                    "--dangerously-skip-permissions",
-                    "--max-turns", "3",
-                    "--", prompt,
-                ],
-                capture_output=True, text=True, timeout=120,
-                env={k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")},
-            )
+            llm = get_provider()
+            response = llm.complete(prompt, model=get_default_model(), timeout=120, max_turns=3)
+            content = response.text
 
-            if result.returncode == 0:
-                try:
-                    output = json.loads(result.stdout)
-                    content = output.get("result", "")
-                except json.JSONDecodeError:
-                    content = result.stdout
-
-                if content and len(content) > 50:
+            if content and len(content) > 50:
                     frontmatter = f"""---
 course: {course_info['display']}
 source: {rel_path}
@@ -246,7 +234,7 @@ ingested: {datetime.datetime.now().strftime('%Y-%m-%d')}
                         f.write(frontmatter + content)
                     return vault_path
         except Exception as e:
-            print(f"  Claude structuring failed: {e}", file=sys.stderr)
+            print(f"  LLM structuring failed: {e}", file=sys.stderr)
 
         # Fallback: write raw extracted text
         frontmatter = f"""---
@@ -309,32 +297,12 @@ Output as clean markdown. Be thorough but concise. If handwriting is unclear, no
 Do NOT include any meta-commentary — just the extracted content."""
 
     try:
-        result = subprocess.run(
-            [
-                "claude", "-p",
-                "--model", "sonnet",
-                "--output-format", "json",
-                "--dangerously-skip-permissions",
-                "--allowedTools", "Read",
-                "--max-turns", "15",
-                "--", prompt,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=600,
-            env={k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")},
+        llm = get_provider()
+        response = llm.complete(
+            prompt, model=get_default_model(), timeout=600,
+            max_turns=15, allowed_tools=["Read"],
         )
-
-        if result.returncode != 0:
-            print(f"  Claude error: {result.stderr[:200]}", file=sys.stderr)
-            return None
-
-        # Parse response
-        try:
-            output = json.loads(result.stdout)
-            content = output.get("result", "")
-        except json.JSONDecodeError:
-            content = result.stdout
+        content = response.text
 
         if not content or len(content) < 50:
             print(f"  Empty or too short response for {rel_path}", file=sys.stderr)
@@ -354,8 +322,8 @@ ingested: {datetime.datetime.now().strftime('%Y-%m-%d')}
 
         return vault_path
 
-    except subprocess.TimeoutExpired:
-        print(f"  Timeout processing {rel_path}", file=sys.stderr)
+    except LLMError as e:
+        print(f"  LLM error: {e}", file=sys.stderr)
         return None
     except Exception as e:
         print(f"  Error: {e}", file=sys.stderr)
