@@ -2,18 +2,18 @@
   "hooks": {
     "UserPromptSubmit": [
       {
-        "command": "bash .claude/skills/self-improve/scripts/activator.sh \"$PROMPT\""
+        "command": "python3 .claude/skills/self-improve/scripts/activator.py \"$PROMPT\""
       }
     ],
     "PostToolUse": [
       {
         "matcher": "Bash",
-        "command": "bash .claude/skills/self-improve/scripts/error-detector.sh \"$EXIT_CODE\" \"$STDOUT\" \"$STDERR\""
+        "command": "python3 .claude/skills/self-improve/scripts/error_detector.py \"$EXIT_CODE\" \"$STDOUT\" \"$STDERR\""
       }
     ],
     "Stop": [
       {
-        "command": "bash .claude/skills/self-improve/scripts/session-flush.sh"
+        "command": "python3 .claude/skills/self-improve/scripts/session_flush.py"
       }
     ]
   }
