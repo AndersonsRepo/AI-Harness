@@ -43,24 +43,20 @@ def main():
 
     claude_args = remaining
 
-    home = os.environ.get("HOME", os.path.expanduser("~"))
-    claude_path = os.environ.get("CLAUDE_CLI_PATH", os.path.join(home, ".local", "bin", "claude"))
     harness_root = os.environ.get("HARNESS_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+    # Import platform module for cross-platform path/env resolution
+    sys.path.insert(0, os.path.join(harness_root, "heartbeat-tasks"))
+    from lib.platform import paths, env as plat_env
+
+    claude_path = paths.claude_cli()
     # PROJECT_CWD allows spawning Claude in a project's directory instead of HARNESS_ROOT
     cwd = os.environ.get("PROJECT_CWD", harness_root)
 
-    clean_env = {
-        "HOME": home,
-        "USER": os.environ.get("USER", os.path.basename(home)),
-        "PATH": os.environ.get("CLAUDE_RUNNER_PATH", f"{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"),
-        "SHELL": os.environ.get("SHELL", "/bin/zsh"),
-        "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-        "TERM": "dumb",
-        "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
-        "SSH_AUTH_SOCK": os.environ.get("SSH_AUTH_SOCK", ""),
-        "HARNESS_ROOT": harness_root,
-    }
-    clean_env = {k: v for k, v in clean_env.items() if v}
+    clean_env = plat_env.clean_env(passthrough=["XDG_CONFIG_HOME", "SSH_AUTH_SOCK", "CLAUDE_RUNNER_PATH"])
+    # Allow explicit PATH override for backwards compat
+    if os.environ.get("CLAUDE_RUNNER_PATH"):
+        clean_env["PATH"] = os.environ["CLAUDE_RUNNER_PATH"]
 
     def write_result(data):
         """Atomic write: write to .tmp then rename to avoid partial reads."""

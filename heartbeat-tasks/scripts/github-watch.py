@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import datetime
+import shutil
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
@@ -19,7 +20,7 @@ TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 STATE_FILE = os.path.join(TASKS_DIR, "github-watch.state.json")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 PROJECTS_FILE = os.path.join(TASKS_DIR, "projects.json")
-GH_PATH = os.environ.get("GH_PATH", "/opt/homebrew/bin/gh")
+GH_PATH = os.environ.get("GH_PATH", shutil.which("gh") or "gh")
 
 
 def load_watched_repos():

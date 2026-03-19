@@ -24,6 +24,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.llm_provider import get_provider, LLMError
+from lib.platform import paths
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
@@ -31,8 +32,8 @@ HARNESS_ROOT = os.environ.get(
 )
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 CLAUDE_RUNNER = os.path.join(HARNESS_ROOT, "bridges", "discord", "claude-runner.py")
-PYTHON = "/opt/homebrew/bin/python3"
-CLAUDE_PATH = os.path.join(os.environ.get("HOME", ""), ".local", "bin", "claude")
+PYTHON = paths.python()
+CLAUDE_PATH = paths.claude_cli()
 
 
 def log(task_name, msg):

@@ -20,6 +20,7 @@ import re
 import hashlib
 import argparse
 import datetime
+import shutil
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
@@ -31,7 +32,7 @@ STATE_FILE = os.path.join(TASKS_DIR, "repo-scanner.state.json")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 VAULT_DIR = os.path.join(HARNESS_ROOT, "vault")
 SCOUTED_DIR = os.path.join(VAULT_DIR, "shared", "scouted")
-GH_PATH = os.environ.get("GH_PATH", "/opt/homebrew/bin/gh")
+GH_PATH = os.environ.get("GH_PATH", shutil.which("gh") or "gh")
 
 # ─── Secret Patterns ─────────────────────────────────────────────────
 

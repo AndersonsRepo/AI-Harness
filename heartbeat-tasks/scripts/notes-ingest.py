@@ -22,8 +22,9 @@ HARNESS_ROOT = os.environ.get(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
-# LLM provider — defaults to claude-cli, overridable via LLM_PROVIDER env var
+# Platform + LLM provider — overridable via env vars
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.platform import paths
 from lib.llm_provider import get_provider, get_default_model, LLMError
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 STATE_FILE = os.path.join(TASKS_DIR, "notes-ingest.state.json")
@@ -45,12 +46,12 @@ else:
 
 
 def _find_google_drive():
-    """Auto-detect the Google Drive CloudStorage mount."""
-    cloud_dir = os.path.expanduser("~/Library/CloudStorage")
-    if os.path.isdir(cloud_dir):
-        for entry in os.listdir(cloud_dir):
-            if entry.startswith("GoogleDrive-"):
-                return os.path.join(cloud_dir, entry, "My Drive", "GoodNotes")
+    """Auto-detect the Google Drive mount, then find GoodNotes subfolder."""
+    drive = paths.google_drive_dir()
+    if drive:
+        goodnotes = os.path.join(drive, "GoodNotes")
+        if os.path.isdir(goodnotes):
+            return goodnotes
     return None
 
 

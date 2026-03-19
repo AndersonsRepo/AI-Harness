@@ -1,4 +1,5 @@
 import { getDb } from "./db.js";
+import { proc } from "./platform.js";
 
 export interface SubagentEntry {
   id: string;
@@ -100,9 +101,7 @@ export function cleanupStale(): number {
   let cleaned = 0;
 
   for (const row of running) {
-    try {
-      process.kill(row.pid, 0);
-    } catch {
+    if (!proc.isAlive(row.pid)) {
       db.prepare("UPDATE subagents SET status = 'failed', completed_at = datetime('now') WHERE id = ?").run(row.id);
       cleaned++;
     }

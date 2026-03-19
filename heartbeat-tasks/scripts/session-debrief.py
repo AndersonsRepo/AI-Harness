@@ -32,15 +32,15 @@ VAULT_DIR = os.path.join(HARNESS_ROOT, "vault")
 LEARNINGS_DIR = os.path.join(VAULT_DIR, "learnings")
 KNOWLEDGE_DIR = os.path.join(VAULT_DIR, "shared", "project-knowledge")
 PROJECTS_FILE = os.path.join(TASKS_DIR, "projects.json")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.platform import paths
+from lib.llm_provider import get_provider, get_default_model, LLMError
+
 TRANSCRIPTS_DIR = os.environ.get(
     "CLAUDE_TRANSCRIPTS_DIR",
-    os.path.join(os.environ.get("HOME", ""), ".claude", "projects")
+    os.path.join(paths.home(), ".claude", "projects")
 )
-CLAUDE_PATH = os.path.join(os.environ.get("HOME", ""), ".local", "bin", "claude")
-
-# LLM provider — defaults to claude-cli, overridable via LLM_PROVIDER env var
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from lib.llm_provider import get_provider, get_default_model, LLMError
+CLAUDE_PATH = paths.claude_cli()
 
 # Max chars of conversation to send to LLM for extraction
 MAX_CONTEXT_CHARS = 25000

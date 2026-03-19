@@ -20,6 +20,7 @@ import { approveLearning, rejectLearning, getVaultStats } from "./promotion-hand
 import { getDb } from "./db.js";
 import { existsSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
+import { proc } from "./platform.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 
@@ -171,7 +172,7 @@ export async function executeCommand(ctx: CommandContext): Promise<CommandResult
 function commandStop(ctx: CommandContext): CommandResult {
   const pid = getTaskPidForChannel(ctx.channelId);
   if (!pid) return { text: "Nothing running in this channel." };
-  try { process.kill(pid, "SIGTERM"); } catch {}
+  proc.terminate(pid);
   cancelChannelTasks(ctx.channelId);
   ctx.releaseChannel?.();
   return { text: "Stopped the active request." };

@@ -2,6 +2,7 @@
 """Detect new GoodNotes PDF exports."""
 
 import os
+import sys
 import json
 import datetime
 import glob
@@ -13,14 +14,18 @@ HARNESS_ROOT = os.environ.get(
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 STATE_FILE = os.path.join(TASKS_DIR, "goodnotes-watch.state-files.json")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.platform import paths
+
 def _find_google_drive():
-    """Auto-detect the Google Drive CloudStorage mount."""
-    cloud_dir = os.path.expanduser("~/Library/CloudStorage")
-    if os.path.isdir(cloud_dir):
-        for entry in os.listdir(cloud_dir):
-            if entry.startswith("GoogleDrive-"):
-                return os.path.join(cloud_dir, entry, "My Drive", "GoodNotes")
-    # Fallback to env var
+    """Auto-detect the Google Drive mount, then find GoodNotes subfolder."""
+    drive = paths.google_drive_dir()
+    if drive:
+        goodnotes = os.path.join(drive, "GoodNotes")
+        if os.path.isdir(goodnotes):
+            return goodnotes
+    # Fallback to env var (macOS-specific legacy path)
     account = os.environ.get("GOOGLE_DRIVE_ACCOUNT", "")
     return os.path.join(
         os.path.expanduser("~/Library/CloudStorage/GoogleDrive-" + account),
@@ -29,7 +34,7 @@ def _find_google_drive():
 
 EXPORT_DIR = _find_google_drive()
 # Fallback: manual exports
-MANUAL_EXPORT_DIR = os.path.expanduser("~/Documents/GoodNotes-Export")
+MANUAL_EXPORT_DIR = os.path.join(paths.home(), "Documents", "GoodNotes-Export")
 
 
 def load_known_files():
