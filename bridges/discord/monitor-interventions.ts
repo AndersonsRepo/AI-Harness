@@ -24,6 +24,7 @@ import {
 } from "./instance-monitor.js";
 import { cancelTask, submitTask, spawnTask, getTask } from "./task-runner.js";
 import { listAgentNames } from "./agent-loader.js";
+import { proc } from "./platform.js";
 
 // ─── Main Interaction Router ─────────────────────────────────────────
 
@@ -92,11 +93,7 @@ async function handleKill(interaction: ButtonInteraction, taskId: string): Promi
     return;
   }
 
-  try {
-    process.kill(instance.pid, "SIGTERM");
-  } catch {
-    // Process might already be dead
-  }
+  proc.terminate(instance.pid);
 
   cancelTask(taskId);
   updateInstanceStatus(taskId, "killed");

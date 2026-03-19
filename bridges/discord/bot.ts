@@ -109,6 +109,7 @@ import {
   onInstanceCompleted,
 } from "./monitor-ui.js";
 import { handleMonitorInteraction } from "./monitor-interventions.js";
+import { proc, onShutdown } from "./platform.js";
 
 config();
 
@@ -117,12 +118,9 @@ const PID_FILE = join(import.meta.dirname || ".", ".bot.pid");
 try {
   if (existsSync(PID_FILE)) {
     const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
-    try {
-      process.kill(oldPid, 0);
+    if (proc.isAlive(oldPid)) {
       console.error(`Bot already running (PID ${oldPid}). Exiting.`);
       process.exit(1);
-    } catch {
-      // Old process is dead, continue
     }
   }
   writeFileSync(PID_FILE, String(process.pid));
@@ -135,8 +133,7 @@ try {
     stopMonitorUI();
     closeDb();
   });
-  process.on("SIGINT", () => process.exit(0));
-  process.on("SIGTERM", () => process.exit(0));
+  onShutdown(() => process.exit(0));
 } catch {}
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -746,9 +743,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
       await message.reply("Nothing running in this channel.");
       return true;
     }
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {}
+    proc.terminate(pid);
     cancelChannelTasks(channelId);
     releaseChannel(channelId);
     await message.reply("Stopped the active request.");

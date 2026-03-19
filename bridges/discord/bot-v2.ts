@@ -17,6 +17,7 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { Gateway } from "./core-gateway.js";
 import { DiscordTransport } from "./discord-transport.js";
+import { proc, onShutdown } from "./platform.js";
 
 // Load environment variables
 config();
@@ -44,11 +45,10 @@ if (ALLOWED_USER_IDS.length === 0) {
 try {
   if (existsSync(PID_FILE)) {
     const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
-    try {
-      process.kill(oldPid, 0); // Check if alive
+    if (proc.isAlive(oldPid)) {
       console.error(`Bot already running (PID ${oldPid}). Remove ${PID_FILE} to force.`);
       process.exit(1);
-    } catch {
+    } else {
       // Old process is dead — clean up stale PID file
       unlinkSync(PID_FILE);
     }
@@ -113,8 +113,7 @@ async function shutdown(): Promise<void> {
 process.on("exit", () => {
   try { unlinkSync(PID_FILE); } catch {}
 });
-process.on("SIGINT", () => shutdown());
-process.on("SIGTERM", () => shutdown());
+onShutdown(() => shutdown());
 process.on("uncaughtException", (err) => {
   console.error("[FATAL] Uncaught exception:", err);
   try { unlinkSync(PID_FILE); } catch {}

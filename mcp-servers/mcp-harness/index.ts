@@ -70,6 +70,11 @@ function safeExec(cmd: string, timeoutMs: number = 10000): string {
 
 function isPidAlive(pid: number): boolean {
   try {
+    if (process.platform === "win32") {
+      const { execSync } = require("child_process");
+      const out = execSync(`tasklist /FI "PID eq ${pid}" /NH`, { encoding: "utf-8", timeout: 5000 });
+      return out.includes(String(pid));
+    }
     process.kill(pid, 0);
     return true;
   } catch {

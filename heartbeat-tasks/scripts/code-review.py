@@ -35,11 +35,11 @@ DISCORD_DIR = os.path.join(HARNESS_ROOT, "bridges", "discord")
 MCP_DIR = os.path.join(HARNESS_ROOT, "mcp-servers")
 SCRIPTS_DIR = os.path.join(TASKS_DIR, "scripts")
 
-CLAUDE_PATH = os.path.join(os.environ.get("HOME", ""), ".local", "bin", "claude")
-
-# LLM provider — defaults to claude-cli, overridable via LLM_PROVIDER env var
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.platform import paths
 from lib.llm_provider import get_provider, get_default_model, LLMError
+
+CLAUDE_PATH = paths.claude_cli()
 
 # TypeScript source files to scan
 TS_DIRS = [DISCORD_DIR, MCP_DIR]

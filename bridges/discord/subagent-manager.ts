@@ -13,6 +13,7 @@ import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
 import { AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
+import { proc } from "./platform.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -271,9 +272,7 @@ export function cancelSubagent(id: string): boolean {
   const entry = registry.get(id);
   if (!entry || entry.status !== "running") return false;
 
-  try {
-    process.kill(entry.pid, "SIGTERM");
-  } catch {}
+  proc.terminate(entry.pid);
 
   registry.update(id, {
     status: "cancelled",

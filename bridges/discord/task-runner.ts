@@ -10,6 +10,7 @@ import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
 import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
 import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance } from "./instance-monitor.js";
+import { proc } from "./platform.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -732,8 +733,7 @@ export function recoverCrashedTasks(): number {
   let recovered = 0;
   for (const task of stuckTasks) {
     if (task.pid) {
-      try {
-        process.kill(task.pid, 0); // Check if alive
+      if (proc.isAlive(task.pid)) {
         // Process is alive — re-attach watcher
         if (task.output_file) {
           const watcher = new FileWatcher({
@@ -762,8 +762,6 @@ export function recoverCrashedTasks(): number {
           console.log(`[TASK] Re-attached watcher for alive task ${task.id} (PID ${task.pid})`);
         }
         continue;
-      } catch {
-        // Process is dead
       }
     }
 
@@ -788,9 +786,7 @@ export function cancelTask(taskId: string): boolean {
   }
 
   if (task.pid) {
-    try {
-      process.kill(task.pid, "SIGTERM");
-    } catch {}
+    proc.terminate(task.pid);
   }
 
   // Atomic update: set failed + prevent retry in a single statement

@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
-"""Checks if the Discord bot is alive. Restarts via launchctl if dead."""
+"""Checks if the Discord bot is alive. Restarts via launchctl/scheduler if dead."""
 
 import subprocess
 import os
+import sys
 import signal
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.platform import proc, paths, IS_MACOS
+
 PID_FILE = os.path.join(HARNESS_ROOT, "bridges", "discord", ".bot.pid")
 PLIST_LABEL = "com.aiharness.discord-bot"
 
 
 def is_process_alive(pid):
     """Check if a process with the given PID exists."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
+    return proc.is_alive(pid)
 
 
 def get_launchctl_status():
@@ -44,10 +45,17 @@ def get_launchctl_status():
 
 
 def restart_bot():
-    """Restart the bot via launchctl."""
-    plist_path = os.path.expanduser(
-        f"~/Library/LaunchAgents/{PLIST_LABEL}.plist"
-    )
+    """Restart the bot via platform scheduler (launchctl on macOS)."""
+    if not IS_MACOS:
+        print("Bot restart not yet supported on this platform")
+        return False
+
+    launch_dir = paths.launch_agents_dir()
+    if not launch_dir:
+        print("LaunchAgents directory not found")
+        return False
+
+    plist_path = os.path.join(launch_dir, f"{PLIST_LABEL}.plist")
 
     # Try kickstart first (restarts without unload/load cycle)
     result = subprocess.run(
@@ -119,8 +127,18 @@ def main():
 
 
 def reload_stale_agents():
-    """Detect launchd agents with exit code 78 (stale from sleep) and reload them."""
+    """Detect launchd agents with exit code 78 (stale from sleep) and reload them.
+
+    macOS-only — returns empty list on other platforms.
+    """
     reloaded = []
+    if not IS_MACOS:
+        return reloaded
+
+    launch_dir = paths.launch_agents_dir()
+    if not launch_dir:
+        return reloaded
+
     try:
         result = subprocess.run(
             ["launchctl", "list"],
@@ -141,7 +159,7 @@ def reload_stale_agents():
 
             if exit_code == "78":
                 name = label.replace("com.aiharness.heartbeat.", "")
-                plist_path = os.path.expanduser(f"~/Library/LaunchAgents/{label}.plist")
+                plist_path = os.path.join(launch_dir, f"{label}.plist")
                 if not os.path.exists(plist_path):
                     continue
 
