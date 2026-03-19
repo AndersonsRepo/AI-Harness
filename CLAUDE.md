@@ -61,6 +61,7 @@ Priority-ordered sections (trimmed if over budget):
 3. Project-specific knowledge (3000 chars)
 4. Task history — last 5 (1200 chars)
 5. Recent Outlook — last 24h email summary, watched sender alerts (800 chars)
+5.2. Recent calendar — next 12h events from Calendar.app via osascript (600 chars)
 5.5. Recent academic notes — course note counts, recent notes if in course channel (1200 chars)
 6. Conventions + tool gotchas (2000 + 2000 chars)
 7. Heartbeat status (800 chars)
@@ -137,6 +138,7 @@ Discord user → bot.ts (queue + command dispatch)
 | `mcp-servers/mcp-harness/index.ts` | MCP server for infrastructure observability (9 tools) |
 | `mcp-servers/mcp-projects/index.ts` | MCP server for project management + security scanning (6 tools) |
 | `mcp-servers/mcp-outlook/index.ts` | MCP server for Outlook email + calendar (5 tools) |
+| `mcp-servers/mcp-calendar/index.ts` | MCP server for Calendar CRUD + ICS import + free block detection (8 tools) |
 | `mcp-servers/mcp-linkedin/index.ts` | MCP server for LinkedIn post draft/approve/publish (4 tools) |
 | `bridges/discord/oauth-store.ts` | OAuth token CRUD + AES-256-GCM encryption + auto-refresh |
 | `bridges/discord/oauth-setup.ts` | One-time interactive OAuth flow for Microsoft + LinkedIn |
@@ -146,6 +148,7 @@ Discord user → bot.ts (queue + command dispatch)
 | `heartbeat-tasks/scripts/session-debrief.py` | Knowledge extraction from Claude Code transcripts |
 | `heartbeat-tasks/scripts/repo-scanner.py` | Security scanning for registered projects |
 | `heartbeat-tasks/scripts/notes-ingest.py` | GoodNotes PDF → vault course notes pipeline |
+| `heartbeat-tasks/scripts/smart-schedule.py` | Calendar gap detection + Canvas assignment cross-reference |
 | `heartbeat-tasks/scripts/cs2600-watch.py` | Weekly CS 2600 website crawler |
 
 ### Critical: Claude CLI Spawning Rules
@@ -336,6 +339,7 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 | CS 2600 Website | `/academics` | cs2600-watch (168h) | — | read-only crawl |
 | Gmail | — | gmail-watcher (15m) | — | OAuth2, readonly scope, forwarded email indexing |
 | Outlook | — | email-monitor (15m), calendar-sync (2h) | outlook (5 tools) | OAuth token encryption, auto-refresh |
+| Calendar (iCloud) | — | smart-schedule (3h) | calendar (8 tools) | confirm gate on delete, read-only for researcher/education |
 | LinkedIn | — | — | linkedin (4 tools) | approval token flow, !approve/!reject in Discord |
 
 ### Internal Heartbeat Tasks
@@ -348,6 +352,7 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 | daily-digest | 24h | Summarize vault activity and learnings |
 | code-review | 12h | Automated code review of registered projects |
 | lead-gen-pipeline | 12h | Lead generation scanning |
+| smart-schedule | 3h | Calendar gap detection, study block suggestions, assignment alerts |
 | repo-scanner | 6h | Security scanning (secrets, debug artifacts, npm audit) |
 | learning-pruner | 24h | Archive stale/duplicate vault learnings |
 | promotion-check | 12h | Detect recurring learnings for CLAUDE.md promotion |
@@ -369,6 +374,27 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 **Context Injection**: `recentOutlook` section in `context-assembler.ts` (priority 5, 800 chars) — last 24h email summary (by sender, unread count), watched sender alerts. Always-on for every agent.
 
 **Data**: `email_index` table (cached emails), `watched_senders` table (alert triggers).
+
+### Calendar Integration
+
+**MCP Server**: `mcp-servers/mcp-calendar/` — Registered as `calendar` in MCP config.
+**Tools**: `calendar_list` (list calendars), `calendar_events` (events in date range), `calendar_create` (create event), `calendar_update` (update by UID), `calendar_delete` (delete by UID with confirm gate), `calendar_search` (text search), `calendar_import_ics` (parse public ICS feeds), `calendar_suggest_blocks` (find free time blocks).
+
+**Backend**: AppleScript (`osascript`) → Calendar.app → iCloud sync → iPhone. Backend selected via `CALENDAR_BACKEND` env var (default: `applescript`). Future: `google` (Phase 4), `outlook` (Phase 5).
+
+**AppleScript Gotchas**:
+- Calendar objects have `name` but NOT `uid` or `id` — use name as identifier
+- Event objects have `uid` — works for CRUD by UID
+- `location`/`description` can return `missing value` — must check before coercing to text
+- Multi-line descriptions break newline-delimited output — use `%%REC%%` delimiter + `cleanText()` helper
+- Date setting must use component-by-component approach (locale-independent)
+- First `osascript` call triggers macOS Automation permission dialog
+
+**Heartbeat**: `smart-schedule.py` (3h, active 07:00-23:00) — detects free blocks, cross-references Canvas assignments, notifies `#calendar`.
+
+**Context Injection**: `recentCalendar` section in `context-assembler.ts` (priority 5.2, 600 chars) — next 12h events via direct `osascript` call.
+
+**Agent Restrictions**: Read tools (`calendar_list`, `calendar_events`, `calendar_search`) whitelisted for researcher + education agents. CRUD tools available to builder, ops, project.
 
 ### LinkedIn Integration
 

@@ -1,0 +1,15 @@
+{
+  "name": "smart-schedule",
+  "description": "Detect calendar gaps, suggest study blocks, flag upcoming assignments",
+  "type": "script",
+  "script": "smart-schedule.py",
+  "schedule": "3h",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "calendar",
+  "timeout": 60,
+  "activeHours": {
+    "start": "07:00",
+    "end": "23:00"
+  }
+}
