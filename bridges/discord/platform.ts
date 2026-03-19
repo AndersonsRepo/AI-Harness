@@ -1,7 +1,7 @@
 /**
- * Cross-platform abstractions for paths, processes, signals, and environment.
+ * Cross-platform abstractions for paths, processes, signals, environment, and scheduling.
  *
- * Phase W1 of cross-platform plan.
+ * Phases W1+W2 of cross-platform plan.
  * All platform-specific logic in the TypeScript bot code funnels through here.
  */
 
@@ -205,6 +205,124 @@ export const env = {
       if (!k.startsWith("CLAUDE") && v !== undefined) result[k] = v;
     }
     return result;
+  },
+};
+
+// ─── Scheduler ────────────────────────────────────────────────────────
+
+export interface TaskStatus {
+  label: string;
+  loaded: boolean;
+  pid?: number;
+  exitCode?: number;
+  state: "running" | "loaded" | "not-loaded" | "stale" | "unknown";
+}
+
+export const scheduler = {
+  LABEL_PREFIX: "com.aiharness.heartbeat",
+
+  /** Name of the platform scheduler. */
+  name(): string {
+    if (IS_MACOS) return "launchd";
+    if (IS_WINDOWS) return "task-scheduler";
+    return "systemd";
+  },
+
+  /** Full label for a task. */
+  taskLabel(taskName: string): string {
+    return `${scheduler.LABEL_PREFIX}.${taskName}`;
+  },
+
+  /** Get status of a specific scheduled task. */
+  status(label: string): TaskStatus {
+    if (IS_MACOS) {
+      try {
+        const result = execSync(`launchctl list ${label} 2>/dev/null`, {
+          encoding: "utf-8",
+          timeout: 5000,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        let pid: number | undefined;
+        for (const line of result.split("\n")) {
+          if (line.includes('"PID"')) {
+            const m = line.match(/=\s*(\d+)/);
+            if (m) pid = parseInt(m[1], 10);
+          }
+        }
+        return {
+          label,
+          loaded: true,
+          pid,
+          state: pid ? "running" : "loaded",
+        };
+      } catch {
+        return { label, loaded: false, state: "not-loaded" };
+      }
+    }
+
+    if (IS_WINDOWS) {
+      const schtaskName = `\\${label.replace(/\./g, "\\")}`;
+      try {
+        const result = execSync(
+          `schtasks /Query /TN "${schtaskName}" /FO CSV /V /NH 2>nul`,
+          { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] },
+        );
+        const running = result.includes("Running");
+        return { label, loaded: true, state: running ? "running" : "loaded" };
+      } catch {
+        return { label, loaded: false, state: "not-loaded" };
+      }
+    }
+
+    return { label, loaded: false, state: "unknown" };
+  },
+
+  /** List all tasks with the given prefix. */
+  listTasks(prefix?: string): TaskStatus[] {
+    const pfx = prefix || scheduler.LABEL_PREFIX;
+    if (IS_MACOS) {
+      try {
+        const result = execSync("launchctl list 2>/dev/null", {
+          encoding: "utf-8",
+          timeout: 10000,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        const tasks: TaskStatus[] = [];
+        for (const line of result.trim().split("\n")) {
+          const parts = line.split("\t");
+          if (parts.length < 3) continue;
+          const [pidStr, exitStr, label] = [parts[0].trim(), parts[1].trim(), parts[2].trim()];
+          if (!label.startsWith(pfx)) continue;
+          const pid = pidStr !== "-" ? parseInt(pidStr, 10) : undefined;
+          const exitCode = exitStr !== "-" ? parseInt(exitStr, 10) : undefined;
+          const state = pid ? "running" : exitCode === 78 ? "stale" : "loaded";
+          tasks.push({ label, loaded: true, pid, exitCode, state });
+        }
+        return tasks;
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  },
+
+  /** Reload (stop + start) a task. */
+  reload(labelOrName: string): boolean {
+    const label = labelOrName.includes(".") ? labelOrName : scheduler.taskLabel(labelOrName);
+    if (IS_MACOS) {
+      const launchDir = paths.launchAgentsDir();
+      if (!launchDir) return false;
+      const plistPath = join(launchDir, `${label}.plist`);
+      if (!existsSync(plistPath)) return false;
+      try {
+        execSync(`launchctl unload "${plistPath}" 2>/dev/null`, { stdio: "pipe", timeout: 10000 });
+        execSync(`launchctl load "${plistPath}"`, { stdio: "pipe", timeout: 10000 });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
   },
 };
 

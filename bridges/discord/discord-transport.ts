@@ -544,7 +544,7 @@ export class DiscordTransport implements TransportAdapter {
 
     // /restart
     if (content === "/restart") {
-      await message.reply("Restarting bot... (launchd will bring it back in ~30s)");
+      await message.reply("Restarting bot... (scheduler will bring it back in ~30s)");
       setTimeout(() => process.exit(75), 1000);
       return true;
     }
@@ -577,7 +577,7 @@ export class DiscordTransport implements TransportAdapter {
 • \`/dead-letter\` — List failed tasks (dead-letter queue)
 • \`/retry <id>\` — Re-enqueue a dead-lettered task
 • \`/db-status\` — Show database table counts and file size
-• \`/restart\` — Restart the bot (launchd brings it back)
+• \`/restart\` — Restart the bot (scheduler brings it back)
 *Channels under the Projects category are auto-adopted on first message.*
 *Agents can create channels with \`[CREATE_CHANNEL:name]\` in their output.*
 • \`/help\` — Show this help message`
