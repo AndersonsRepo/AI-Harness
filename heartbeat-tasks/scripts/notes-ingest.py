@@ -28,7 +28,7 @@ VAULT_DIR = os.path.join(HARNESS_ROOT, "vault", "shared", "course-notes")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 
 # Max PDFs to process per run (cost control)
-MAX_PER_RUN = 10
+MAX_PER_RUN = 3
 
 # Map GoodNotes folder names → vault directory names and Discord channels
 # Loaded from course-map.json (gitignored) — copy course-map.example.json to get started
