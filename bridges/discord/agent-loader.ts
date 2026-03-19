@@ -75,6 +75,9 @@ export const AGENT_TOOL_RESTRICTIONS: Record<string, AgentToolRestrictions> = {
       "mcp__vault__vault_stats",
       "mcp__projects__project_context",
       "mcp__projects__project_list",
+      "mcp__calendar__calendar_list",
+      "mcp__calendar__calendar_events",
+      "mcp__calendar__calendar_search",
     ],
   },
   reviewer: {
@@ -101,6 +104,9 @@ export const AGENT_TOOL_RESTRICTIONS: Record<string, AgentToolRestrictions> = {
       "mcp__vault__vault_search",
       "mcp__vault__vault_read",
       "mcp__vault__vault_list",
+      "mcp__calendar__calendar_list",
+      "mcp__calendar__calendar_events",
+      "mcp__calendar__calendar_search",
     ],
   },
   // builder, ops, project: no restrictions beyond global guardrails

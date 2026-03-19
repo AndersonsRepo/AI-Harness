@@ -12,6 +12,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, appendFileSync, mkdirSync } from "fs";
+import { execSync } from "child_process";
 import { join, basename } from "path";
 import { getDb } from "./db.js";
 import { getProject, resolveProjectWorkdir, type ProjectConfig } from "./project-manager.js";
@@ -39,6 +40,7 @@ const SECTION_LIMITS: Record<string, number> = {
   projectKnowledge: 3000,
   taskHistory: 1200,
   recentOutlook: 800,
+  recentCalendar: 600,
   recentAcademic: 1200,
   conventions: 2000,
   gotchas: 2000,
@@ -145,6 +147,15 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       if (outlookSection) {
         sections.push(monitor.truncate(outlookSection, SECTION_LIMITS.recentOutlook, "context:recent-outlook"));
         totalChars += Math.min(outlookSection.length, SECTION_LIMITS.recentOutlook);
+      }
+    }
+
+    // Priority 5.2: Recent calendar events (next 12h from Calendar.app)
+    if (totalChars < MAX_TOTAL_CHARS) {
+      const calendarSection = buildRecentCalendarSection();
+      if (calendarSection) {
+        sections.push(monitor.truncate(calendarSection, SECTION_LIMITS.recentCalendar, "context:recent-calendar"));
+        totalChars += Math.min(calendarSection.length, SECTION_LIMITS.recentCalendar);
       }
     }
 
@@ -492,6 +503,77 @@ const COURSE_CHANNEL_MAP: Record<string, string> = {
   "systems-programming": "systems-programming",
   "comp-society": "comp-society",
 };
+
+function buildRecentCalendarSection(): string | null {
+  try {
+    // Fetch next 12h of events from Calendar.app via osascript
+    const now = new Date();
+    const end = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+
+    const makeDate = (varName: string, d: Date) =>
+      `set ${varName} to current date\n` +
+      `set year of ${varName} to ${d.getFullYear()}\n` +
+      `set month of ${varName} to ${d.getMonth() + 1}\n` +
+      `set day of ${varName} to ${d.getDate()}\n` +
+      `set hours of ${varName} to ${d.getHours()}\n` +
+      `set minutes of ${varName} to ${d.getMinutes()}\n` +
+      `set seconds of ${varName} to 0`;
+
+    const script = `
+${makeDate("startD", now)}
+${makeDate("endD", end)}
+tell application "Calendar"
+  set output to {}
+  repeat with cal in calendars
+    set calName to name of cal as text
+    tell cal
+      set evts to (every event whose start date >= startD and start date < endD)
+      repeat with evt in evts
+        try
+          set evtSummary to summary of evt as text
+          set evtStart to start date of evt as text
+          set evtAllDay to allday event of evt as text
+          set end of output to (evtSummary & "||" & evtStart & "||" & evtAllDay & "||" & calName)
+        end try
+      end repeat
+    end tell
+  end repeat
+  set AppleScript's text item delimiters to "%%REC%%"
+  return output as text
+end tell`;
+
+    const result = execSync("osascript", {
+      input: script,
+      encoding: "utf-8",
+      timeout: 15000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+
+    if (!result) return null;
+
+    const events = result
+      .split("%%REC%%")
+      .filter(Boolean)
+      .map((line) => {
+        const [summary, startStr, allDay, calendar] = line.split("||");
+        return { summary: summary?.trim(), startStr: startStr?.trim(), allDay: allDay?.trim() === "true", calendar: calendar?.trim() };
+      })
+      .filter((e) => e.summary);
+
+    if (events.length === 0) return null;
+
+    const lines = [`## Calendar (next 12h)`];
+    for (const evt of events.slice(0, 8)) {
+      const prefix = evt.allDay ? "(all day)" : evt.startStr || "";
+      lines.push(`- ${evt.summary} — ${prefix}${evt.calendar ? ` [${evt.calendar}]` : ""}`);
+    }
+    if (events.length > 8) lines.push(`(+${events.length - 8} more)`);
+
+    return lines.join("\n");
+  } catch {
+    return null;
+  }
+}
 
 function buildRecentAcademicSection(channelId: string): string | null {
   if (!existsSync(COURSE_NOTES_DIR)) return null;
