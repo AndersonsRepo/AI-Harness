@@ -13,7 +13,7 @@ import { getSession, setSession } from "./session-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
 import { monitor } from "./truncation-monitor.js";
-import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS } from "./agent-loader.js";
+import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -303,6 +303,12 @@ export async function executeHandoff(
   args.push("--disallowedTools", allDisallowed.join(","));
   if (allAllowed.length) {
     args.push("--allowedTools", allAllowed.join(","));
+  }
+
+  // Model: agent default (no channel override for handoffs — agent dictates)
+  const model = getAgentModel(toAgent, undefined);
+  if (model) {
+    args.push("--model", model);
   }
 
   // Session resume with compound key

@@ -107,6 +107,32 @@ export const AGENT_TOOL_RESTRICTIONS: Record<string, AgentToolRestrictions> = {
 };
 
 /**
+ * Per-agent default models. Used when no channel-level model override is set.
+ * Agents not listed here use the Claude CLI default (currently Sonnet).
+ *
+ * Opus: deeper reasoning → better plans, subtler code review, architectural decisions
+ * Sonnet: fast, capable → code gen, tutoring, research, ops tasks
+ */
+export const AGENT_DEFAULT_MODELS: Record<string, string> = {
+  orchestrator: "opus",
+  reviewer: "opus",
+  project: "opus",
+  // builder, researcher, education, ops, commands: use CLI default (sonnet)
+};
+
+/**
+ * Get the model to use for a given agent, respecting channel override > agent default > CLI default.
+ */
+export function getAgentModel(agentName: string | undefined, channelModel: string | undefined): string | undefined {
+  // Channel-level override takes priority
+  if (channelModel) return channelModel;
+  // Agent-level default
+  if (agentName && AGENT_DEFAULT_MODELS[agentName]) return AGENT_DEFAULT_MODELS[agentName];
+  // No override — let CLI use its default
+  return undefined;
+}
+
+/**
  * Build CLI args for tool restrictions for a given agent.
  * Returns args to append to the claude CLI invocation.
  */
