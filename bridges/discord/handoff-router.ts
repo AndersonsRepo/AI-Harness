@@ -479,6 +479,10 @@ export async function runHandoffChain(
       }
     } catch (err: any) {
       console.error(`[HANDOFF] Failed to post chain response for ${result.agentName}: ${err.message}`);
+      // Try to notify the user that delivery failed
+      try {
+        await channel.send(`*Failed to deliver ${result.agentName}'s response (${err.message}). The agent completed but the message couldn't be posted.*`).catch(() => {});
+      } catch {}
     }
 
     fromAgent = result.agentName;
