@@ -287,6 +287,7 @@ def check_config_consistency():
         f for f in os.listdir(TASKS_DIR)
         if f.endswith(".json") and ".state" not in f and "vercel-state" not in f
         and f not in ("projects.json", "projects.example.json")
+        and not f.startswith("course-map")
     ]
 
     for fname in config_files:
