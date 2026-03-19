@@ -201,16 +201,26 @@ export class DiscordTransport implements TransportAdapter {
       }
     }
 
-    const sent = await channel.send({ embeds: [builder] });
-    return sent.id;
+    try {
+      const sent = await channel.send({ embeds: [builder] });
+      return sent.id;
+    } catch (err: any) {
+      console.error(`[TRANSPORT] sendEmbed failed for ${channelId}: ${err.message}`);
+      throw err;
+    }
   }
 
   async sendFile(channelId: string, buffer: Buffer, filename: string): Promise<string> {
     const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
     if (!channel) throw new Error(`Channel ${channelId} not found`);
 
-    const sent = await channel.send({ files: [{ attachment: buffer, name: filename }] });
-    return sent.id;
+    try {
+      const sent = await channel.send({ files: [{ attachment: buffer, name: filename }] });
+      return sent.id;
+    } catch (err: any) {
+      console.error(`[TRANSPORT] sendFile failed for ${channelId}: ${err.message}`);
+      throw err;
+    }
   }
 
   // ─── TransportAdapter: Channel Management ─────────────────────────
@@ -632,13 +642,17 @@ export class DiscordTransport implements TransportAdapter {
     if (project && agentName && handoff) {
       // Post pre-handoff text
       if (handoff.preHandoffText) {
-        const preChunks = monitor.splitForDiscord(
-          `**${capitalize(agentName)}:** ${handoff.preHandoffText}`,
-          this.maxMessageLength,
-          "handoff:pre-text"
-        );
-        for (const chunk of preChunks) {
-          await channel.send(chunk);
+        try {
+          const preChunks = monitor.splitForDiscord(
+            `**${capitalize(agentName)}:** ${handoff.preHandoffText}`,
+            this.maxMessageLength,
+            "handoff:pre-text"
+          );
+          for (const chunk of preChunks) {
+            await channel.send(chunk);
+          }
+        } catch (err: any) {
+          console.error(`[TRANSPORT] Failed to send pre-handoff text: ${err.message}`);
         }
       }
 
