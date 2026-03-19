@@ -49,8 +49,13 @@ export function createDiscordHandoffTransport(channel: any): HandoffTransport {
     channelId: channel.id,
 
     async send(text: string): Promise<string> {
-      const msg = await channel.send(text);
-      return msg.id;
+      try {
+        const msg = await channel.send(text);
+        return msg.id;
+      } catch (err: any) {
+        console.error(`[HANDOFF-TRANSPORT] Failed to send to ${channel.id}: ${err.message}`);
+        throw err;
+      }
     },
 
     async sendTyping(): Promise<void> {

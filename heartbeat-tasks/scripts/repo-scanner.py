@@ -335,7 +335,7 @@ def check_todos(project_path):
     for marker in markers:
         try:
             result = subprocess.run(
-                ["git", "grep", "-c", marker],
+                ["git", "grep", "-c", "--", marker, ":!heartbeat-tasks/scripts/repo-scanner.py", ":!heartbeat-tasks/scripts/code-review.py"],
                 capture_output=True, text=True, timeout=10, cwd=project_path,
             )
             if result.returncode == 0 and result.stdout.strip():

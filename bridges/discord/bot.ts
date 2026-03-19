@@ -482,6 +482,9 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
         }
       } catch (err: any) {
         console.error(`[BOT] Failed to send handoff pre-text: ${err.message}`);
+        try {
+          await (channel as TextChannel).send(`*Failed to deliver agent response (${err.message})*`).catch(() => {});
+        } catch {}
       }
 
       const chainResult = await runHandoffChain(
