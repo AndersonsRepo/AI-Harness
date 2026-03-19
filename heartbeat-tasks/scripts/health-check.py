@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Checks if the Discord bot is alive. Restarts via launchctl/scheduler if dead."""
+"""Checks if the Discord bot is alive. Restarts via platform scheduler if dead."""
 
 import subprocess
 import os
 import sys
-import signal
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
@@ -12,10 +11,10 @@ HARNESS_ROOT = os.environ.get(
 )
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from lib.platform import proc, paths, IS_MACOS
+from lib.platform import proc, paths, scheduler, IS_MACOS
 
 PID_FILE = os.path.join(HARNESS_ROOT, "bridges", "discord", ".bot.pid")
-PLIST_LABEL = "com.aiharness.discord-bot"
+BOT_LABEL = "com.aiharness.discord-bot"
 
 
 def is_process_alive(pid):
@@ -23,60 +22,29 @@ def is_process_alive(pid):
     return proc.is_alive(pid)
 
 
-def get_launchctl_status():
-    """Check launchd status for the bot service."""
-    result = subprocess.run(
-        ["launchctl", "list", PLIST_LABEL],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return None, "not loaded"
-
-    # Parse the output for PID and status
-    for line in result.stdout.split("\n"):
-        line = line.strip()
-        if '"PID"' in line:
-            try:
-                pid = int(line.split("=")[1].strip().rstrip(";"))
-                return pid, "running"
-            except (ValueError, IndexError):
-                pass
-    return None, "loaded but not running"
+def get_bot_status():
+    """Check scheduler status for the bot service."""
+    status = scheduler.status(BOT_LABEL)
+    return status.pid, status.state
 
 
 def restart_bot():
-    """Restart the bot via platform scheduler (launchctl on macOS)."""
-    if not IS_MACOS:
-        print("Bot restart not yet supported on this platform")
+    """Restart the bot via platform scheduler."""
+    if not scheduler.is_available():
+        print(f"Scheduler ({scheduler.name()}) not available")
         return False
 
-    launch_dir = paths.launch_agents_dir()
-    if not launch_dir:
-        print("LaunchAgents directory not found")
-        return False
-
-    plist_path = os.path.join(launch_dir, f"{PLIST_LABEL}.plist")
-
-    # Try kickstart first (restarts without unload/load cycle)
-    result = subprocess.run(
-        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{PLIST_LABEL}"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        print("Restarted bot via launchctl kickstart")
+    # Try kickstart first (immediate restart without unload/load)
+    if scheduler.kickstart(BOT_LABEL):
+        print(f"Restarted bot via {scheduler.name()} kickstart")
         return True
 
-    # Fallback: unload + load
-    subprocess.run(["launchctl", "unload", plist_path], capture_output=True)
-    result = subprocess.run(
-        ["launchctl", "load", plist_path],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        print("Restarted bot via unload/load")
+    # Fallback: reload (unload + load)
+    if scheduler.reload(BOT_LABEL):
+        print(f"Restarted bot via {scheduler.name()} reload")
         return True
 
-    print(f"Failed to restart bot: {result.stderr}")
+    print(f"Failed to restart bot via {scheduler.name()}")
     return False
 
 
@@ -98,13 +66,13 @@ def main():
     else:
         checks.append("PID file: missing")
 
-    # Check 2: launchctl status
-    lc_pid, lc_status = get_launchctl_status()
-    checks.append(f"launchctl: {lc_status}" + (f" (PID {lc_pid})" if lc_pid else ""))
+    # Check 2: Scheduler status
+    sched_pid, sched_state = get_bot_status()
+    checks.append(f"{scheduler.name()}: {sched_state}" + (f" (PID {sched_pid})" if sched_pid else ""))
 
     # Determine health
     pid_alive = os.path.exists(PID_FILE)  # we cleaned it up above if dead
-    bot_healthy = pid_alive or lc_pid is not None
+    bot_healthy = pid_alive or sched_pid is not None
 
     if bot_healthy:
         print(f"Bot is healthy")
@@ -116,65 +84,14 @@ def main():
     for check in checks:
         print(f"  {check}")
 
-    # Check 3: Detect and reload stale heartbeat agents (exit code 78)
-    stale_reloaded = reload_stale_agents()
+    # Check 3: Detect and reload stale heartbeat agents
+    stale_reloaded = scheduler.reload_stale()
     if stale_reloaded:
         checks.append(f"Reloaded {len(stale_reloaded)} stale agent(s): {', '.join(stale_reloaded)}")
         print(f"  Reloaded {len(stale_reloaded)} stale agents: {', '.join(stale_reloaded)}")
 
     summary = "; ".join(checks)
     print(f"\nHealth: {'OK' if bot_healthy else 'RESTARTED'} — {summary}")
-
-
-def reload_stale_agents():
-    """Detect launchd agents with exit code 78 (stale from sleep) and reload them.
-
-    macOS-only — returns empty list on other platforms.
-    """
-    reloaded = []
-    if not IS_MACOS:
-        return reloaded
-
-    launch_dir = paths.launch_agents_dir()
-    if not launch_dir:
-        return reloaded
-
-    try:
-        result = subprocess.run(
-            ["launchctl", "list"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return reloaded
-
-        for line in result.stdout.strip().split("\n"):
-            parts = line.split("\t")
-            if len(parts) < 3:
-                continue
-            exit_code = parts[1].strip()
-            label = parts[2].strip()
-
-            if not label.startswith("com.aiharness.heartbeat."):
-                continue
-
-            if exit_code == "78":
-                name = label.replace("com.aiharness.heartbeat.", "")
-                plist_path = os.path.join(launch_dir, f"{label}.plist")
-                if not os.path.exists(plist_path):
-                    continue
-
-                try:
-                    subprocess.run(["launchctl", "unload", plist_path], capture_output=True, timeout=10)
-                    subprocess.run(["launchctl", "load", plist_path], capture_output=True, timeout=10)
-                    reloaded.append(name)
-                    print(f"  Reloaded stale agent: {name} (was exit 78)")
-                except Exception as e:
-                    print(f"  Failed to reload {name}: {e}")
-
-    except Exception as e:
-        print(f"  Stale agent check failed: {e}")
-
-    return reloaded
 
 
 if __name__ == "__main__":

@@ -82,6 +82,20 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+function getSchedulerStatus(taskName: string): boolean {
+  const label = `com.aiharness.heartbeat.${taskName}`;
+  if (process.platform === "darwin") {
+    const out = safeExec(`launchctl list ${label} 2>/dev/null`);
+    return !out.includes("unavailable") && !out.includes("Could not find");
+  }
+  if (process.platform === "win32") {
+    const schtaskName = `\\${label.replace(/\./g, "\\")}`;
+    const out = safeExec(`schtasks /Query /TN "${schtaskName}" 2>nul`);
+    return !out.includes("unavailable") && !out.includes("ERROR");
+  }
+  return false;
+}
+
 function stripFrontmatter(content: string): string {
   return content.replace(/^---\n[\s\S]*?\n---\n*/, "");
 }
@@ -296,13 +310,12 @@ server.tool(
     const lines = ["# Heartbeat Tasks", ""];
     for (const task of tasks) {
       const state = getTaskState(task.name);
-      const launchdLoaded = safeExec(`launchctl list com.aiharness.heartbeat.${task.name} 2>/dev/null`);
-      const loaded = !launchdLoaded.includes("unavailable") && !launchdLoaded.includes("Could not find");
+      const schedulerLoaded = getSchedulerStatus(task.name);
 
       lines.push(`## ${task.name}`);
       lines.push(`Description: ${task.description}`);
       lines.push(`Type: ${task.type} | Schedule: ${task.schedule} | Enabled: ${task.enabled}`);
-      lines.push(`Launchd: ${loaded ? "loaded" : "not loaded"}`);
+      lines.push(`Scheduler: ${schedulerLoaded ? "loaded" : "not loaded"}`);
       if (state) {
         lines.push(`Last run: ${state.lastRun || "never"}`);
         lines.push(`Last result: ${state.lastResult || "unknown"}`);

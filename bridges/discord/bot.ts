@@ -1142,10 +1142,10 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     return true;
   }
 
-  // /restart — graceful bot restart via launchd
+  // /restart — graceful bot restart via platform scheduler
   if (content === "/restart") {
-    await message.reply("Restarting bot... (launchd will bring it back in ~30s)");
-    // Exit with non-zero code so launchd's KeepAlive (SuccessfulExit=false) restarts us
+    await message.reply("Restarting bot... (scheduler will bring it back in ~30s)");
+    // Exit with non-zero code so the scheduler's keep-alive restarts us
     setTimeout(() => process.exit(75), 1000);
     return true;
   }
@@ -1178,7 +1178,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
 • \`/dead-letter\` — List failed tasks (dead-letter queue)
 • \`/retry <id>\` — Re-enqueue a dead-lettered task
 • \`/db-status\` — Show database table counts and file size
-• \`/restart\` — Restart the bot (launchd brings it back)
+• \`/restart\` — Restart the bot (scheduler brings it back)
 *Channels under the Projects category are auto-adopted on first message.*
 *Agents can create channels with \`[CREATE_CHANNEL:name]\` in their output.*
 • \`/help\` — Show this help message`
