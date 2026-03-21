@@ -239,7 +239,7 @@ export async function executeHandoff(
 
   // Depth check
   const depth = incrementHandoffDepth(channel.id);
-  const maxDepth = project.maxHandoffDepth || 5;
+  const maxDepth = project.maxHandoffDepth || 20;
 
   if (depth > maxDepth) {
     await channel.send(

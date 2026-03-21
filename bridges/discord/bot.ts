@@ -73,7 +73,6 @@ import {
   submitTask,
   spawnTask,
   getTask,
-  getGlobalRunningCount,
   getRunningCountForChannel,
   getTaskPidForChannel,
   cancelChannelTasks,
@@ -153,7 +152,8 @@ const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "")
   .filter(Boolean);
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const MAX_DISCORD_LENGTH = 1900;
-const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_PROCESSES || "5", 10);
+// No concurrency cap — let API rate limits be the natural throttle
+// const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_PROCESSES || "5", 10);
 
 if (!DISCORD_TOKEN) {
   console.error("DISCORD_TOKEN is required in .env");
@@ -190,7 +190,6 @@ const activeStreamMessages: Map<string, Message> = new Map(); // taskId → Disc
 
 function processChannelQueue(channelId: string): void {
   if (activeChannels.has(channelId)) return;
-  if (getGlobalRunningCount() >= MAX_CONCURRENT) return;
 
   const queue = channelQueues.get(channelId);
   if (!queue || queue.length === 0) return;
@@ -218,7 +217,7 @@ function enqueueTask(channelId: string, task: QueuedTask): boolean {
     channelQueues.set(channelId, []);
   }
 
-  const isQueued = activeChannels.has(channelId) || getGlobalRunningCount() >= MAX_CONCURRENT;
+  const isQueued = activeChannels.has(channelId);
   channelQueues.get(channelId)!.push(task);
   processChannelQueue(channelId);
   return isQueued;
@@ -899,7 +898,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     });
     if (!entry) {
       await message.reply(
-        `At capacity (${MAX_CONCURRENT} concurrent processes). Try again later.`
+        `Failed to spawn subagent. Check logs for details.`
       );
     } else {
       await message.reply(
@@ -1235,41 +1234,92 @@ async function handleCommand(message: Message, content: string): Promise<boolean
 
   // /help — list all commands
   if (content === "/help") {
-    await message.reply(
-      `**Available commands:**
-• \`/stop\` — Kill the active request in this channel
-• \`/new\` — Clear session, start fresh conversation
-• \`/status\` — Show current session info
-• \`/agent <name>\` — Set channel agent personality
-• \`/agent clear\` — Remove agent override
-• \`/agent create <name> "description"\` — Create a new agent
-• \`/agents\` — List available agent personalities
-• \`/model <name>\` — Set channel model override
-• \`/config\` — Show current channel configuration
-• \`/spawn [--agent <name>] <task>\` — Spawn a background subagent
-• \`/tasks\` — List running subagents
-• \`/cancel <id>\` — Cancel a running subagent
-• \`/channel create <name> [--agent <name>]\` — Create a new channel
-• \`/project create <name> "description"\` — Create a project channel
-• \`/project adopt ["description"]\` — Register this channel as a project
-• \`/project list\` — List active projects
-• \`/project agents <a1,a2,...>\` — Set project agents
-• \`/project close\` — Archive project channel
-• \`/approve <id>\` — Approve a vault learning for promotion to CLAUDE.md
-• \`/reject <id>\` — Reject a vault learning promotion
-• \`/vault-status\` — Show vault learning stats and promotion candidates
-• \`/dead-letter\` — List failed tasks (dead-letter queue)
-• \`/retry <id>\` — Re-enqueue a dead-lettered task
-• \`/db-status\` — Show database table counts and file size
-• \`/tmux\` — List tmux windows and parallel groups
-• \`/tmux attach\` — Get tmux attach command
-• \`/tmux capture <window>\` — Show last 30 lines from a tmux window
-• \`/tmux kill <window|groupId>\` — Kill a window or cancel a parallel group
-• \`/restart\` — Restart the bot (scheduler brings it back)
-*Channels under the Projects category are auto-adopted on first message.*
-*Agents can create channels with \`[CREATE_CHANNEL:name]\` in their output.*
-• \`/help\` — Show this help message`
-    );
+    const embed = new EmbedBuilder()
+      .setTitle("📋 Available Commands")
+      .setColor(0x5865F2)
+      .addFields(
+        {
+          name: "Session",
+          value: [
+            "`/stop` — Kill the active request",
+            "`/new` — Clear session, start fresh",
+            "`/status` — Show current session info",
+          ].join("\n"),
+          inline: true,
+        },
+        {
+          name: "Agents",
+          value: [
+            "`/agents` — List available agents",
+            "`/agent <name>` — Set channel agent",
+            "`/agent clear` — Remove agent override",
+            "`/agent create <name> \"desc\"` — Create agent",
+            "`/model <name>` — Set channel model",
+            "`/config` — Show channel config",
+          ].join("\n"),
+          inline: true,
+        },
+        {
+          name: "Background Tasks",
+          value: [
+            "`/spawn [--agent <name>] <task>` — Spawn subagent",
+            "`/tasks` — List running subagents",
+            "`/cancel <id>` — Cancel a subagent",
+          ].join("\n"),
+          inline: true,
+        },
+        {
+          name: "Channels & Projects",
+          value: [
+            "`/channel create <name>` — Create a channel",
+            "`/project create <name> \"desc\"` — Create project",
+            "`/project adopt` — Register channel as project",
+            "`/project list` — List active projects",
+            "`/project agents <a1,a2>` — Set project agents",
+            "`/project close` — Archive project",
+          ].join("\n"),
+          inline: true,
+        },
+        {
+          name: "Vault & Learning",
+          value: [
+            "`/vault-status` — Vault stats & promotions",
+            "`/approve <id>` — Approve learning promotion",
+            "`/reject <id>` — Reject learning promotion",
+          ].join("\n"),
+          inline: true,
+        },
+        {
+          name: "Infrastructure",
+          value: [
+            "`/dead-letter` — List failed tasks",
+            "`/retry <id>` — Re-enqueue failed task",
+            "`/db-status` — Database stats",
+            "`/restart` — Restart the bot",
+          ].join("\n"),
+          inline: true,
+        },
+        {
+          name: "Parallel Orchestration",
+          value: [
+            "`/tmux` — List tmux windows & groups",
+            "`/tmux attach` — Get attach command",
+            "`/tmux capture <win>` — Show window output",
+            "`/tmux kill <win|group>` — Kill window/group",
+          ].join("\n"),
+          inline: true,
+        },
+        {
+          name: "LinkedIn",
+          value: [
+            "`!approve <token>` — Approve post draft",
+            "`!reject <token>` — Reject post draft",
+          ].join("\n"),
+          inline: true,
+        },
+      )
+      .setFooter({ text: "Type /help to see this message" });
+    await message.reply({ embeds: [embed] });
     return true;
   }
 
@@ -1437,7 +1487,7 @@ client.on("clientReady", async () => {
   console.log(`AI Harness bot online as ${client.user?.tag}`);
   console.log(`Allowed users: ${ALLOWED_USER_IDS.join(", ")}`);
   console.log(`Working directory: ${HARNESS_ROOT}`);
-  console.log(`Max concurrent processes: ${MAX_CONCURRENT}`);
+  console.log(`Concurrency: unlimited (API rate-limited)`);
 
   // Initialize SQLite database (lazy init happens on first getDb() call)
   console.log("[DB] Initializing SQLite database...");

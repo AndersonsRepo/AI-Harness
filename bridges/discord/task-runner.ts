@@ -33,11 +33,11 @@ const RETRY_BACKOFF_BASE = 5;
 // Track consecutive API failures across all tasks. When Claude is repeatedly
 // unavailable, pause new task submission and notify Discord.
 
-const COOLDOWN_THRESHOLD = 3;         // consecutive API failures to trigger cooldown
-const COOLDOWN_DURATION_MS = 5 * 60 * 1000;  // 5 minutes cooldown
+// ─── Per-Task Backoff (no global cooldown) ──────────────────────────
+// Individual tasks handle their own retry backoff via claude-runner.py.
+// We track consecutive API failures for observability only — no system-wide pause.
+
 let consecutiveApiFailures = 0;
-let cooldownUntil = 0;
-let cooldownNotified = false;
 
 function isTransientApiError(stderr: string): boolean {
   const lower = stderr.toLowerCase();
@@ -48,35 +48,25 @@ function isTransientApiError(stderr: string): boolean {
 
 function recordApiSuccess(): void {
   if (consecutiveApiFailures > 0) {
-    console.log(`[COOLDOWN] API recovered after ${consecutiveApiFailures} consecutive failures`);
+    console.log(`[API] Recovered after ${consecutiveApiFailures} consecutive failures`);
   }
   consecutiveApiFailures = 0;
-  cooldownNotified = false;
 }
 
 function recordApiFailure(): { shouldCooldown: boolean } {
   consecutiveApiFailures++;
-  if (consecutiveApiFailures >= COOLDOWN_THRESHOLD) {
-    cooldownUntil = Date.now() + COOLDOWN_DURATION_MS;
-    console.warn(`[COOLDOWN] ${consecutiveApiFailures} consecutive API failures — pausing tasks for ${COOLDOWN_DURATION_MS / 1000}s`);
-    return { shouldCooldown: true };
+  if (consecutiveApiFailures >= 5) {
+    console.warn(`[API] ${consecutiveApiFailures} consecutive failures — tasks will retry individually`);
   }
-  return { shouldCooldown: false };
+  return { shouldCooldown: false }; // never block globally
 }
 
 export function isInCooldown(): boolean {
-  if (Date.now() < cooldownUntil) return true;
-  // Cooldown expired — reset
-  if (cooldownUntil > 0 && Date.now() >= cooldownUntil) {
-    cooldownUntil = 0;
-    consecutiveApiFailures = 0;
-    console.log("[COOLDOWN] Cooldown period expired, resuming tasks");
-  }
-  return false;
+  return false; // no global cooldown
 }
 
 export function getCooldownStatus(): { inCooldown: boolean; failureCount: number; expiresAt: number } {
-  return { inCooldown: isInCooldown(), failureCount: consecutiveApiFailures, expiresAt: cooldownUntil };
+  return { inCooldown: false, failureCount: consecutiveApiFailures, expiresAt: 0 };
 }
 
 // ─── Loop Detection ──────────────────────────────────────────────────

@@ -18,10 +18,7 @@ import { proc } from "./platform.js";
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const SUBAGENT_TIMEOUT = parseInt(process.env.SUBAGENT_TIMEOUT || "300", 10);
-const MAX_CONCURRENT = parseInt(
-  process.env.MAX_CONCURRENT_PROCESSES || "5",
-  10
-);
+// No concurrency cap — API rate limits are the natural throttle
 
 // Safety guardrails applied to all subagents
 const GLOBAL_DISALLOWED = [
@@ -67,11 +64,6 @@ export function onSubagentComplete(
 }
 
 export async function spawnSubagent(options: SpawnOptions): Promise<registry.SubagentEntry | null> {
-  const running = registry.getRunning();
-  if (running.length >= MAX_CONCURRENT) {
-    return null; // At capacity
-  }
-
   const id = `sa-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const outputFile = join(TEMP_DIR, `subagent-${id}.json`);
 

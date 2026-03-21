@@ -23,16 +23,15 @@ import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { assembleContext } from "./context-assembler.js";
 import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
-import { extractResponse, extractSessionId, submitTask, getGlobalRunningCount } from "./task-runner.js";
+import { extractResponse, extractSessionId, submitTask } from "./task-runner.js";
 import { setSession } from "./session-store.js";
 import * as tmux from "./tmux-session.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const STREAM_DIR = join(TEMP_DIR, "streams");
-const MAX_PARALLEL_AGENTS = 4;
-const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_PROCESSES || "5", 10);
-const PARALLEL_TIMEOUT_MS = 300_000; // 5 minutes per agent
+// No hard cap on parallel agents — API rate limits are the natural throttle
+const PARALLEL_TIMEOUT_MS = parseInt(process.env.PARALLEL_TIMEOUT_MS || "1800000", 10); // 30 min default
 
 const GLOBAL_DISALLOWED_TOOLS = [
   "Bash(rm -rf:*)",
@@ -107,8 +106,8 @@ export function parseParallelDirective(output: string): ParallelDirective | null
   if (!match) return null;
 
   const agents = match[1].split(",").map((a) => a.trim().toLowerCase());
-  if (agents.length < 2 || agents.length > MAX_PARALLEL_AGENTS) {
-    console.warn(`[PARALLEL] Invalid agent count: ${agents.length} (need 2-${MAX_PARALLEL_AGENTS})`);
+  if (agents.length < 2) {
+    console.warn(`[PARALLEL] Need at least 2 agents, got ${agents.length}`);
     return null;
   }
 
@@ -212,17 +211,6 @@ export async function spawnParallelGroup(opts: ParallelGroupOptions): Promise<st
     const description = directive.tasks.get(agent)!;
     const taskId = `par-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     const winName = windowName(agent, groupId);
-
-    // Check global concurrency
-    if (getGlobalRunningCount() >= MAX_CONCURRENT) {
-      console.warn(`[PARALLEL] At capacity — queueing ${agent} as pending`);
-      insertParallelTask({
-        group_id: groupId, task_id: taskId, parent_task_id: parentTaskId || null,
-        channel_id: channelId, agent, description, tmux_window: winName,
-        status: "pending", result: null, error: null, started_at: null, completed_at: null,
-      });
-      continue;
-    }
 
     await spawnParallelAgent(groupId, taskId, channelId, agent, description, winName, parentTaskId);
   }
