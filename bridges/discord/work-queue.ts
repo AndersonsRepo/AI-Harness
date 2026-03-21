@@ -114,13 +114,27 @@ export function enqueue(opts: EnqueueOptions): string {
   const id = generateWorkId();
   const now = new Date().toISOString();
 
-  // Check for duplicate: same source + sourceId still pending/gated
+  // Check for duplicate: same source + sourceId still pending/gated/running
   if (opts.sourceId) {
     const existing = db.prepare(
-      "SELECT id FROM work_queue WHERE source = ? AND source_id = ? AND status IN ('pending', 'gated')"
+      "SELECT id FROM work_queue WHERE source = ? AND source_id = ? AND status IN ('pending', 'gated', 'running')"
     ).get(opts.source, opts.sourceId) as { id: string } | undefined;
     if (existing) {
       return existing.id; // Deduplicate — return existing item
+    }
+  }
+
+  // Check for any active item from the same source (prevent overlapping iterations)
+  if (opts.sourceId && opts.metadata) {
+    const project = (opts.metadata as any).project;
+    if (project) {
+      const activeItem = db.prepare(
+        "SELECT id FROM work_queue WHERE source = ? AND status = 'running' AND metadata LIKE ?"
+      ).get(opts.source, `%"project":"${project}"%`) as { id: string } | undefined;
+      if (activeItem) {
+        console.log(`[WORK-QUEUE] Skipped enqueue — ${project} already has running item ${activeItem.id}`);
+        return activeItem.id;
+      }
     }
   }
 

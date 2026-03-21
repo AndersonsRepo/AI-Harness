@@ -43,7 +43,10 @@ def log(task_name, msg):
     line = f"[{ts}] {msg}\n"
     with open(log_file, "a") as f:
         f.write(line)
-    print(line, end="")
+    # Only print to stdout if it's NOT the same file as the log
+    # (launchd plists route stdout to the log file, causing duplicates)
+    if not os.environ.get("__LAUNCHED_BY_LAUNCHD"):
+        print(line, end="")
 
 
 def load_config(task_name):
