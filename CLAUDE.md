@@ -100,7 +100,7 @@ Discord user → bot.ts (queue + command dispatch)
 ### Data Layer
 
 **SQLite** (`bridges/discord/harness.db`) — all bot operational state:
-- `schema_version` — migration tracking (current: v2)
+- `schema_version` — migration tracking (current: v4)
 - `sessions` — channelId → sessionId mapping (compound keys for projects: `channelId:agentName`)
 - `channel_configs` — per-channel agent/model/permission/tools settings
 - `subagents` — background task tracking (spawn, status, PID)
@@ -111,6 +111,8 @@ Discord user → bot.ts (queue + command dispatch)
 - `email_index` — cached Outlook emails (indexed by sender, date, project)
 - `watched_senders` — email alert triggers with label and project association
 - `linkedin_posts` — draft→approve→publish flow with single-use approval tokens
+- `task_telemetry` — per-task metrics (tools, cost, duration, loops)
+- `parallel_tasks` — tmux parallel group tracking (group_id, agent, status, result, tmux_window)
 - WAL journal mode for crash safety
 
 **Obsidian Vault** (`vault/`) — long-term agent knowledge/learnings. NOT operational state.
@@ -129,7 +131,9 @@ Discord user → bot.ts (queue + command dispatch)
 | `bridges/discord/process-registry.ts` | Subagent tracking (SQLite) |
 | `bridges/discord/project-manager.ts` | Project CRUD, handoff depth, auto-adopt (SQLite) |
 | `bridges/discord/subagent-manager.ts` | Background subagent spawn + FileWatcher per subagent |
-| `bridges/discord/handoff-router.ts` | Inter-agent handoffs, context building, chain execution |
+| `bridges/discord/handoff-router.ts` | Inter-agent handoffs, context building, chain execution, parallel directive detection |
+| `bridges/discord/tmux-session.ts` | tmux CLI wrapper for parallel agent orchestration (session/window lifecycle) |
+| `bridges/discord/tmux-orchestrator.ts` | Parallel agent spawning, group tracking, result aggregation |
 | `bridges/discord/stream-poller.ts` | Progressive stream-json parsing for live message editing |
 | `bridges/discord/activity-stream.ts` | Discord embeds to #agent-stream channel |
 | `bridges/discord/context-assembler.ts` | Deterministic context injection daemon |
@@ -210,11 +214,33 @@ All file-based polling has been replaced with `FileWatcher` from `file-watcher.t
 
 ### Inter-Agent Communication
 
-- Agents hand off work with `[HANDOFF:agent_name] description` at end of their output
+- **Sequential**: Agents hand off work with `[HANDOFF:agent_name] description` at end of their output
 - `bot.ts` detects the directive, `handoff-router.ts` builds context from last 15 messages, spawns target agent
 - Chain continues until: no handoff in response, depth limit (default 5), error, or invalid agent
 - Self-handoff and unknown-agent handoffs are blocked
 - `[CREATE_CHANNEL:name --agent builder "description"]` creates new project channels
+- **Parallel**: Orchestrator uses `[PARALLEL:agent1,agent2]` with `## agent` headers for per-agent task descriptions
+- Each parallel agent runs in its own tmux window + detached subprocess
+- Results collected via FileWatchers, aggregated as `[PARALLEL_COMPLETE]` back to orchestrator
+- Max 4 parallel agents per group, counts against `MAX_CONCURRENT_PROCESSES`
+
+### tmux Parallel Orchestration
+
+**Module**: `bridges/discord/tmux-orchestrator.ts` + `bridges/discord/tmux-session.ts`
+
+A single tmux session named `harness` hosts per-agent windows. Windows named `{agent}-{shortId}`.
+
+**Flow:**
+1. Orchestrator outputs `[PARALLEL:researcher,builder]` with per-agent task descriptions
+2. `parseParallelDirective()` extracts agents + tasks
+3. `spawnParallelGroup()` creates tmux windows, spawns processes, sets up FileWatchers
+4. Each agent runs independently; results stored in `parallel_tasks` table
+5. When all complete, `onGroupComplete` fires → builds `[PARALLEL_COMPLETE]` prompt
+6. Orchestrator receives aggregated results and continues (handoff or another parallel batch)
+
+**Discord commands**: `/tmux [list|attach|capture <window>|kill <window|groupId>]`
+
+**Data**: `parallel_tasks` SQLite table (group_id, task_id, agent, tmux_window, status, result)
 
 ### Orchestrator Agent
 

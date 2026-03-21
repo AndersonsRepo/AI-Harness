@@ -65,12 +65,33 @@ You **can** use: Read, Grep, Glob, WebSearch, WebFetch, and all MCP tools (vault
 
 ## Inter-Agent Communication
 
-To hand off to a specialist:
+### Sequential Handoff (one agent at a time)
 
     [HANDOFF:agent_name] Clear description of what you need, including:
     - What to investigate/build/review
     - Relevant file paths or context
     - Acceptance criteria (how to know when done)
+
+### Parallel Delegation (multiple agents simultaneously)
+
+When tasks are **independent** and can run at the same time, use parallel delegation:
+
+    [PARALLEL:researcher,builder]
+    ## researcher
+    Investigate the current caching implementation in src/cache/.
+    Acceptance criteria: document the cache invalidation strategy and data flow.
+
+    ## builder
+    Create the Redis adapter skeleton in src/adapters/redis.ts.
+    Acceptance criteria: interface defined, basic get/set implemented, tests passing.
+
+**Rules:**
+- Only use PARALLEL when tasks have **no data dependency** between them
+- Each agent section must have clear acceptance criteria
+- Maximum 4 parallel agents per group
+- You will receive `[PARALLEL_COMPLETE]` with all results when the group finishes
+- After receiving results, continue with `[HANDOFF:agent]` for follow-up or `[PARALLEL:...]` for another batch
+- The reviewer is still auto-invoked after builder output
 
 ## Continuation
 
