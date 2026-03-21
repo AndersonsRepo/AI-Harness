@@ -62,6 +62,12 @@ function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(3);
     console.log("[DB] Applied schema v3 (task telemetry)");
   }
+
+  if (version < 4) {
+    applyV4(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(4);
+    console.log("[DB] Applied schema v4 (parallel tasks)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -237,6 +243,30 @@ function applyV3(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_telemetry_channel ON task_telemetry(channel_id);
     CREATE INDEX IF NOT EXISTS idx_telemetry_agent ON task_telemetry(agent);
     CREATE INDEX IF NOT EXISTS idx_telemetry_started ON task_telemetry(started_at);
+  `);
+}
+
+function applyV4(database: Database.Database): void {
+  database.exec(`
+    -- Parallel task groups for tmux-based multi-agent orchestration
+    CREATE TABLE IF NOT EXISTS parallel_tasks (
+      group_id       TEXT NOT NULL,
+      task_id        TEXT NOT NULL,
+      parent_task_id TEXT,
+      channel_id     TEXT NOT NULL,
+      agent          TEXT NOT NULL,
+      description    TEXT NOT NULL,
+      tmux_window    TEXT,
+      status         TEXT NOT NULL CHECK (status IN ('pending','running','completed','failed','cancelled')),
+      result         TEXT,
+      error          TEXT,
+      started_at     TEXT,
+      completed_at   TEXT,
+      created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_parallel_group ON parallel_tasks(group_id);
+    CREATE INDEX IF NOT EXISTS idx_parallel_status ON parallel_tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_parallel_channel ON parallel_tasks(channel_id);
   `);
 }
 

@@ -201,7 +201,11 @@ function generateId(): string {
 // --- Extract helpers (shared with bot.ts) ---
 
 export function extractResponse(output: string): string | null {
+  let lastAssistantText: string | null = null;
+
   // Stream-json output: multiple JSON lines. Find the "result" type line.
+  // Also track the last assistant text as fallback (result can be empty
+  // when a permission denial ends the turn without final text).
   for (const line of output.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -210,10 +214,23 @@ export function extractResponse(output: string): string | null {
       if (parsed.type === "result") {
         if (parsed.is_error) return `Error: ${parsed.result || "Unknown error"}`;
         const text = parsed.result || parsed.text || parsed.content;
-        return text ? text.trim() : null;
+        if (text && text.trim()) return text.trim();
+        // result is empty — fall through to use lastAssistantText
+        break;
+      }
+      // Track assistant text blocks as fallback
+      if (parsed.type === "assistant" && parsed.message?.content) {
+        for (const block of parsed.message.content) {
+          if (block.type === "text" && block.text?.trim()) {
+            lastAssistantText = block.text.trim();
+          }
+        }
       }
     } catch {}
   }
+
+  // If result was empty but we captured assistant text from the stream, use it
+  if (lastAssistantText) return lastAssistantText;
 
   // Fallback: single JSON object (non-streaming output format)
   try {

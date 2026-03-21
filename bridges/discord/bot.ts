@@ -90,6 +90,16 @@ import {
 } from "./task-runner.js";
 import { syncEmbeddings, watchVaultForEmbeddings, stopEmbeddingWatchers } from "./embeddings.js";
 import {
+  onGroupComplete,
+  getGroupStatus,
+  getActiveGroups,
+  buildAggregationPrompt,
+  cancelGroup,
+  getActiveWindowNames,
+  pruneOldGroups,
+} from "./tmux-orchestrator.js";
+import * as tmuxSession from "./tmux-session.js";
+import {
   registerInstance,
   unregisterInstance,
   processMonitorEvent,
@@ -491,6 +501,17 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
         { originAgent: agentName }
       );
 
+      // If parallel group was spawned, chain is suspended — don't release channel yet
+      if (chainResult.parallelGroupId) {
+        console.log(`[BOT] Chain suspended for parallel group ${chainResult.parallelGroupId}`);
+        await (channel as TextChannel).send(
+          `**Orchestrator** spawned parallel tasks. Group: \`${chainResult.parallelGroupId}\`\nUse \`/tmux\` to monitor.`
+        ).catch(() => {});
+        postAgentComplete(ctx.activity, response).catch(() => {});
+        releaseChannel(channelId);
+        return;
+      }
+
       // If orchestrator started the chain and there were multiple agents, trigger debrief
       if (agentName === "orchestrator" && chainResult.entries.length > 1) {
         await invokeOrchestratorDebrief(channel as TextChannel, chainResult);
@@ -523,8 +544,8 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
 
     postAgentComplete(ctx.activity, response).catch(() => {});
   } else {
-    console.error("[PARSE ERROR] No response text from task output");
-    const errMsg = "Got a response but couldn't parse it. Check logs.";
+    console.error("[PARSE ERROR] No response text from task output (result field was empty — possible permission denial or empty turn)");
+    const errMsg = "Task completed but returned no text. This usually happens when a tool permission was denied at the end of a turn.";
     if (streamMessage) {
       await streamMessage.edit(errMsg);
     } else {
@@ -1150,6 +1171,68 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     return true;
   }
 
+  // /tmux — parallel orchestration management
+  if (content === "/tmux" || content.startsWith("/tmux ")) {
+    const subCmd = content.slice(5).trim();
+
+    if (!subCmd || subCmd === "list") {
+      // List tmux windows and active parallel groups
+      const windows = tmuxSession.listWindows();
+      const groups = getActiveGroups();
+
+      let text = `**tmux session:** ${tmuxSession.isSessionAlive() ? "alive" : "dead"}\n`;
+      text += `**Windows:** ${windows.length}\n`;
+      for (const w of windows) {
+        text += `  - \`${w.name}\`${w.active ? " (active)" : ""}\n`;
+      }
+
+      if (groups.length > 0) {
+        text += `\n**Active parallel groups:** ${groups.length}\n`;
+        for (const g of groups) {
+          text += `  \`${g.groupId}\`: ${g.tasks.map((t) => `${t.agent}(${t.status})`).join(", ")}\n`;
+        }
+      } else {
+        text += "\nNo active parallel groups.";
+      }
+
+      await message.reply(text);
+      return true;
+    }
+
+    if (subCmd === "attach") {
+      await message.reply(`Attach to the tmux session:\n\`\`\`\n${tmuxSession.getAttachCommand()}\n\`\`\``);
+      return true;
+    }
+
+    if (subCmd.startsWith("capture ")) {
+      const winName = subCmd.slice(8).trim();
+      const output = tmuxSession.capturePane(winName, 30);
+      if (output) {
+        await message.reply(`**tmux capture** \`${winName}\`:\n\`\`\`\n${output.slice(0, 1800)}\n\`\`\``);
+      } else {
+        await message.reply(`Window \`${winName}\` not found or empty.`);
+      }
+      return true;
+    }
+
+    if (subCmd.startsWith("kill ")) {
+      const target = subCmd.slice(5).trim();
+      // Check if it's a group ID
+      const status = getGroupStatus(target);
+      if (status) {
+        const cancelled = cancelGroup(target);
+        await message.reply(`Cancelled ${cancelled} task(s) in group \`${target}\`.`);
+      } else {
+        const killed = tmuxSession.killWindow(target);
+        await message.reply(killed ? `Killed window \`${target}\`.` : `Window \`${target}\` not found.`);
+      }
+      return true;
+    }
+
+    await message.reply("Usage: `/tmux [list|attach|capture <window>|kill <window|groupId>]`");
+    return true;
+  }
+
   // /help — list all commands
   if (content === "/help") {
     await message.reply(
@@ -1178,6 +1261,10 @@ async function handleCommand(message: Message, content: string): Promise<boolean
 • \`/dead-letter\` — List failed tasks (dead-letter queue)
 • \`/retry <id>\` — Re-enqueue a dead-lettered task
 • \`/db-status\` — Show database table counts and file size
+• \`/tmux\` — List tmux windows and parallel groups
+• \`/tmux attach\` — Get tmux attach command
+• \`/tmux capture <window>\` — Show last 30 lines from a tmux window
+• \`/tmux kill <window|groupId>\` — Kill a window or cancel a parallel group
 • \`/restart\` — Restart the bot (scheduler brings it back)
 *Channels under the Projects category are auto-adopted on first message.*
 *Agents can create channels with \`[CREATE_CHANNEL:name]\` in their output.*
@@ -1387,6 +1474,42 @@ client.on("clientReady", async () => {
   // Prune old dead-letter entries
   const pruned = pruneDeadLetters(7);
   if (pruned > 0) console.log(`[TASK] Pruned ${pruned} old dead-letter entries`);
+
+  // Initialize tmux session for parallel orchestration
+  tmuxSession.ensureSession();
+  tmuxSession.cleanupDeadWindows(getActiveWindowNames());
+  pruneOldGroups(7);
+
+  // Handle parallel group completions — feed results back to orchestrator
+  onGroupComplete(async (groupId, status) => {
+    try {
+      const ch = client.channels.cache.get(status.channelId);
+      if (!ch || !ch.isTextBased()) return;
+      const channel = ch as TextChannel;
+
+      const summary = status.tasks.map((t) => {
+        const icon = t.status === "completed" ? "✅" : "❌";
+        return `${icon} **${t.agent}**: ${t.status}`;
+      }).join("\n");
+
+      await channel.send(`**Parallel group complete** (\`${groupId}\`)\n${summary}`);
+
+      // Feed aggregated results back to the orchestrator
+      const aggregation = buildAggregationPrompt(status);
+      const taskId = submitTask({
+        channelId: status.channelId,
+        prompt: aggregation,
+        agent: "orchestrator",
+        sessionKey: `${status.channelId}:orchestrator`,
+      });
+      const spawnResult = await spawnTask(taskId);
+      if (!spawnResult) {
+        await channel.send("*Failed to spawn orchestrator for result synthesis.*");
+      }
+    } catch (err: any) {
+      console.error(`[PARALLEL] Group complete handler error: ${err.message}`);
+    }
+  });
 
   // Sync vault embeddings (non-blocking — runs in background)
   syncEmbeddings().then((stats) => {

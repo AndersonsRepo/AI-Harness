@@ -2,6 +2,7 @@ import { TextChannel, Message } from "discord.js";
 import { spawn } from "child_process";
 import { existsSync, readFileSync, unlinkSync, mkdirSync, readdirSync } from "fs";
 import { join } from "path";
+import { parseParallelDirective, spawnParallelGroup } from "./tmux-orchestrator.js";
 import {
   getProject,
   updateProject,
@@ -193,6 +194,7 @@ export interface ChainEntry {
 export interface ChainResult {
   entries: ChainEntry[];
   originAgent: string;
+  parallelGroupId?: string; // Set when chain is suspended for parallel execution
 }
 
 // --- Review Gate (deterministic) ---
@@ -444,6 +446,23 @@ export async function runHandoffChain(
     response: initialResponse.slice(0, 2000),
     timestamp: Date.now(),
   });
+
+  // Check for parallel directive before sequential handoff
+  const parallelDirective = parseParallelDirective(initialResponse);
+  if (parallelDirective) {
+    console.log(`[HANDOFF] Parallel directive detected: ${parallelDirective.agents.join(", ")}`);
+    try {
+      const groupId = await spawnParallelGroup({
+        channelId: channel.id,
+        directive: parallelDirective,
+      });
+      // Chain suspends — will resume when parallel tasks complete via [PARALLEL_COMPLETE]
+      return { entries: chainEntries, originAgent, parallelGroupId: groupId };
+    } catch (err: any) {
+      console.error(`[HANDOFF] Failed to spawn parallel group: ${err.message}`);
+      await channel.send(`*Failed to start parallel tasks: ${err.message}*`).catch(() => {});
+    }
+  }
 
   let handoff = parseHandoff(initialResponse);
   let fromAgent = initialAgent;
