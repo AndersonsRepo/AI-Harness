@@ -98,6 +98,7 @@ import {
   pruneOldGroups,
 } from "./tmux-orchestrator.js";
 import * as tmuxSession from "./tmux-session.js";
+import { cleanupOrphanedWorktrees, getActiveWorktrees } from "./worktree-manager.js";
 import {
   registerInstance,
   unregisterInstance,
@@ -1529,6 +1530,19 @@ client.on("clientReady", async () => {
   tmuxSession.ensureSession();
   tmuxSession.cleanupDeadWindows(getActiveWindowNames());
   pruneOldGroups(7);
+
+  // Clean up orphaned worktrees from previous runs
+  const wtCleaned = cleanupOrphanedWorktrees();
+  if (wtCleaned > 0) console.log(`[WORKTREE] Cleaned ${wtCleaned} orphaned worktree(s) on startup`);
+  const activeWt = getActiveWorktrees();
+  if (activeWt.length > 0) console.log(`[WORKTREE] ${activeWt.length} active worktree(s)`);
+
+  // Periodic worktree cleanup (every 30 min)
+  setInterval(() => {
+    try { cleanupOrphanedWorktrees(); } catch (err: any) {
+      console.error(`[WORKTREE] Periodic cleanup error: ${err.message}`);
+    }
+  }, 30 * 60 * 1000);
 
   // Handle parallel group completions — feed results back to orchestrator
   onGroupComplete(async (groupId, status) => {

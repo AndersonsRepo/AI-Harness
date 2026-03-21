@@ -340,7 +340,7 @@ function updateTask(id: string, updates: Partial<TaskRecord>): void {
 
 // --- Spawn & execute ---
 
-export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string }): Promise<{ pid: number; outputFile: string; streamDir: string } | null> {
+export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string; worktreePath?: string }): Promise<{ pid: number; outputFile: string; streamDir: string } | null> {
   const task = getTask(taskId);
   if (!task) return null;
 
@@ -457,9 +457,9 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
     ...args,
   ];
 
-  // Resolve project working directory (passed via env to claude-runner.py)
+  // Resolve project working directory — prefer worktree if provided
   const project = getProject(task.channel_id);
-  const projectCwd = project ? resolveProjectWorkdir(project.name) : null;
+  const projectCwd = opts?.worktreePath || (project ? resolveProjectWorkdir(project.name) : null);
 
   const proc = spawn("python3", pythonArgs, {
     cwd: HARNESS_ROOT,
@@ -545,14 +545,9 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
 
     if (returncode !== 0) {
       const errorMsg = stderr?.trim() || `Claude exited with code ${returncode}`;
-      // Track API failures for cooldown
+      // Track API failures for observability
       if (isTransientApiError(errorMsg)) {
-        const { shouldCooldown } = recordApiFailure();
-        if (shouldCooldown && !cooldownNotified && outputHandler) {
-          cooldownNotified = true;
-          // Notify via the output handler (bot.ts will post to Discord)
-          await outputHandler(taskId, `⚠️ Claude API appears down (${consecutiveApiFailures} consecutive failures). Tasks paused for ${COOLDOWN_DURATION_MS / 60000} minutes.`, null, null, raw);
-        }
+        recordApiFailure();
       }
       await handleFailure(taskId, errorMsg);
       // Notify handler of the error

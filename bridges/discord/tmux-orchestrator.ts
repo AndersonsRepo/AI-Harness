@@ -26,6 +26,7 @@ import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { extractResponse, extractSessionId, submitTask } from "./task-runner.js";
 import { setSession } from "./session-store.js";
 import * as tmux from "./tmux-session.js";
+import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, getWorktreeForGroup, isGitRepo } from "./worktree-manager.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -207,12 +208,26 @@ export async function spawnParallelGroup(opts: ParallelGroupOptions): Promise<st
   // Ensure tmux session exists
   tmux.ensureSession();
 
+  // Create worktree if any agents are writers and project is a git repo
+  let worktreePath: string | null = null;
+  if (needsWorktree(directive.agents)) {
+    const project = getProject(channelId);
+    const projectCwd = project ? resolveProjectWorkdir(project.name) : null;
+    if (projectCwd && isGitRepo(projectCwd)) {
+      const wt = createWorktree(projectCwd, project!.name, groupId, channelId, { groupId });
+      if (wt) {
+        worktreePath = wt.worktree_path;
+        console.log(`[PARALLEL] Worktree created for group ${groupId}: ${worktreePath}`);
+      }
+    }
+  }
+
   for (const agent of directive.agents) {
     const description = directive.tasks.get(agent)!;
     const taskId = `par-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     const winName = windowName(agent, groupId);
 
-    await spawnParallelAgent(groupId, taskId, channelId, agent, description, winName, parentTaskId);
+    await spawnParallelAgent(groupId, taskId, channelId, agent, description, winName, parentTaskId, worktreePath);
   }
 
   return groupId;
@@ -226,6 +241,7 @@ async function spawnParallelAgent(
   description: string,
   winName: string,
   parentTaskId?: string,
+  worktreePath?: string | null,
 ): Promise<void> {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const outputFile = join(TEMP_DIR, `response-${requestId}.json`);
@@ -296,9 +312,9 @@ async function spawnParallelAgent(
     ...args,
   ];
 
-  // Resolve project working directory
+  // Resolve project working directory — prefer worktree if provided
   const project = getProject(channelId);
-  const projectCwd = project ? resolveProjectWorkdir(project.name) : null;
+  const projectCwd = worktreePath || (project ? resolveProjectWorkdir(project.name) : null);
 
   const env = {
     ...process.env,
@@ -437,6 +453,16 @@ function checkGroupCompletion(groupId: string): void {
   if (!status || !status.allComplete) return;
 
   console.log(`[PARALLEL] Group ${groupId} complete — ${status.tasks.length} tasks, ${status.anyFailed ? "with failures" : "all succeeded"}`);
+
+  // Handle worktree merge + cleanup
+  const wt = getWorktreeForGroup(groupId);
+  if (wt) {
+    if (!status.anyFailed) {
+      const mergeResult = mergeWorktree(wt.id);
+      console.log(`[PARALLEL] Worktree merge for ${groupId}: ${mergeResult.status} — ${mergeResult.details}`);
+    }
+    removeWorktree(wt.id);
+  }
 
   // Fire callbacks
   for (const cb of groupCompleteCallbacks) {
