@@ -1827,7 +1827,11 @@ client.on("clientReady", async () => {
       if (ch) {
         const meta = parseMetadata(item);
         const label = meta.project ? `[${meta.project}]` : `[${item.source}]`;
-        await ch.send(`**[Auto]** ${label} Starting: ${item.prompt.slice(0, 150)}${item.prompt.length > 150 ? "..." : ""}\n*Priority: ${item.priority}*`);
+        // Extract first sentence as summary, strip markdown noise
+        const cleaned = item.prompt.replace(/\*\*[A-Z ]+:\*\*/g, "").replace(/[*#_`]/g, "");
+        const firstSentence = cleaned.match(/^[^\n.!?]*[.!?]?/)?.[0]?.trim() || "";
+        const summary = firstSentence.slice(0, 80) + (firstSentence.length > 80 ? "..." : "");
+        await ch.send(`**[Auto]** ${label} ${summary || "Task started"}`);
       }
     } catch (err: any) {
       console.error(`[WORK-QUEUE] Dispatch notification error: ${err.message}`);
