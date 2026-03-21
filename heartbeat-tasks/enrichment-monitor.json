@@ -4,5 +4,5 @@
   "schedule": "30m",
   "notify": "discord",
   "discord_channel": "lead-gen-pipeline",
-  "enabled": true
+  "enabled": false
 }

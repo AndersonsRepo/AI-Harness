@@ -551,37 +551,92 @@ export class DiscordTransport implements TransportAdapter {
 
     // /help
     if (content === "/help") {
-      await message.reply(
-        `**Available commands:**
-• \`/stop\` — Kill the active request in this channel
-• \`/new\` — Clear session, start fresh conversation
-• \`/status\` — Show current session info
-• \`/agent <name>\` — Set channel agent personality
-• \`/agent clear\` — Remove agent override
-• \`/agent create <name> "description"\` — Create a new agent
-• \`/agents\` — List available agent personalities
-• \`/model <name>\` — Set channel model override
-• \`/config\` — Show current channel configuration
-• \`/spawn [--agent <name>] <task>\` — Spawn a background subagent
-• \`/tasks\` — List running subagents
-• \`/cancel <id>\` — Cancel a running subagent
-• \`/channel create <name> [--agent <name>]\` — Create a new channel
-• \`/project create <name> "description"\` — Create a project channel
-• \`/project adopt ["description"]\` — Register this channel as a project
-• \`/project list\` — List active projects
-• \`/project agents <a1,a2,...>\` — Set project agents
-• \`/project close\` — Archive project channel
-• \`/approve <id>\` — Approve a vault learning for promotion to CLAUDE.md
-• \`/reject <id>\` — Reject a vault learning promotion
-• \`/vault-status\` — Show vault learning stats and promotion candidates
-• \`/dead-letter\` — List failed tasks (dead-letter queue)
-• \`/retry <id>\` — Re-enqueue a dead-lettered task
-• \`/db-status\` — Show database table counts and file size
-• \`/restart\` — Restart the bot (scheduler brings it back)
-*Channels under the Projects category are auto-adopted on first message.*
-*Agents can create channels with \`[CREATE_CHANNEL:name]\` in their output.*
-• \`/help\` — Show this help message`
-      );
+      const embed = new EmbedBuilder()
+        .setTitle("📋 Available Commands")
+        .setColor(0x5865F2)
+        .addFields(
+          {
+            name: "Session",
+            value: [
+              "`/stop` — Kill the active request",
+              "`/new` — Clear session, start fresh",
+              "`/status` — Show current session info",
+            ].join("\n"),
+            inline: true,
+          },
+          {
+            name: "Agents",
+            value: [
+              "`/agents` — List available agents",
+              "`/agent <name>` — Set channel agent",
+              "`/agent clear` — Remove agent override",
+              "`/agent create <name> \"desc\"` — Create agent",
+              "`/model <name>` — Set channel model",
+              "`/config` — Show channel config",
+            ].join("\n"),
+            inline: true,
+          },
+          {
+            name: "Background Tasks",
+            value: [
+              "`/spawn [--agent <name>] <task>` — Spawn subagent",
+              "`/tasks` — List running subagents",
+              "`/cancel <id>` — Cancel a subagent",
+            ].join("\n"),
+            inline: true,
+          },
+          {
+            name: "Channels & Projects",
+            value: [
+              "`/channel create <name>` — Create a channel",
+              "`/project create <name> \"desc\"` — Create project",
+              "`/project adopt` — Register channel as project",
+              "`/project list` — List active projects",
+              "`/project agents <a1,a2>` — Set project agents",
+              "`/project close` — Archive project",
+            ].join("\n"),
+            inline: true,
+          },
+          {
+            name: "Vault & Learning",
+            value: [
+              "`/vault-status` — Vault stats & promotions",
+              "`/approve <id>` — Approve learning promotion",
+              "`/reject <id>` — Reject learning promotion",
+            ].join("\n"),
+            inline: true,
+          },
+          {
+            name: "Infrastructure",
+            value: [
+              "`/dead-letter` — List failed tasks",
+              "`/retry <id>` — Re-enqueue failed task",
+              "`/db-status` — Database stats",
+              "`/restart` — Restart the bot",
+            ].join("\n"),
+            inline: true,
+          },
+          {
+            name: "Parallel Orchestration",
+            value: [
+              "`/tmux` — List tmux windows & groups",
+              "`/tmux attach` — Get attach command",
+              "`/tmux capture <win>` — Show window output",
+              "`/tmux kill <win|group>` — Kill window/group",
+            ].join("\n"),
+            inline: true,
+          },
+          {
+            name: "LinkedIn",
+            value: [
+              "`!approve <token>` — Approve post draft",
+              "`!reject <token>` — Reject post draft",
+            ].join("\n"),
+            inline: true,
+          },
+        )
+        .setFooter({ text: "Type /help to see this message" });
+      await message.reply({ embeds: [embed] });
       return true;
     }
 
