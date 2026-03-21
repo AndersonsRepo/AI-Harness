@@ -43,11 +43,19 @@ const GLOBAL_DISALLOWED_TOOLS = [
   "Bash(kill -9:*)",
 ].join(",");
 
+/**
+ * Resolve agent label to actual agent name.
+ * Supports numbered labels like "builder-1" → "builder" for parallel same-agent groups.
+ */
+function resolveAgentName(label: string): string {
+  return label.replace(/-\d+$/, "");
+}
+
 // ─── Types ──────────────────────────────────────────────────────────
 
 export interface ParallelDirective {
   agents: string[];
-  tasks: Map<string, string>; // agent → task description
+  tasks: Map<string, string>; // agent label → task description
 }
 
 export interface ParallelGroupOptions {
@@ -247,14 +255,17 @@ async function spawnParallelAgent(
   const outputFile = join(TEMP_DIR, `response-${requestId}.json`);
   const streamDir = join(STREAM_DIR, requestId);
 
+  // Resolve numbered labels (e.g., "builder-1" → "builder") for agent personality/tools
+  const resolvedAgent = resolveAgentName(agent);
+
   // Build claude command args (mirrors task-runner.ts spawnTask logic)
   const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
 
   // Channel config
   const channelConfig = getChannelConfig(channelId);
 
-  // Agent personality
-  const agentPrompt = readAgentPrompt(agent);
+  // Agent personality (use resolved name for lookup)
+  const agentPrompt = readAgentPrompt(resolvedAgent);
   if (agentPrompt) {
     args.push("--append-system-prompt", agentPrompt);
   }
@@ -263,25 +274,25 @@ async function spawnParallelAgent(
   const context = await assembleContext({
     channelId,
     prompt: description,
-    agentName: agent,
-    sessionKey: `${channelId}:${agent}`,
+    agentName: resolvedAgent,
+    sessionKey: `${channelId}:${agent}`, // keep label for unique session
     taskId,
   });
   if (context) {
     args.push("--append-system-prompt", context);
   }
 
-  // Model
-  const model = getAgentModel(agent, channelConfig?.model);
+  // Model (use resolved name for lookup)
+  const model = getAgentModel(resolvedAgent, channelConfig?.model);
   if (model) {
     args.push("--model", model);
   }
 
-  // Tool restrictions
+  // Tool restrictions (use resolved name for lookup)
   const allDisallowed: string[] = [GLOBAL_DISALLOWED_TOOLS];
   const allAllowed: string[] = [];
 
-  const restrictions = AGENT_TOOL_RESTRICTIONS[agent];
+  const restrictions = AGENT_TOOL_RESTRICTIONS[resolvedAgent];
   if (restrictions?.disallowed?.length) {
     allDisallowed.push(restrictions.disallowed.join(","));
   }

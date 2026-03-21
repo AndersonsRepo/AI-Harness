@@ -74,6 +74,18 @@ function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(5);
     console.log("[DB] Applied schema v5 (worktrees)");
   }
+
+  if (version < 6) {
+    applyV6(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(6);
+    console.log("[DB] Applied schema v6 (work queue)");
+  }
+
+  if (version < 7) {
+    applyV7(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(7);
+    console.log("[DB] Applied schema v7 (work queue ideation)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -297,6 +309,77 @@ function applyV5(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_worktrees_group ON worktrees(group_id);
     CREATE INDEX IF NOT EXISTS idx_worktrees_chain ON worktrees(chain_id);
     CREATE INDEX IF NOT EXISTS idx_worktrees_project ON worktrees(project_name);
+  `);
+}
+
+function applyV6(database: Database.Database): void {
+  database.exec(`
+    -- Autonomous work queue for self-directed agent work
+    CREATE TABLE IF NOT EXISTS work_queue (
+      id            TEXT PRIMARY KEY,
+      source        TEXT NOT NULL,
+      source_id     TEXT,
+      channel_id    TEXT NOT NULL,
+      prompt        TEXT NOT NULL,
+      agent         TEXT,
+      priority      INTEGER NOT NULL DEFAULT 50,
+      status        TEXT NOT NULL CHECK (status IN ('pending','gated','running','completed','failed','cancelled')),
+      gate_reason   TEXT,
+      depends_on    TEXT,
+      scheduled_at  TEXT,
+      started_at    TEXT,
+      completed_at  TEXT,
+      task_id       TEXT,
+      attempt       INTEGER NOT NULL DEFAULT 0,
+      max_attempts  INTEGER NOT NULL DEFAULT 3,
+      last_error    TEXT,
+      metadata      TEXT,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_work_queue_status ON work_queue(status);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_priority ON work_queue(priority DESC, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_source ON work_queue(source);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_channel ON work_queue(channel_id);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_scheduled ON work_queue(scheduled_at);
+  `);
+}
+
+function applyV7(database: Database.Database): void {
+  // SQLite doesn't support ALTER CHECK constraints, so we recreate the table
+  // with the new status values. This is safe because v6 just created it.
+  database.exec(`
+    -- Recreate work_queue with 'proposed' and 'approved' status values for ideation flow
+    CREATE TABLE IF NOT EXISTS work_queue_new (
+      id            TEXT PRIMARY KEY,
+      source        TEXT NOT NULL,
+      source_id     TEXT,
+      channel_id    TEXT NOT NULL,
+      prompt        TEXT NOT NULL,
+      agent         TEXT,
+      priority      INTEGER NOT NULL DEFAULT 50,
+      status        TEXT NOT NULL CHECK (status IN ('proposed','approved','pending','gated','running','completed','failed','cancelled')),
+      gate_reason   TEXT,
+      depends_on    TEXT,
+      scheduled_at  TEXT,
+      started_at    TEXT,
+      completed_at  TEXT,
+      task_id       TEXT,
+      attempt       INTEGER NOT NULL DEFAULT 0,
+      max_attempts  INTEGER NOT NULL DEFAULT 3,
+      last_error    TEXT,
+      metadata      TEXT,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT OR IGNORE INTO work_queue_new SELECT * FROM work_queue;
+    DROP TABLE work_queue;
+    ALTER TABLE work_queue_new RENAME TO work_queue;
+    CREATE INDEX IF NOT EXISTS idx_work_queue_status ON work_queue(status);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_priority ON work_queue(priority DESC, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_source ON work_queue(source);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_channel ON work_queue(channel_id);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_scheduled ON work_queue(scheduled_at);
   `);
 }
 

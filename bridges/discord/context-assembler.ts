@@ -45,6 +45,7 @@ const SECTION_LIMITS: Record<string, number> = {
   gotchas: 2000,
   heartbeats: 800,
   pendingWork: 600,
+  workQueue: 400,
 };
 
 // Common English stopwords for keyword extraction
@@ -190,6 +191,15 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       if (pendingSection) {
         sections.push(monitor.truncate(pendingSection, SECTION_LIMITS.pendingWork, "context:pending-work"));
         totalChars += Math.min(pendingSection.length, SECTION_LIMITS.pendingWork);
+      }
+    }
+
+    // Priority 9: Autonomous work queue status
+    if (totalChars < MAX_TOTAL_CHARS) {
+      const workQueueSection = buildWorkQueueSection();
+      if (workQueueSection) {
+        sections.push(monitor.truncate(workQueueSection, SECTION_LIMITS.workQueue, "context:work-queue"));
+        totalChars += Math.min(workQueueSection.length, SECTION_LIMITS.workQueue);
       }
     }
 
@@ -420,6 +430,37 @@ function buildPendingWorkSection(channelId: string): string | null {
   if (parts.length === 0) return null;
 
   return `## Pending Work\n${parts.map((p) => `- ${p}`).join("\n")}`;
+}
+
+function buildWorkQueueSection(): string | null {
+  try {
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT status, COUNT(*) as c FROM work_queue WHERE status IN ('pending', 'gated', 'running') GROUP BY status"
+    ).all() as { status: string; c: number }[];
+
+    if (rows.length === 0) return null;
+
+    const counts: Record<string, number> = {};
+    for (const row of rows) counts[row.status] = row.c;
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    if (total === 0) return null;
+
+    const parts: string[] = [`${total} work queue item(s): ${Object.entries(counts).map(([s, c]) => `${c} ${s}`).join(", ")}`];
+
+    // Show next few pending items
+    const pending = db.prepare(
+      "SELECT source, prompt, priority FROM work_queue WHERE status = 'pending' ORDER BY priority DESC, created_at ASC LIMIT 3"
+    ).all() as { source: string; prompt: string; priority: number }[];
+
+    for (const item of pending) {
+      parts.push(`Next: [P${item.priority}] (${item.source}) ${item.prompt.slice(0, 60)}`);
+    }
+
+    return `## Work Queue\n${parts.map((p) => `- ${p}`).join("\n")}`;
+  } catch {
+    return null;
+  }
 }
 
 function buildRecentOutlookSection(): string | null {
