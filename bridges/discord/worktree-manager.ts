@@ -77,7 +77,11 @@ const WRITER_AGENTS = new Set<string>();
  * Check if any agent in the list is a writer that needs worktree isolation.
  */
 export function needsWorktree(agents: string[]): boolean {
-  return agents.some((a) => WRITER_AGENTS.has(a.toLowerCase()));
+  return agents.some((a) => {
+    // Support numbered labels like "builder-1" → resolves to "builder"
+    const resolved = a.toLowerCase().replace(/-\d+$/, "");
+    return WRITER_AGENTS.has(resolved);
+  });
 }
 
 /**

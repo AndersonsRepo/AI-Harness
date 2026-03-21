@@ -96,9 +96,45 @@ import {
   cancelGroup,
   getActiveWindowNames,
   pruneOldGroups,
+  spawnParallelGroup,
 } from "./tmux-orchestrator.js";
 import * as tmuxSession from "./tmux-session.js";
 import { cleanupOrphanedWorktrees, getActiveWorktrees } from "./worktree-manager.js";
+import {
+  startDispatcher,
+  stopDispatcher,
+  onWorkDispatched,
+  setPreDispatchInterceptor,
+  recoverStuckWork,
+  pruneOldWork,
+  getWorkStats,
+  enqueue,
+  cancelWorkItem,
+  getRecentWork,
+  getPendingWork,
+  getRunningWork,
+  getWorkItem,
+  updateWorkItem,
+  setMaxConcurrent,
+  setActiveHours,
+  getConfig as getWorkQueueConfig,
+  approveProposal,
+  rejectProposal,
+  getProposedWork,
+  parseMetadata,
+  type WorkItem,
+} from "./work-queue.js";
+import {
+  checkNotificationForWork,
+  enqueueManual,
+  enqueueCodeReview,
+  enqueueIdeation,
+  processIdeationOutput,
+  enqueueMentoIteration,
+  enqueueLeadGenIteration,
+  enqueueLatticeIteration,
+  buildLatticeDirective,
+} from "./work-sources.js";
 import {
   registerInstance,
   unregisterInstance,
@@ -138,6 +174,7 @@ try {
     try {
       unlinkSync(PID_FILE);
     } catch {}
+    stopDispatcher();
     stopAllWatchers();
     stopEmbeddingWatchers();
     stopMonitorUI();
@@ -311,6 +348,41 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
   if (!ctx) {
     // Re-attached or orphaned task — try to post response to the original channel
     const task = getTask(taskId);
+
+    // Check if this is an ideation-generation task completing
+    if (task && response) {
+      // Search work queue for this task_id — check if it's ideation output
+      try {
+        const db = getDb();
+        const wqItem = db.prepare(
+          "SELECT * FROM work_queue WHERE task_id = ? AND source = 'ideation-gen' LIMIT 1"
+        ).get(taskId) as WorkItem | undefined;
+        if (wqItem) {
+          const proposalIds = processIdeationOutput(response, wqItem.channel_id);
+          if (proposalIds.length > 0) {
+            const ch = client.channels.cache.get(wqItem.channel_id) as TextChannel | undefined;
+            if (ch) {
+              const proposals = getProposedWork().filter(p => proposalIds.includes(p.id));
+              const lines = proposals.map(p => {
+                const meta = parseMetadata(p);
+                return `**${meta.title}** (${meta.category}) — ${meta.estimatedEffort || "?"}\n> ${meta.rationale}\n\`/work approve ${p.id}\` or \`/work reject ${p.id}\``;
+              });
+              await ch.send(`**New project ideas** (${proposals.length}):\n\n${lines.join("\n\n")}`);
+            }
+          }
+          // Clean up monitor and return — don't post raw ideation JSON
+          const completedInstance = unregisterInstance(taskId);
+          if (completedInstance) {
+            completedInstance.status = "completed";
+            onInstanceCompleted(completedInstance).catch(() => {});
+          }
+          return;
+        }
+      } catch (err: any) {
+        console.error(`[IDEATION] Output processing error: ${err.message}`);
+      }
+    }
+
     if (task && response) {
       console.log(`[OUTPUT] Orphaned task ${taskId} completed with response — posting to channel ${task.channel_id}`);
       try {
@@ -1318,9 +1390,201 @@ async function handleCommand(message: Message, content: string): Promise<boolean
           ].join("\n"),
           inline: true,
         },
+        {
+          name: "Work Queue",
+          value: [
+            "`/work` — Queue status overview",
+            "`/work add <prompt>` — Enqueue manual work",
+            "`/work list` — List pending/running items",
+            "`/work ideas` — View project proposals",
+            "`/work ideate` — Generate new ideas",
+            "`/work approve <id>` — Approve an idea",
+            "`/work reject <id>` — Reject an idea",
+          ].join("\n"),
+          inline: true,
+        },
       )
       .setFooter({ text: "Type /help to see this message" });
     await message.reply({ embeds: [embed] });
+    return true;
+  }
+
+  // /work — Autonomous Work Queue commands
+  if (content === "/work" || content.startsWith("/work ")) {
+    const args = content.slice(5).trim();
+
+    // /work (no args) — status overview
+    if (!args) {
+      const stats = getWorkStats();
+      const running = getRunningWork();
+      const config = getWorkQueueConfig();
+      const lines = [
+        `**Work Queue Status**`,
+        `Ideas: **${stats.proposed}** | Pending: **${stats.pending}** | Gated: **${stats.gated}** | Running: **${stats.running}**`,
+        `Completed: ${stats.completed} | Failed: ${stats.failed} | Cancelled: ${stats.cancelled}`,
+        `Capacity: ${running.length}/${config.maxConcurrent} | Hours: ${config.activeHoursStart}:00-${config.activeHoursEnd}:00`,
+      ];
+      if (running.length > 0) {
+        lines.push("", "**Running:**");
+        for (const item of running) {
+          lines.push(`• \`${item.id}\` (${item.source}) — ${item.prompt.slice(0, 80)}...`);
+        }
+      }
+      await message.reply(lines.join("\n"));
+      return true;
+    }
+
+    // /work add <prompt> [--agent <name>] [--priority <n>]
+    if (args.startsWith("add ")) {
+      let prompt = args.slice(4).trim();
+      let agent: string | undefined;
+      let priority: number | undefined;
+
+      const agentMatch = prompt.match(/--agent\s+(\w+)/);
+      if (agentMatch) {
+        agent = agentMatch[1];
+        prompt = prompt.replace(agentMatch[0], "").trim();
+      }
+      const priorityMatch = prompt.match(/--priority\s+(\d+)/);
+      if (priorityMatch) {
+        priority = parseInt(priorityMatch[1], 10);
+        prompt = prompt.replace(priorityMatch[0], "").trim();
+      }
+
+      if (!prompt) {
+        await message.reply("Usage: `/work add <prompt> [--agent <name>] [--priority <n>]`");
+        return true;
+      }
+
+      const id = enqueueManual({ channelId, prompt, agent, priority });
+      await message.reply(`Enqueued: \`${id}\`\nPrompt: ${prompt.slice(0, 100)}${prompt.length > 100 ? "..." : ""}`);
+      return true;
+    }
+
+    // /work list [pending|running|all]
+    if (args === "list" || args.startsWith("list ")) {
+      const filter = args.slice(4).trim() || "pending";
+      let items: WorkItem[];
+      if (filter === "running") {
+        items = getRunningWork();
+      } else if (filter === "all") {
+        items = getRecentWork(20);
+      } else {
+        items = getPendingWork();
+      }
+
+      if (items.length === 0) {
+        await message.reply(`No ${filter} work items.`);
+        return true;
+      }
+
+      const lines = items.slice(0, 15).map((item) => {
+        const age = Math.round((Date.now() - new Date(item.created_at).getTime()) / 60000);
+        return `\`${item.id}\` [${item.status}] P${item.priority} (${item.source}) ${age}m ago — ${item.prompt.slice(0, 60)}...`;
+      });
+      await message.reply(`**Work Queue — ${filter}** (${items.length} items)\n${lines.join("\n")}`);
+      return true;
+    }
+
+    // /work cancel <id>
+    if (args.startsWith("cancel ")) {
+      const id = args.slice(7).trim();
+      if (cancelWorkItem(id)) {
+        await message.reply(`Cancelled: \`${id}\``);
+      } else {
+        await message.reply(`Could not cancel \`${id}\` (not found or already done).`);
+      }
+      return true;
+    }
+
+    // /work config
+    if (args === "config") {
+      const config = getWorkQueueConfig();
+      await message.reply([
+        "**Work Queue Config**",
+        `Max concurrent: ${config.maxConcurrent}`,
+        `Active hours: ${config.activeHoursStart}:00-${config.activeHoursEnd}:00`,
+        `Dispatch interval: ${config.dispatchIntervalMs / 1000}s`,
+      ].join("\n"));
+      return true;
+    }
+
+    // /work set <key> <value>
+    if (args.startsWith("set ")) {
+      const parts = args.slice(4).trim().split(/\s+/);
+      const key = parts[0];
+      const value = parts[1];
+
+      if (key === "concurrent" && value) {
+        setMaxConcurrent(parseInt(value, 10));
+        await message.reply(`Max concurrent set to ${value}`);
+        return true;
+      }
+      if (key === "hours" && value) {
+        const [start, end] = value.split("-").map(Number);
+        if (!isNaN(start) && !isNaN(end)) {
+          setActiveHours(start, end);
+          await message.reply(`Active hours set to ${start}:00-${end}:00`);
+          return true;
+        }
+      }
+      await message.reply("Usage: `/work set concurrent <n>` or `/work set hours <start>-<end>`");
+      return true;
+    }
+
+    // /work ideas — show proposed ideas awaiting approval
+    if (args === "ideas") {
+      const proposals = getProposedWork();
+      if (proposals.length === 0) {
+        await message.reply("No project ideas pending approval. Use `/work ideate` to generate some.");
+        return true;
+      }
+
+      const lines = proposals.map((p) => {
+        const meta = parseMetadata(p);
+        const age = Math.round((Date.now() - new Date(p.created_at).getTime()) / 3600000);
+        return `**${meta.title || "Untitled"}** [${meta.category || "?"}] (${meta.estimatedEffort || "?"}) — ${age}h ago\n> ${(meta.rationale || "").slice(0, 150)}\n\`/work approve ${p.id}\` · \`/work reject ${p.id}\``;
+      });
+      await message.reply(`**Project Ideas** (${proposals.length} awaiting approval)\n\n${lines.join("\n\n")}`);
+      return true;
+    }
+
+    // /work ideate — trigger idea generation now
+    if (args === "ideate") {
+      const id = enqueueIdeation({ channelId });
+      if (id) {
+        await message.reply(`Ideation task enqueued: \`${id}\`. Ideas will appear when the researcher finishes.`);
+      } else {
+        await message.reply("Skipped — already have enough proposals pending. Review them with `/work ideas`.");
+      }
+      return true;
+    }
+
+    // /work approve <id>
+    if (args.startsWith("approve ")) {
+      const id = args.slice(8).trim();
+      if (approveProposal(id)) {
+        const item = getWorkItem(id);
+        const meta = item ? parseMetadata(item) : {};
+        await message.reply(`Approved: **${meta.title || id}** — now in queue for execution.`);
+      } else {
+        await message.reply(`Could not approve \`${id}\` — not found or not in proposed state.`);
+      }
+      return true;
+    }
+
+    // /work reject <id>
+    if (args.startsWith("reject ")) {
+      const id = args.slice(7).trim();
+      if (rejectProposal(id)) {
+        await message.reply(`Rejected: \`${id}\``);
+      } else {
+        await message.reply(`Could not reject \`${id}\` — not found or not in proposed state.`);
+      }
+      return true;
+    }
+
+    await message.reply("Unknown /work subcommand. Try `/work`, `/work add`, `/work list`, `/work cancel`, `/work config`, `/work set`, `/work ideas`, `/work ideate`, `/work approve`, `/work reject`.");
     return true;
   }
 
@@ -1444,6 +1708,12 @@ async function drainNotifications(): Promise<void> {
           continue;
         }
 
+        // Check if this notification carries work-queue directives
+        const workId = checkNotificationForWork(notif, targetChannel.id);
+        if (workId) {
+          console.log(`[NOTIFY] Enqueued work ${workId} from '${task}' notification`);
+        }
+
         // Pick embed color by task type
         const color = task.includes("fail") || task.includes("error") ? 0xED4245
           : task.includes("reminder") || task.includes("assignment") ? 0xFEE75C
@@ -1543,6 +1813,153 @@ client.on("clientReady", async () => {
       console.error(`[WORKTREE] Periodic cleanup error: ${err.message}`);
     }
   }, 30 * 60 * 1000);
+
+  // ─── Autonomous Work Queue ───────────────────────────────────────────
+  recoverStuckWork();
+  const wqPruned = pruneOldWork(7);
+  if (wqPruned > 0) console.log(`[WORK-QUEUE] Pruned ${wqPruned} old items`);
+
+  onWorkDispatched(async (item, taskId) => {
+    try {
+      const ch = client.channels.cache.get(item.channel_id) as TextChannel | undefined;
+      if (ch) {
+        const meta = parseMetadata(item);
+        const label = meta.project ? `[${meta.project}]` : `[${item.source}]`;
+        await ch.send(`**[Auto]** ${label} Starting: ${item.prompt.slice(0, 150)}${item.prompt.length > 150 ? "..." : ""}\n*Priority: ${item.priority}*`);
+      }
+    } catch (err: any) {
+      console.error(`[WORK-QUEUE] Dispatch notification error: ${err.message}`);
+    }
+  });
+
+  // Pre-dispatch interceptor for parallel spawns (lattice)
+  setPreDispatchInterceptor(async (item) => {
+    if (item.prompt !== "[LATTICE_PARALLEL_SPAWN]") return false;
+
+    try {
+      const directive = buildLatticeDirective();
+      const groupId = await spawnParallelGroup({
+        channelId: item.channel_id,
+        directive: { agents: directive.agents, tasks: directive.tasks },
+      });
+
+      updateWorkItem(item.id, {
+        status: "running",
+        started_at: new Date().toISOString(),
+        metadata: JSON.stringify({
+          ...parseMetadata(item),
+          parallelGroupId: groupId,
+        }),
+      });
+
+      const ch = client.channels.cache.get(item.channel_id) as TextChannel | undefined;
+      if (ch) {
+        const features = [...directive.tasks.values()].map(t => {
+          const match = t.match(/YOUR SPECIFIC TASK:\n(.+)/);
+          return match ? match[1].slice(0, 60) : "creative feature";
+        });
+        await ch.send(
+          `**[Auto] [lattice]** Spawned 4 parallel builders (group \`${groupId}\`)\n` +
+          features.map((f, i) => `• builder-${i + 1}: ${f}...`).join("\n")
+        );
+      }
+
+      console.log(`[WORK-QUEUE] Lattice parallel spawn: group ${groupId}, 4 builders`);
+      return true;
+    } catch (err: any) {
+      console.error(`[WORK-QUEUE] Lattice parallel spawn failed: ${err.message}`);
+      updateWorkItem(item.id, { status: "failed", last_error: err.message });
+      return true; // Handled (even if failed) — don't try normal dispatch
+    }
+  });
+
+  startDispatcher();
+  const wqStats = getWorkStats();
+  console.log(`[WORK-QUEUE] Ready: ${wqStats.pending} pending, ${wqStats.gated} gated, ${wqStats.running} running`);
+
+  // Periodic work queue maintenance (every 30 min)
+  setInterval(() => {
+    try {
+      const recovered = recoverStuckWork();
+      const pruned = pruneOldWork(7);
+      if (recovered > 0 || pruned > 0) {
+        console.log(`[WORK-QUEUE] Maintenance: recovered=${recovered}, pruned=${pruned}`);
+      }
+    } catch (err: any) {
+      console.error(`[WORK-QUEUE] Maintenance error: ${err.message}`);
+    }
+  }, 30 * 60 * 1000);
+
+  // Periodic ideation — generate project ideas every 12 hours
+  // Uses the first text channel in the guild (or "general") as the ideation channel
+  const IDEATION_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
+  setInterval(() => {
+    try {
+      // Find a suitable channel for ideation output
+      for (const guild of client.guilds.cache.values()) {
+        const ch = guild.channels.cache.find(
+          (c) => c.name === "general" && c.isTextBased() && c.type === ChannelType.GuildText
+        ) as TextChannel | undefined;
+        if (ch) {
+          enqueueIdeation({ channelId: ch.id });
+          break;
+        }
+      }
+    } catch (err: any) {
+      console.error(`[IDEATION] Periodic trigger error: ${err.message}`);
+    }
+  }, IDEATION_INTERVAL_MS);
+  console.log(`[IDEATION] Periodic ideation enabled (every 12h)`);
+
+  // ─── Continuous Project Iteration ──────────────────────────────────────
+  // Mento: every 3.5 hours, works on harness/auto-dev branch, never pushes to main
+  const MENTO_INTERVAL_MS = 3.5 * 60 * 60 * 1000;
+  // Lead-gen: every 1 hour, no paid tools (Brightdata blocked)
+  const LEAD_GEN_INTERVAL_MS = 1 * 60 * 60 * 1000;
+
+  // Helper to resolve a project's Discord channel
+  function resolveProjectChannel(channelName: string): TextChannel | null {
+    for (const guild of client.guilds.cache.values()) {
+      const ch = guild.channels.cache.find(
+        (c) => c.name === channelName && c.isTextBased() && c.type === ChannelType.GuildText
+      ) as TextChannel | undefined;
+      if (ch) return ch;
+    }
+    return null;
+  }
+
+  setInterval(() => {
+    try {
+      const ch = resolveProjectChannel("mento");
+      if (ch) enqueueMentoIteration(ch.id);
+    } catch (err: any) {
+      console.error(`[PROJECT-ITER] Mento trigger error: ${err.message}`);
+    }
+  }, MENTO_INTERVAL_MS);
+
+  setInterval(() => {
+    try {
+      const ch = resolveProjectChannel("lead-gen-pipeline");
+      if (ch) enqueueLeadGenIteration(ch.id);
+    } catch (err: any) {
+      console.error(`[PROJECT-ITER] Lead-gen trigger error: ${err.message}`);
+    }
+  }, LEAD_GEN_INTERVAL_MS);
+
+  // Lattice: every 4 hours, 4 parallel builders via tmux + worktrees
+  const LATTICE_INTERVAL_MS = 4 * 60 * 60 * 1000;
+  setInterval(() => {
+    try {
+      const ch = resolveProjectChannel("lattice");
+      if (ch) enqueueLatticeIteration(ch.id);
+    } catch (err: any) {
+      console.error(`[PROJECT-ITER] Lattice trigger error: ${err.message}`);
+    }
+  }, LATTICE_INTERVAL_MS);
+
+  console.log(`[PROJECT-ITER] Mento iteration enabled (every ${MENTO_INTERVAL_MS / 3600000}h)`);
+  console.log(`[PROJECT-ITER] Lead-gen iteration enabled (every ${LEAD_GEN_INTERVAL_MS / 3600000}h)`);
+  console.log(`[PROJECT-ITER] Lattice parallel iteration enabled (every ${LATTICE_INTERVAL_MS / 3600000}h, 4 builders)`);
 
   // Handle parallel group completions — feed results back to orchestrator
   onGroupComplete(async (groupId, status) => {
