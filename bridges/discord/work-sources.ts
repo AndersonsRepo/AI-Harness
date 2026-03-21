@@ -355,6 +355,89 @@ export function enqueueLeadGenIteration(channelId: string): string {
   });
 }
 
+// ─── AI Hackathon Iteration (per-project) ────────────────────────────────
+
+const AYTM_ITERATION_PROMPT = `You are autonomously iterating on the Aytm x Neo Smart Living hackathon submission.
+
+**Project Context:**
+- Path: ~/Desktop/ai-hackathon/aytm-pipeline/ (Python + Streamlit, existing prototype)
+- Reference docs: ~/Desktop/ai-hackathon/docs/ (PDFs: Neo Smart Living background, STAMP paper, survey)
+- Full plan: vault/shared/project-knowledge/ai-hackathon-execution-plan.md
+- Project knowledge: vault/shared/project-knowledge/ai-hackathon.md
+- Repo: AndersonsRepo/aytm-market-research
+- Event date: April 16, 2026 — TIME SENSITIVE
+
+**Challenge: Aytm x Neo Smart Living ($2K prize)**
+Simulated market research pipeline. Uses GPT-4.1-mini + Gemini 2.5 Flash + Claude Sonnet 4 via OpenRouter.
+6 stages: Client Discovery → Simulated Interviews → Survey Design → Survey Responses → Analysis Dashboard → Validation.
+
+**What to Work On (pick ONE per iteration):**
+1. If dirs are empty/minimal, scaffold project structure and get basic pipeline running
+2. Implement multi-turn interview follow-ups, enhance combined dashboard
+3. Improve persona diversity, add response validation, bias detection module
+4. Add cross-model statistical validation (KS tests, confidence intervals)
+5. Polish dashboards, write demo scripts, prepare presentation materials
+
+**Rules:**
+- Work on a dev branch, never push to main.
+- Commit changes with descriptive messages.
+- Cost awareness — use free/cheap APIs (OpenRouter ~$0.05/run, local models).
+- Test with generate_test_data.py / generate_test_interviews.py before using API.
+- Write a brief summary of what you did at the end.`;
+
+const IA_WEST_ITERATION_PROMPT = `You are autonomously iterating on the IA West Smart Match hackathon submission.
+
+**Project Context:**
+- Path: ~/Desktop/ai-hackathon/ia-west-smart-match/ (Python + Streamlit)
+- Reference docs: ~/Desktop/ai-hackathon/docs/
+- Full plan: vault/shared/project-knowledge/ai-hackathon-execution-plan.md
+- Project knowledge: vault/shared/project-knowledge/ai-hackathon.md
+- Repo: AndersonsRepo/ia-west-smart-match
+- Event date: April 16, 2026 — TIME SENSITIVE
+
+**Challenge: IA West Smart Match ($2K prize)**
+AI-powered CRM matching industry speakers (19 IA West board members) to university events at CPP.
+4 modules: Supply Side (speakers) → Demand Side (events) → Matching Engine → Member Journey Pipeline.
+
+**What to Work On (pick ONE per iteration):**
+1. If dirs are empty/minimal, scaffold project structure and get basic pipeline running
+2. Enhance matching engine (TF-IDF bigrams, experience bonus, geographic scoring)
+3. Improve web UI for speaker profiles, event calendar, match results
+4. Build pipeline tracker with realistic conversion rates
+5. Polish dashboards, write demo scripts, prepare presentation materials
+
+**Rules:**
+- Work on a dev branch, never push to main.
+- Commit changes with descriptive messages.
+- Cost awareness — use free/cheap APIs (OpenRouter ~$0.05/run, local models).
+- Write a brief summary of what you did at the end.`;
+
+export function enqueueAytmIteration(channelId: string): string {
+  return enqueue({
+    source: "project-iteration",
+    sourceId: `aytm-iter:${new Date().toISOString().slice(0, 13)}`,
+    channelId,
+    prompt: AYTM_ITERATION_PROMPT,
+    agent: "builder",
+    priority: 30,
+    metadata: { project: "aytm-market-research", iterationType: "continuous" },
+    maxAttempts: 1,
+  });
+}
+
+export function enqueueIaWestIteration(channelId: string): string {
+  return enqueue({
+    source: "project-iteration",
+    sourceId: `iawest-iter:${new Date().toISOString().slice(0, 13)}`,
+    channelId,
+    prompt: IA_WEST_ITERATION_PROMPT,
+    agent: "builder",
+    priority: 30,
+    metadata: { project: "ia-west-smart-match", iterationType: "continuous" },
+    maxAttempts: 1,
+  });
+}
+
 // ─── Lattice Parallel Iteration ──────────────────────────────────────────
 
 /**

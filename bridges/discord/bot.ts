@@ -133,6 +133,8 @@ import {
   enqueueMentoIteration,
   enqueueLeadGenIteration,
   enqueueLatticeIteration,
+  enqueueAytmIteration,
+  enqueueIaWestIteration,
   buildLatticeDirective,
 } from "./work-sources.js";
 import {
@@ -1920,8 +1922,10 @@ client.on("clientReady", async () => {
   // Helper to resolve a project's Discord channel
   function resolveProjectChannel(channelName: string): TextChannel | null {
     for (const guild of client.guilds.cache.values()) {
+      // Check both exact name and proj- prefixed name (createProject adds prefix)
       const ch = guild.channels.cache.find(
-        (c) => c.name === channelName && c.isTextBased() && c.type === ChannelType.GuildText
+        (c) => (c.name === channelName || c.name === `proj-${channelName}`) &&
+          c.isTextBased() && c.type === ChannelType.GuildText
       ) as TextChannel | undefined;
       if (ch) return ch;
     }
@@ -1946,20 +1950,38 @@ client.on("clientReady", async () => {
     }
   }, LEAD_GEN_INTERVAL_MS);
 
-  // Lattice: every 4 hours, 4 parallel builders via tmux + worktrees
-  const LATTICE_INTERVAL_MS = 4 * 60 * 60 * 1000;
+  // Lattice: disabled — using heartbeat task (6h, active hours only) to conserve credits
+  // const LATTICE_INTERVAL_MS = 4 * 60 * 60 * 1000;
+  // setInterval(() => {
+  //   try {
+  //     const ch = resolveProjectChannel("lattice");
+  //     if (ch) enqueueLatticeIteration(ch.id);
+  //   } catch (err: any) {
+  //     console.error(`[PROJECT-ITER] Lattice trigger error: ${err.message}`);
+  //   }
+  // }, LATTICE_INTERVAL_MS);
+
+  // Hackathon: every 4 hours, iterate on each project independently (time-sensitive: April 16)
+  const HACKATHON_INTERVAL_MS = 4 * 60 * 60 * 1000;
   setInterval(() => {
     try {
-      const ch = resolveProjectChannel("lattice");
-      if (ch) enqueueLatticeIteration(ch.id);
+      const aytmCh = resolveProjectChannel("aytm-research");
+      if (aytmCh) enqueueAytmIteration(aytmCh.id);
     } catch (err: any) {
-      console.error(`[PROJECT-ITER] Lattice trigger error: ${err.message}`);
+      console.error(`[PROJECT-ITER] Aytm trigger error: ${err.message}`);
     }
-  }, LATTICE_INTERVAL_MS);
+    try {
+      const iaWestCh = resolveProjectChannel("ia-west-match");
+      if (iaWestCh) enqueueIaWestIteration(iaWestCh.id);
+    } catch (err: any) {
+      console.error(`[PROJECT-ITER] IA West trigger error: ${err.message}`);
+    }
+  }, HACKATHON_INTERVAL_MS);
 
   console.log(`[PROJECT-ITER] Mento iteration enabled (every ${MENTO_INTERVAL_MS / 3600000}h)`);
   console.log(`[PROJECT-ITER] Lead-gen iteration enabled (every ${LEAD_GEN_INTERVAL_MS / 3600000}h)`);
-  console.log(`[PROJECT-ITER] Lattice parallel iteration enabled (every ${LATTICE_INTERVAL_MS / 3600000}h, 4 builders)`);
+  console.log(`[PROJECT-ITER] Lattice parallel iteration disabled (using heartbeat task instead)`);
+  console.log(`[PROJECT-ITER] Hackathon iteration enabled: aytm-research + ia-west-match (every ${HACKATHON_INTERVAL_MS / 3600000}h)`);
 
   // Handle parallel group completions — feed results back to orchestrator
   onGroupComplete(async (groupId, status) => {
@@ -2130,6 +2152,51 @@ client.on("clientReady", async () => {
     }
   }
 
+  // Ensure separate hackathon project channels exist (1 per project)
+  // NOTE: createProject() prefixes channel names with "proj-", so check for that
+  // Ensure separate hackathon project channels exist (1 per project)
+  // Guard: check both Discord cache AND SQLite DB before creating
+  const hackathonProjects = [
+    { name: "aytm-research", desc: "Aytm x Neo Smart Living — simulated market research pipeline. CPP AI Hackathon 2026 ($2K prize). April 16, 2026." },
+    { name: "ia-west-match", desc: "IA West Smart Match — AI-powered speaker-event CRM. CPP AI Hackathon 2026 ($2K prize). April 16, 2026." },
+  ];
+  for (const guild of client.guilds.cache.values()) {
+    for (const hp of hackathonProjects) {
+      try {
+        // Check Discord cache for existing channel
+        const existingCh = guild.channels.cache.find(
+          (c) => c.name === `proj-${hp.name}` && c.type === ChannelType.GuildText
+        );
+        // Check SQLite DB for existing project record
+        const existingDb = getDb().prepare(
+          "SELECT name FROM projects WHERE name = ?"
+        ).get(hp.name);
+        if (!existingCh && !existingDb) {
+          const proj = await createProject(
+            guild, hp.name, hp.desc,
+            ["orchestrator", "researcher", "builder", "reviewer", "ops"]
+          );
+          console.log(`[HACKATHON] Created #proj-${hp.name} channel (${proj.channelId}) in ${guild.name}`);
+        }
+      } catch (err: any) {
+        console.error(`[HACKATHON] Failed to create ${hp.name} channel: ${err.message}`);
+      }
+    }
+
+    // One-time cleanup: delete old duplicate hackathon channels
+    const staleNames = ["ai-hackathon", "proj-ai-hackathon", "aytm-research", "ia-west-match"];
+    for (const ch of guild.channels.cache.values()) {
+      if (ch.type === ChannelType.GuildText && staleNames.includes(ch.name)) {
+        try {
+          await ch.delete("Replaced by #proj-aytm-research and #proj-ia-west-match");
+          console.log(`[HACKATHON] Deleted stale channel #${ch.name} (${ch.id})`);
+        } catch (err: any) {
+          console.error(`[HACKATHON] Failed to delete #${ch.name}: ${err.message}`);
+        }
+      }
+    }
+  }
+
   // Start notification drain polling (keep as-is)
   setInterval(drainNotifications, NOTIFY_POLL_MS);
   console.log(`[NOTIFY] Polling every ${NOTIFY_POLL_MS / 1000}s`);
@@ -2159,6 +2226,13 @@ client.on("messageCreate", async (message: Message) => {
   }
 
   const content = message.content.trim();
+
+  // Fast-path: /restart bypasses everything — no attachment download, no queue check
+  if (content === "/restart") {
+    await message.reply("Restarting bot... (launchd will bring it back in ~30s)");
+    setTimeout(() => process.exit(75), 500);
+    return;
+  }
 
   // Download ALL attachments (images, PDFs, files) so Claude can read them
   let attachmentPaths: string[] = [];
