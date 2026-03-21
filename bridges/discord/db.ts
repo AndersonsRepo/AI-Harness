@@ -68,6 +68,12 @@ function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(4);
     console.log("[DB] Applied schema v4 (parallel tasks)");
   }
+
+  if (version < 5) {
+    applyV5(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(5);
+    console.log("[DB] Applied schema v5 (worktrees)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -267,6 +273,30 @@ function applyV4(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_parallel_group ON parallel_tasks(group_id);
     CREATE INDEX IF NOT EXISTS idx_parallel_status ON parallel_tasks(status);
     CREATE INDEX IF NOT EXISTS idx_parallel_channel ON parallel_tasks(channel_id);
+  `);
+}
+
+function applyV5(database: Database.Database): void {
+  database.exec(`
+    -- Git worktree tracking for parallel agent isolation
+    CREATE TABLE IF NOT EXISTS worktrees (
+      id            TEXT PRIMARY KEY,
+      project_name  TEXT NOT NULL,
+      project_path  TEXT NOT NULL,
+      worktree_path TEXT NOT NULL UNIQUE,
+      branch_name   TEXT NOT NULL UNIQUE,
+      group_id      TEXT,
+      chain_id      TEXT,
+      channel_id    TEXT NOT NULL,
+      status        TEXT NOT NULL CHECK (status IN ('active','merging','merged','failed','orphaned')),
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at  TEXT,
+      merge_result  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status);
+    CREATE INDEX IF NOT EXISTS idx_worktrees_group ON worktrees(group_id);
+    CREATE INDEX IF NOT EXISTS idx_worktrees_chain ON worktrees(chain_id);
+    CREATE INDEX IF NOT EXISTS idx_worktrees_project ON worktrees(project_name);
   `);
 }
 

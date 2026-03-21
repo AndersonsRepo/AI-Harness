@@ -15,6 +15,7 @@ import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { assembleContext } from "./context-assembler.js";
 import { monitor } from "./truncation-monitor.js";
 import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
+import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, isGitRepo } from "./worktree-manager.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -216,7 +217,8 @@ export async function executeHandoff(
   toAgent: string,
   handoffMessage: string,
   preHandoffText: string,
-  chainContext?: { completedPhases: ChainEntry[]; currentTask: string }
+  chainContext?: { completedPhases: ChainEntry[]; currentTask: string },
+  worktreePath?: string | null,
 ): Promise<HandoffResult | null> {
   const project = getProject(channel.id);
   if (!project) return null;
@@ -335,8 +337,8 @@ export async function executeHandoff(
     ...args,
   ];
 
-  // Resolve project working directory (passed via env to claude-runner.py)
-  const projectCwd = project ? resolveProjectWorkdir(project.name) : null;
+  // Resolve project working directory — prefer worktree if provided
+  const projectCwd = worktreePath || (project ? resolveProjectWorkdir(project.name) : null);
 
   return new Promise((resolve) => {
     const proc = spawn("python3", pythonArgs, {
@@ -467,14 +469,34 @@ export async function runHandoffChain(
   let handoff = parseHandoff(initialResponse);
   let fromAgent = initialAgent;
 
+  // Lazy worktree creation — created on first handoff to a writer agent
+  const chainId = `chain-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  let chainWorktreePath: string | null = null;
+  let chainWorktreeId: string | null = null;
+
   while (handoff) {
+    // Create worktree lazily on first handoff to a writer
+    if (!chainWorktreePath && needsWorktree([handoff.targetAgent])) {
+      const project = getProject(channel.id);
+      const projectCwd = project ? resolveProjectWorkdir(project.name) : null;
+      if (projectCwd && isGitRepo(projectCwd)) {
+        const wt = createWorktree(projectCwd, project!.name, chainId, channel.id, { chainId });
+        if (wt) {
+          chainWorktreePath = wt.worktree_path;
+          chainWorktreeId = wt.id;
+          console.log(`[HANDOFF] Worktree created for chain ${chainId}: ${chainWorktreePath}`);
+        }
+      }
+    }
+
     const result = await executeHandoff(
       channel,
       fromAgent,
       handoff.targetAgent,
       handoff.message,
       handoff.preHandoffText,
-      { completedPhases: chainEntries, currentTask: handoff.message }
+      { completedPhases: chainEntries, currentTask: handoff.message },
+      chainWorktreePath,
     );
 
     if (!result) break; // Chain ended (error, depth limit, or invalid agent)
@@ -535,7 +557,9 @@ export async function runHandoffChain(
         finalAgent,
         reviewerAgent,
         reviewPrompt,
-        "" // no pre-handoff text
+        "", // no pre-handoff text
+        undefined,
+        chainWorktreePath,
       );
 
       if (reviewResult) {
@@ -556,6 +580,13 @@ export async function runHandoffChain(
         }
       }
     }
+  }
+
+  // Merge and clean up worktree if one was created
+  if (chainWorktreeId) {
+    const mergeResult = mergeWorktree(chainWorktreeId);
+    console.log(`[HANDOFF] Worktree merge for chain ${chainId}: ${mergeResult.status} — ${mergeResult.details}`);
+    removeWorktree(chainWorktreeId);
   }
 
   return { entries: chainEntries, originAgent };
