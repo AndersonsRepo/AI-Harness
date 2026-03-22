@@ -448,13 +448,15 @@ function buildWorkQueueSection(): string | null {
 
     const parts: string[] = [`${total} work queue item(s): ${Object.entries(counts).map(([s, c]) => `${c} ${s}`).join(", ")}`];
 
-    // Show next few pending items
+    // Show next few pending items (source + priority only — never inject raw prompts
+    // into agent context, as they can be confused with user instructions)
     const pending = db.prepare(
-      "SELECT source, prompt, priority FROM work_queue WHERE status = 'pending' ORDER BY priority DESC, created_at ASC LIMIT 3"
-    ).all() as { source: string; prompt: string; priority: number }[];
+      "SELECT source, priority, agent FROM work_queue WHERE status = 'pending' ORDER BY priority DESC, created_at ASC LIMIT 3"
+    ).all() as { source: string; priority: number; agent: string | null }[];
 
     for (const item of pending) {
-      parts.push(`Next: [P${item.priority}] (${item.source}) ${item.prompt.slice(0, 60)}`);
+      const agent = item.agent ? ` → ${item.agent}` : "";
+      parts.push(`Queued: [P${item.priority}] ${item.source}${agent}`);
     }
 
     return `## Work Queue\n${parts.map((p) => `- ${p}`).join("\n")}`;
