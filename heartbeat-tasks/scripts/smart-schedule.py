@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Smart scheduling heartbeat — detects calendar gaps, suggests study blocks.
+"""Smart scheduling heartbeat — detects calendar gaps, suggests study blocks, scans inbox.
 
 Runs every 3h during active hours (07:00-23:00).
 1. Reads today + tomorrow events from Calendar.app via osascript
 2. Finds free blocks of 1h+
 3. Cross-references with Canvas assignments due within 3 days
-4. Writes suggestions to pending-notifications.jsonl → #calendar
+4. Scans recent emails for deadlines, events, and action items
+5. Writes suggestions to pending-notifications.jsonl → #calendar
 """
 
 import os
 import sys
 import json
+import re
+import sqlite3
 import subprocess
 import datetime
 from pathlib import Path
@@ -35,6 +38,100 @@ if os.path.exists(_env_path):
                     os.environ[_key] = _val
 
 ICAL_URL = os.environ.get("CANVAS_ICAL_URL", "")
+DB_PATH = os.path.join(HARNESS_ROOT, "bridges", "discord", "harness.db")
+
+# Email event detection keywords grouped by category
+EMAIL_CATEGORIES = {
+    "career": ["interview", "career fair", "career", "recruiter", "hiring", "job offer", "internship"],
+    "deadline": ["deadline", "due", "submit", "submission", "overdue", "final notice", "last day"],
+    "event": ["hackathon", "workshop", "meeting", "orientation", "seminar", "register",
+              "registration", "conference", "webinar", "info session", "rsvp"],
+}
+
+
+def scan_email_events(days: int = 7) -> dict[str, list[dict]]:
+    """Query email_index for recent emails with date/event keywords.
+
+    Returns a dict keyed by category ('career', 'deadline', 'event') with
+    lists of matching email dicts (subject, sender, date, category).
+    """
+    if not os.path.exists(DB_PATH):
+        print(f"DB not found at {DB_PATH}, skipping email scan")
+        return {}
+
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).isoformat()
+
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT subject, sender, snippet, date FROM email_index "
+            "WHERE date >= ? ORDER BY date DESC",
+            (cutoff,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"Email scan DB error: {e}")
+        return {}
+
+    print(f"Scanning {len(rows)} emails from the last {days} days")
+
+    # Build a combined pattern per category for efficient matching
+    category_patterns = {}
+    for cat, keywords in EMAIL_CATEGORIES.items():
+        pattern = re.compile("|".join(re.escape(kw) for kw in keywords), re.IGNORECASE)
+        category_patterns[cat] = pattern
+
+    results: dict[str, list[dict]] = {"career": [], "deadline": [], "event": []}
+
+    for row in rows:
+        searchable = f"{row['subject'] or ''} {row['snippet'] or ''}"
+        for cat, pattern in category_patterns.items():
+            if pattern.search(searchable):
+                results[cat].append({
+                    "subject": row["subject"] or "(no subject)",
+                    "sender": row["sender"] or "unknown",
+                    "date": row["date"],
+                })
+                break  # One category per email, first match wins
+
+    for cat in results:
+        results[cat] = results[cat][:5]  # Limit to 5 per category
+
+    total = sum(len(v) for v in results.values())
+    print(f"Found {total} email events (career={len(results['career'])}, "
+          f"deadline={len(results['deadline'])}, event={len(results['event'])})")
+    return results
+
+
+def suggest_study_blocks(
+    assignments: list[dict],
+    free_blocks: list[dict],
+) -> list[str]:
+    """For each upcoming assignment, suggest a free block to work on it."""
+    suggestions = []
+    used_blocks = set()
+
+    for a in assignments:
+        for i, b in enumerate(free_blocks):
+            if i in used_blocks:
+                continue
+            # Only suggest blocks before the assignment is due and at least 60 min
+            if b["end"] <= a["due"] and b["minutes"] >= 60:
+                time_str = (
+                    f"{b['start'].strftime('%a %I:%M %p')} — "
+                    f"{b['end'].strftime('%I:%M %p')}"
+                )
+                suggestions.append(
+                    f"  Consider using {time_str} ({b['minutes']} min) "
+                    f"to work on **{a['summary']}**"
+                )
+                used_blocks.add(i)
+                break  # One suggestion per assignment
+
+    return suggestions
 
 
 def notify(channel: str, message: str):
@@ -245,6 +342,12 @@ def main():
     assignments = get_upcoming_assignments(days=3)
     print(f"Found {len(assignments)} upcoming assignments (next 3 days)")
 
+    # Scan emails for deadlines and events
+    email_events = scan_email_events(days=7)
+
+    # Combine all free blocks for study suggestions
+    all_blocks = today_blocks + tomorrow_blocks
+
     # Build notification
     parts = []
 
@@ -270,6 +373,30 @@ def main():
             due_str = a["due"].strftime("%a %b %d, %I:%M %p") if a["due"].hour > 0 else a["due"].strftime("%a %b %d")
             assignment_lines.append(f"  {a['summary']} — due {due_str}")
         parts.append(f"**Upcoming assignments (next 3 days):**\n" + "\n".join(assignment_lines))
+
+        # Suggest study blocks for assignments
+        if all_blocks:
+            suggestions = suggest_study_blocks(assignments, all_blocks)
+            if suggestions:
+                parts.append(f"**Study block suggestions:**\n" + "\n".join(suggestions))
+
+    # Email-sourced action items (deadlines + career)
+    action_emails = email_events.get("deadline", []) + email_events.get("career", [])
+    if action_emails:
+        action_lines = []
+        for e in action_emails[:5]:
+            sender_short = e["sender"].split("<")[0].strip() or e["sender"]
+            action_lines.append(f"  {e['subject']} — from {sender_short}")
+        parts.append(f"**From your inbox — Action items:**\n" + "\n".join(action_lines))
+
+    # Email-sourced events (workshops, hackathons, etc.)
+    event_emails = email_events.get("event", [])
+    if event_emails:
+        event_lines = []
+        for e in event_emails[:5]:
+            sender_short = e["sender"].split("<")[0].strip() or e["sender"]
+            event_lines.append(f"  {e['subject']} — from {sender_short}")
+        parts.append(f"**From your inbox — Events:**\n" + "\n".join(event_lines))
 
     if not parts:
         print("No schedule suggestions to report")

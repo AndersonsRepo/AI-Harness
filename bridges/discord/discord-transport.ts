@@ -860,7 +860,7 @@ export class DiscordTransport implements TransportAdapter {
             : task.includes("goodnotes") || task.includes("notes") ? 0x57F287
             : task.includes("deploy") ? 0x5865F2
             : task.includes("linkedin") ? 0x0A66C2
-            : task.includes("email") || task.includes("outlook") || task.includes("calendar") ? 0x0078D4
+            : task.includes("email") || task.includes("emails") || task.includes("calendar") ? 0x0078D4
             : 0x2B2D31;
 
           await this.sendEmbed(channelId, {
@@ -910,7 +910,7 @@ export class DiscordTransport implements TransportAdapter {
         const schoolChannels = [
           { name: "calendar", topic: "Canvas iCal feed — assignments, events, and due dates" },
           { name: "goodnotes", topic: "GoodNotes PDF export notifications" },
-          { name: "outlook", topic: "Outlook email alerts, calendar notifications, watched sender alerts" },
+          { name: "emails", topic: "Email alerts, calendar notifications, watched sender alerts" },
         ];
         for (const sc of schoolChannels) {
           const existing = guild.channels.cache.find(

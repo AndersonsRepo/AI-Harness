@@ -177,7 +177,7 @@ These rules are hard-won from debugging. Violating any of them will cause silent
 
 Heartbeat scripts write to `pending-notifications.jsonl`. The bot's `drainNotifications()` reads the `"channel"` field and resolves it by name against Discord guild channels. **Each script's `notify()` function must set the correct channel name** — the `discord_channel` field in heartbeat JSON configs is metadata only, not used by the drain logic.
 
-Channel mapping: goodnotes-watch → `goodnotes`, assignment-reminder → `calendar`, deploy-monitor → `notifications`, repo-scanner → `notifications`, email-monitor → `outlook`, calendar-sync → `calendar`, cs2600-watch → `systems-programming`, notes-ingest → per-course channel (numerical-methods, philosophy, systems-programming, comp-society), code-review → `notifications`, lead-gen-pipeline → `notifications`.
+Channel mapping: goodnotes-watch → `goodnotes`, assignment-reminder → `calendar`, deploy-monitor → `notifications`, repo-scanner → `notifications`, email-monitor → `emails`, calendar-sync → `calendar`, cs2600-watch → `systems-programming`, notes-ingest → per-course channel (numerical-methods, philosophy, systems-programming, comp-society), code-review → `notifications`, lead-gen-pipeline → `notifications`.
 
 ### GitHub Webhooks
 
@@ -394,7 +394,7 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 **Tools**: `outlook_emails` (search indexed + live), `outlook_email_read` (full email by ID), `outlook_calendar` (calendar view with school tagging), `outlook_senders` (watched sender CRUD), `outlook_summary` (structured digest for context injection).
 
 **Heartbeat Scripts**:
-- `email-monitor.py` (15m) — indexes new emails, checks watched senders, matches projects, alerts to `#outlook`
+- `email-monitor.py` (15m) — indexes new emails, checks watched senders, matches projects, alerts to `#emails`
 - `calendar-sync.py` (2h) — syncs 48h calendar window, notifies upcoming 24h events, school events to `#calendar`
 
 **Context Injection**: `recentOutlook` section in `context-assembler.ts` (priority 5, 800 chars) — last 24h email summary (by sender, unread count), watched sender alerts. Always-on for every agent.
@@ -462,7 +462,7 @@ On bot startup, `bot.ts` ensures these channels exist:
 **School Category**:
 - `#calendar` — Canvas iCal feed (assignments, events, due dates)
 - `#goodnotes` — GoodNotes PDF export notifications
-- `#outlook` — Outlook email alerts, calendar notifications
+- `#emails` — Email alerts, calendar notifications
 - `#numerical-methods` — Numerical Methods course (education agent auto-assigned)
 - `#philosophy` — Intro to Philosophy course (education agent auto-assigned)
 - `#systems-programming` — Systems Programming CS 2600 (education agent auto-assigned)

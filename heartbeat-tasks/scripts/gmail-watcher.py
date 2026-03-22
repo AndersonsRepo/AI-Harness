@@ -157,7 +157,7 @@ def gmail_api(endpoint, token, params=None):
         return None
 
 
-def notify(summary, channel="outlook"):
+def notify(summary, channel="emails"):
     """Write a notification for the Discord bot to pick up."""
     entry = {
         "task": "gmail-watcher",
@@ -173,9 +173,16 @@ def main():
     state = load_state()
     token = get_access_token()
 
-    # Fetch recent messages (last 15 minutes worth, max 20)
-    query = "newer_than:1h"
-    result = gmail_api("messages", token, {"q": query, "maxResults": 20})
+    # First run: backfill last 30 days. Subsequent runs: last 24h (covers missed runs/gaps).
+    is_first_run = state.get("total_emails_indexed", 0) < 20
+    if is_first_run:
+        query = "newer_than:30d"
+        max_results = 200
+        print("First run detected — backfilling last 30 days")
+    else:
+        query = "newer_than:1d"
+        max_results = 50
+    result = gmail_api("messages", token, {"q": query, "maxResults": max_results})
 
     if not result or "messages" not in result:
         print("No new messages")
@@ -239,18 +246,17 @@ def main():
 
     db.commit()
 
-    # Check watched senders
+    # Check watched senders against newly indexed emails (no extra API calls)
     watched = db.execute("SELECT email, label, discord_channel FROM watched_senders").fetchall()
-    for msg_stub in messages:
-        msg_id = msg_stub["id"]
-        msg_data = gmail_api(f"messages/{msg_id}", token, {"format": "metadata", "metadataHeaders": "From"})
-        if not msg_data:
-            continue
-        headers = {h["name"].lower(): h["value"] for h in msg_data.get("payload", {}).get("headers", [])}
-        from_header = headers.get("from", "")
-        for w_email, w_label, w_channel in watched:
-            if w_email.lower() in from_header.lower():
-                notify(f"**{w_label}** sent an email: {headers.get('subject', '(no subject)')}", w_channel)
+    if watched and new_count > 0:
+        recent = db.execute(
+            "SELECT sender_email, sender_name, subject FROM email_index ORDER BY indexed_at DESC LIMIT ?",
+            (new_count,),
+        ).fetchall()
+        for sender_email, sender_name, subject in recent:
+            for w_email, w_label, w_channel in watched:
+                if w_email.lower() in sender_email.lower():
+                    notify(f"**{w_label}** sent an email: {subject}", w_channel or "emails")
 
     db.close()
 

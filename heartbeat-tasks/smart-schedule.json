@@ -7,7 +7,7 @@
   "enabled": true,
   "notify": "discord",
   "discord_channel": "calendar",
-  "timeout": 60,
+  "timeout": 90,
   "activeHours": {
     "start": "07:00",
     "end": "23:00"

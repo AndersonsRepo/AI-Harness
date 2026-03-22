@@ -1722,7 +1722,7 @@ async function drainNotifications(): Promise<void> {
           : task.includes("goodnotes") || task.includes("notes") ? 0x57F287
           : task.includes("deploy") ? 0x5865F2
           : task.includes("linkedin") ? 0x0A66C2
-          : task.includes("email") || task.includes("outlook") || task.includes("calendar") ? 0x0078D4
+          : task.includes("email") || task.includes("emails") || task.includes("calendar") ? 0x0078D4
           : 0x2B2D31;
 
         const embed = new EmbedBuilder()
@@ -2087,19 +2087,27 @@ client.on("clientReady", async () => {
         });
         console.log(`[SCHOOL] Created #goodnotes channel in ${guild.name}`);
       }
-      // Outlook email alerts channel under School
-      const outlookCh = guild.channels.cache.find(
+      // Email alerts channel under School (renamed from #outlook → #emails)
+      const oldOutlookCh = guild.channels.cache.find(
         (c) => c.name === "outlook" && c.parentId === schoolCat!.id
       );
-      if (!outlookCh) {
+      if (oldOutlookCh && "setName" in oldOutlookCh) {
+        await (oldOutlookCh as any).setName("emails", "Renamed: #outlook → #emails (now pulling from Gmail)");
+        await (oldOutlookCh as any).setTopic("Email alerts, calendar notifications, watched sender alerts");
+        console.log(`[SCHOOL] Renamed #outlook → #emails in ${guild.name}`);
+      }
+      const emailsCh = guild.channels.cache.find(
+        (c) => c.name === "emails" && c.parentId === schoolCat!.id
+      );
+      if (!emailsCh && !oldOutlookCh) {
         await guild.channels.create({
-          name: "outlook",
+          name: "emails",
           type: ChannelType.GuildText,
           parent: schoolCat.id,
-          topic: "Outlook email alerts, calendar notifications, watched sender alerts",
-          reason: "AI Harness Outlook integration",
+          topic: "Email alerts, calendar notifications, watched sender alerts",
+          reason: "AI Harness email integration",
         });
-        console.log(`[SCHOOL] Created #outlook channel in ${guild.name}`);
+        console.log(`[SCHOOL] Created #emails channel in ${guild.name}`);
       }
       // Per-course channels under School
       const courseChannels = [

@@ -6,6 +6,6 @@
   "schedule": "2h",
   "enabled": false,
   "notify": "discord",
-  "discord_channel": "outlook",
+  "discord_channel": "emails",
   "timeout": 60
 }

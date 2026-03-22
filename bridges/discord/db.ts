@@ -86,6 +86,12 @@ function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(7);
     console.log("[DB] Applied schema v7 (work queue ideation)");
   }
+
+  if (version < 8) {
+    applyV8(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(8);
+    console.log("[DB] Applied schema v8 (tracked events)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -215,7 +221,7 @@ function applyV2(database: Database.Database): void {
     CREATE TABLE IF NOT EXISTS watched_senders (
       email           TEXT PRIMARY KEY,
       label           TEXT NOT NULL,
-      discord_channel TEXT NOT NULL DEFAULT 'outlook',
+      discord_channel TEXT NOT NULL DEFAULT 'emails',
       project         TEXT,
       added_at        TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -380,6 +386,36 @@ function applyV7(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_work_queue_source ON work_queue(source);
     CREATE INDEX IF NOT EXISTS idx_work_queue_channel ON work_queue(channel_id);
     CREATE INDEX IF NOT EXISTS idx_work_queue_scheduled ON work_queue(scheduled_at);
+  `);
+}
+
+function applyV8(database: Database.Database): void {
+  database.exec(`
+    -- Tracked events: persistent store for opportunities, deadlines, and events
+    -- discovered from emails, calendar, Canvas, or manual entry
+    CREATE TABLE IF NOT EXISTS tracked_events (
+      id              TEXT PRIMARY KEY,
+      source          TEXT NOT NULL CHECK (source IN ('email','calendar','canvas','manual')),
+      source_id       TEXT,
+      category        TEXT NOT NULL CHECK (category IN ('internship','career','deadline','event','assignment','meeting','other')),
+      title           TEXT NOT NULL,
+      description     TEXT,
+      event_date      TEXT,
+      due_date        TEXT,
+      location        TEXT,
+      apply_link      TEXT,
+      contact_name    TEXT,
+      contact_email   TEXT,
+      organization    TEXT,
+      status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','upcoming','expired','applied','dismissed')),
+      notified        INTEGER NOT NULL DEFAULT 0,
+      discovered_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_tracked_events_category ON tracked_events(category);
+    CREATE INDEX IF NOT EXISTS idx_tracked_events_status ON tracked_events(status);
+    CREATE INDEX IF NOT EXISTS idx_tracked_events_due ON tracked_events(due_date);
+    CREATE INDEX IF NOT EXISTS idx_tracked_events_source ON tracked_events(source);
   `);
 }
 
