@@ -1,16 +1,11 @@
 {
   "name": "learning-pruner",
-  "prompt": "Scan all files in vault/learnings/ and read their YAML frontmatter. Find entries where: (1) last-seen is older than 90 days from today, AND (2) status is 'new' or 'resolved' (NOT 'promoted' \u2014 never archive promoted learnings). For each qualifying entry: update the status field in the YAML frontmatter to 'archived'. Report how many entries were archived. Do NOT delete any files \u2014 only change the status field.",
-  "interval_minutes": 10080,
+  "description": "Archive stale/duplicate vault learnings to reduce context bloat",
+  "type": "script",
+  "script": "learning-pruner.py",
+  "schedule": "24h",
+  "enabled": true,
   "notify": "discord",
   "discord_channel": "notifications",
-  "allowed_tools": [
-    "Read",
-    "Write",
-    "Glob",
-    "Grep"
-  ],
-  "enabled": true,
-  "timeout": 300,
-  "created": "2026-03-10T00:00:00"
+  "timeout": 60
 }

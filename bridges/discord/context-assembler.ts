@@ -28,15 +28,15 @@ const PROJECT_KNOWLEDGE_DIR = join(SHARED_DIR, "project-knowledge");
 const HEARTBEAT_DIR = join(HARNESS_ROOT, "heartbeat-tasks");
 const NOTIFICATIONS_FILE = join(HEARTBEAT_DIR, "pending-notifications.jsonl");
 
-// Token budget: ~4000-5000 tokens. Cost is negligible on Max subscription.
+// Token budget: ~5000-6000 tokens. Cost is negligible on Max subscription.
 // Learnings get the lion's share — that's the whole point of the system.
-const MAX_TOTAL_CHARS = 20000; // ~5000 tokens
+const MAX_TOTAL_CHARS = 25000; // ~6000 tokens
 const COURSE_NOTES_DIR = join(SHARED_DIR, "course-notes");
 
 const SECTION_LIMITS: Record<string, number> = {
   project: 600,
   channelState: 400,
-  learnings: 8000,
+  learnings: 12000,
   projectKnowledge: 3000,
   taskHistory: 1200,
   recentOutlook: 800,
@@ -257,7 +257,7 @@ async function buildLearningsSection(prompt: string, keywords: string[]): Promis
   // Try hybrid search (semantic + keyword) first, fall back to keyword-only
   let results: SearchResult[] = [];
   try {
-    results = await hybridSearch(prompt, keywords, 5);
+    results = await hybridSearch(prompt, keywords, 10);
   } catch {
     // Ollama unavailable — fall back to keyword-only via old searchVault
     const entries = searchVault(keywords, 5);
@@ -290,7 +290,7 @@ async function buildLearningsSection(prompt: string, keywords: string[]): Promis
     if (body && body.length > 40) {
       // Include the full learning content, monitored truncation per entry
       lines.push(`### [${fileName}]${matchTag} (score: ${r.score.toFixed(2)})`);
-      lines.push(monitor.truncate(body, 1200, "context:learnings"));
+      lines.push(monitor.truncate(body, 1500, "context:learnings"));
     } else {
       lines.push(`- [${fileName}] ${r.text.slice(0, 200)}${matchTag}`);
     }
