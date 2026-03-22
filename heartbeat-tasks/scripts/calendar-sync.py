@@ -34,7 +34,7 @@ SCHOOL_KEYWORDS = [
 ]
 
 
-def notify(message, channel="outlook"):
+def notify(message, channel="emails"):
     notification = {
         "task": "calendar-sync",
         "channel": channel,
@@ -138,7 +138,7 @@ def main():
 
         # Determine channel
         school = is_school_event(subject, organizer)
-        channel = "calendar" if school else "outlook"
+        channel = "calendar" if school else "emails"
 
         notify(msg, channel=channel)
         notified_ids.add(event_id)

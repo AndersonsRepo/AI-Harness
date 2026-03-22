@@ -41,7 +41,7 @@ def get_db():
     return conn
 
 
-def notify(message, channel="outlook"):
+def notify(message, channel="emails"):
     notification = {
         "task": "email-monitor",
         "channel": channel,

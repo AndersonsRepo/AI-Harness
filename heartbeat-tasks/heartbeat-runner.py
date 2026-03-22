@@ -300,8 +300,10 @@ def main():
 
     try:
         run_task(task_name)
-    except Exception:
-        # Never crash — log the error
+    except BaseException:
+        # Catch everything including SystemExit/KeyboardInterrupt — never let
+        # an unexpected exit code reach launchd. Exit code 78 (EX_CONFIG) tells
+        # launchd to permanently stop scheduling the job.
         log(task_name, f"UNHANDLED ERROR:\n{traceback.format_exc()}")
         # Still try to update state
         try:
@@ -316,4 +318,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException:
+        # Last-resort guard: ensure we NEVER exit with code 78 (EX_CONFIG)
+        # which causes launchd to permanently stop scheduling this job.
+        # Exit 1 (generic failure) is safe — launchd will re-schedule.
+        sys.exit(1)

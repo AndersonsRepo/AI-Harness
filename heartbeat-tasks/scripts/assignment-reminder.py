@@ -439,6 +439,9 @@ def main():
         print(f"  → Routed {len(course_events)} events to #{course_info['channel']}")
 
     # --- 3. Quiz detection + study guide ---
+    # Cap LLM calls to avoid timeout (each can take 30-45s)
+    MAX_LLM_CALLS = 3
+    llm_calls_remaining = MAX_LLM_CALLS
     today = datetime.datetime.now().date()
     for ev in events:
         if not ev["is_quiz"] or not ev["course_info"]:
@@ -454,7 +457,12 @@ def main():
             print(f"  Study guide already sent for: {ev['name']}")
             continue
 
+        if llm_calls_remaining <= 0:
+            print(f"  Skipping study guide for {ev['name']} — LLM call budget exhausted")
+            continue
+
         print(f"  Generating study guide for: {ev['name']} ({days_until} days away)")
+        llm_calls_remaining -= 1
         guide = generate_study_guide(ev, ev["course_info"])
         if guide:
             guide_msg = (
@@ -482,7 +490,12 @@ def main():
         if not ev["description"]:
             continue
 
+        if llm_calls_remaining <= 0:
+            print(f"  Skipping homework help for {ev['name']} — LLM call budget exhausted")
+            continue
+
         print(f"  Generating homework help for: {ev['name']} ({days_until} days away)")
+        llm_calls_remaining -= 1
         help_text = generate_homework_help(ev, ev["course_info"])
         if help_text:
             help_msg = (

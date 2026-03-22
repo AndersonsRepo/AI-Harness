@@ -614,7 +614,9 @@ class _Scheduler:
                 continue
 
             pid = int(pid_str) if pid_str != "-" else None
-            exit_code = int(exit_str) if exit_str != "-" else None
+            raw_exit = int(exit_str) if exit_str != "-" else None
+            # launchctl reports raw waitpid() status — normal exit code is (status >> 8)
+            exit_code = (raw_exit >> 8) if raw_exit is not None and raw_exit > 255 else raw_exit
             state = "running" if pid else ("stale" if exit_code == 78 else "loaded")
             tasks.append(TaskStatus(
                 label=label, loaded=True, pid=pid,
