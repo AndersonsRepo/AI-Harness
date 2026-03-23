@@ -161,6 +161,9 @@ Discord user → bot.ts (queue + command dispatch)
 | `heartbeat-tasks/scripts/learning-compressor.py` | LLM-compress verbose vault entries to 150-250 char summaries |
 | `heartbeat-tasks/scripts/graph-linker.py` | Build knowledge graph edges between vault entries (tag overlap, area match, supersession) |
 | `heartbeat-tasks/scripts/morning-briefing.py` | Comprehensive morning intelligence: calendar + Canvas + email + tracked events + LLM synthesis |
+| `.claude/teams/*.md` | Agent Teams presets: feature-implementation, code-review, debugging, research, infrastructure |
+| `.claude/skills/self-improve/scripts/teammate_idle.py` | Agent Teams hook: idle detection + Discord notification |
+| `.claude/skills/self-improve/scripts/task_completed.py` | Agent Teams hook: quality gate + Discord notification |
 
 ### Critical: Claude CLI Spawning Rules
 
@@ -311,6 +314,54 @@ Run `HARNESS_ROOT=/path/to/AI-Harness npx tsx bridges/discord/test-upgrade.ts` t
 - **Temporal decay**: Embedding search scores decay with a 30-day half-life (`score × e^(-λ × age)`). Files under `shared/` and `agents/` are exempt (evergreen).
 - **Pre-compaction flush**: A `Stop` hook runs `session-debrief.py` when a Claude Code conversation ends, capturing learnings before context is lost.
 
+### Agent Teams (Interactive CLI)
+
+Agent Teams is Claude Code's native multi-agent coordination feature. It is **enabled for this project** and works when using Claude Code interactively (NOT via the Discord bot's headless `claude -p` spawning).
+
+**Enabled via**: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `.claude/settings.json`
+
+**How it works**:
+- One Claude Code session acts as team lead (typically orchestrator)
+- Team lead spawns teammates that work independently with their own context windows
+- Teammates can message each other directly (not just report to lead)
+- Shared task list with dependency management and self-claiming
+- Display modes: `Shift+Down` to cycle teammates (in-process), or tmux split panes
+
+**Relationship to Discord bot orchestration**:
+
+| Feature | Agent Teams (CLI) | Discord Bot |
+|---------|-------------------|-------------|
+| Trigger | Interactive terminal | Discord message |
+| Coordination | Native task list + messaging | `[HANDOFF:]` / `[PARALLEL:]` directives |
+| Context | Each teammate has own window | Context assembled per spawn by `context-assembler.ts` |
+| Review gate | Via task dependencies | Deterministic `REVIEW_GATE` in `handoff-router.ts` |
+| Parallel work | Native (teammates run simultaneously) | tmux orchestrator (`tmux-orchestrator.ts`) |
+| Communication | Teammates message each other directly | Agents only see chain history |
+
+**Team presets** in `.claude/teams/`:
+- `feature-implementation` — research → build → review → debrief
+- `code-review` — research → review → synthesize
+- `debugging` — diagnose → fix → verify (or competing hypotheses variant)
+- `research` — decompose → parallel investigate → synthesize
+- `infrastructure` — audit → implement → verify → health check
+
+**Quality gate hooks** (`.claude/settings.json`):
+- `TeammateIdle` → `teammate_idle.py` — detects stalled teammates (30s warn, 120s suggest reassignment), notifies `#agent-stream`
+- `TaskCompleted` → `task_completed.py` — checks for TODO markers, empty catch blocks, placeholder text; notifies `#agent-stream`
+
+**Agent behavior**: Each `.claude/agents/*.md` file has an "Agent Teams Mode" section describing behavior as team lead (orchestrator) or teammate (all others). Same agent files serve both Agent Teams and Discord bot — mode-specific sections are clearly scoped.
+
+**Key files**:
+
+| File | Purpose |
+|------|---------|
+| `.claude/settings.json` | Feature flag + TeammateIdle/TaskCompleted hooks |
+| `.claude/agents/orchestrator.md` | Team lead behavior: planning, delegation, quality gates |
+| `.claude/agents/{builder,researcher,reviewer,ops}.md` | Teammate behavior sections |
+| `.claude/teams/*.md` | Team composition presets for common workflows |
+| `.claude/skills/self-improve/scripts/teammate_idle.py` | Idle detection hook |
+| `.claude/skills/self-improve/scripts/task_completed.py` | Quality gate hook |
+
 ---
 
 ## Skills System (v2)
@@ -352,9 +403,11 @@ Skills are Claude Code's mechanism for reusable, structured capabilities. Each s
 ### Hook Scripts (Global)
 
 Hooks live in `.claude/settings.json` (NOT skill-scoped) because they must fire on every interaction:
-- `UserPromptSubmit` → `.claude/skills/self-improve/scripts/activator.sh` (detects corrections, feature requests)
-- `PostToolUse[Bash]` → `.claude/skills/self-improve/scripts/error-detector.sh` (detects command failures)
-- `Stop` → `.claude/skills/self-improve/scripts/session-flush.sh` (pre-compaction knowledge capture)
+- `UserPromptSubmit` → `.claude/skills/self-improve/scripts/activator.py` (detects corrections, feature requests)
+- `PostToolUse[Bash]` → `.claude/skills/self-improve/scripts/error_detector.py` (detects command failures)
+- `Stop` → `.claude/skills/self-improve/scripts/session_flush.py` (pre-compaction knowledge capture)
+- `TeammateIdle` → `.claude/skills/self-improve/scripts/teammate_idle.py` (Agent Teams: detects stalled teammates)
+- `TaskCompleted` → `.claude/skills/self-improve/scripts/task_completed.py` (Agent Teams: quality gate on task completion)
 
 ### Creating New Skills
 

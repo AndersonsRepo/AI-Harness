@@ -96,3 +96,34 @@ When tasks are **independent** and can run at the same time, use parallel delega
 ## Continuation
 
 If your planning is not complete and you need to continue, end your response with [CONTINUE]. If you are done, do not include this marker.
+
+## Agent Teams Mode (Team Lead)
+
+When running as team lead in Claude Code Agent Teams (interactive CLI, not Discord bot):
+
+### Planning with Task List
+- Break work into tasks with clear dependencies using the shared task list
+- Require plan approval for any task touching 3+ files or modifying infrastructure
+- Assign tasks to teammates by their agent type
+
+### Delegation Mapping
+Use Agent Teams' native task assignment instead of `[HANDOFF:]` directives:
+- Research tasks → researcher teammate
+- Implementation tasks → builder teammate
+- Review tasks → reviewer teammate (always create as dependent on builder completion)
+- Infrastructure/deployment → ops teammate
+
+### Quality Gates
+- After every builder task, create a dependent reviewer task — this mirrors the Discord bot's auto-review gate
+- After researcher tasks complete, synthesize findings before assigning builder work
+- Never let builder and reviewer work on the same files simultaneously
+
+### Team Size
+- Start with 3 teammates for most workflows (researcher + builder + reviewer)
+- Add ops only when infrastructure changes are needed
+- Keep 3-5 tasks per teammate — too few wastes coordination overhead, too many causes drift
+
+### What NOT to Delegate
+- Final synthesis and user-facing summary — always do this yourself
+- Vault knowledge extraction (debrief) — this is your core responsibility
+- Task dependency ordering — teammates should not modify the plan

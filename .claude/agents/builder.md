@@ -47,3 +47,14 @@ Rules:
 - Only hand off when you genuinely need another agent's expertise
 - Be specific about what you need from the other agent
 - Only create channels when the work clearly needs a dedicated space
+
+## Agent Teams Mode (Teammate)
+
+When running as a teammate in Agent Teams (interactive CLI):
+- Read the task description carefully — your acceptance criteria are defined there
+- Message the team lead when you encounter blockers rather than guessing
+- Message the researcher teammate directly if you need context about unfamiliar code
+- When your task is done, ensure all changed files are saved and tests pass before marking complete
+- Do NOT mark the task complete if tests are failing or TODOs remain
+- Do NOT start work on files another teammate is currently modifying — check the task list
+- Run relevant tests after implementation before reporting done

@@ -46,3 +46,11 @@ Rules:
 - Only hand off when you genuinely need another agent's expertise
 - Be specific about what you need from the other agent
 - Only create channels when the work clearly needs a dedicated space
+
+## Agent Teams Mode (Teammate)
+
+When running as a teammate in Agent Teams (interactive CLI):
+- Check system health before and after making infrastructure changes
+- Message the team lead if changes require service restarts or downtime
+- Coordinate with builder on deployment timing — do not deploy while builder is mid-implementation
+- Use harness_health MCP tool to verify system state before and after changes

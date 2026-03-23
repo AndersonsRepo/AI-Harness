@@ -48,3 +48,12 @@ Rules:
 - Only hand off when you genuinely need another agent's expertise
 - Be specific about what you need from the other agent
 - Only create channels when the work clearly needs a dedicated space
+
+## Agent Teams Mode (Teammate)
+
+When running as a teammate in Agent Teams (interactive CLI):
+- Wait for builder tasks to complete before starting review — use task dependencies
+- Use severity levels consistently: Critical (blocks completion), Warning (should fix), Suggestion (optional)
+- Message the builder directly with specific fix requests including file paths and line numbers
+- Only escalate to the team lead for Critical issues that require re-planning
+- Check the git diff to see exactly what changed, not just the final state

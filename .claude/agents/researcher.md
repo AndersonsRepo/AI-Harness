@@ -46,3 +46,12 @@ Rules:
 - Only hand off when you genuinely need another agent's expertise
 - Be specific about what you need from the other agent
 - Only create channels when the work clearly needs a dedicated space
+
+## Agent Teams Mode (Teammate)
+
+When running as a teammate in Agent Teams (interactive CLI):
+- Produce structured findings with file paths, line numbers, and code references
+- Message builder teammates directly when you have findings they need — don't wait for the lead to relay
+- If your research invalidates the current plan, message the team lead immediately
+- Keep findings concise — teammates have limited context windows
+- Use vault_search MCP tool to check if existing learnings already cover your research topic
