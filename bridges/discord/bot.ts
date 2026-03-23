@@ -360,7 +360,9 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
           "SELECT * FROM work_queue WHERE task_id = ? AND source = 'ideation-gen' LIMIT 1"
         ).get(taskId) as WorkItem | undefined;
         if (wqItem) {
+          console.log(`[IDEATION] Processing output for ${taskId} (${response.length} chars)`);
           const proposalIds = processIdeationOutput(response, wqItem.channel_id);
+          console.log(`[IDEATION] processIdeationOutput returned ${proposalIds.length} proposals`);
           if (proposalIds.length > 0) {
             const ch = client.channels.cache.get(wqItem.channel_id) as TextChannel | undefined;
             if (ch) {
