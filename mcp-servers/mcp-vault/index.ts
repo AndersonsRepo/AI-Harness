@@ -21,6 +21,7 @@ import {
   mkdirSync,
 } from "fs";
 import { join, basename } from "path";
+import Database from "better-sqlite3";
 
 // ─── Configuration ───────────────────────────────────────────────────
 
@@ -511,6 +512,112 @@ server.tool(
     ];
 
     return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+  }
+);
+
+// ─── Tool: vault_graph ────────────────────────────────────────────────
+
+server.tool(
+  "vault_graph",
+  "Query the knowledge graph for a learning's relationships. Returns edges (neighbors, relationship types, weights) for a given learning ID.",
+  {
+    learning_id: z.string().describe("The ID of the learning to query (e.g., LRN-20260322-097)"),
+    depth: z.number().optional().default(1).describe("How many hops to traverse (1 = direct neighbors, 2 = neighbors of neighbors)"),
+  },
+  async ({ learning_id, depth }) => {
+    const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
+    const dbPath = join(HARNESS_ROOT, "bridges", "discord", "harness.db");
+
+    if (!existsSync(dbPath)) {
+      return { content: [{ type: "text" as const, text: `Database not found at ${dbPath}. Is HARNESS_ROOT set correctly?` }] };
+    }
+
+    let db: Database.Database;
+    try {
+      db = new Database(dbPath, { readonly: true });
+      db.pragma("busy_timeout = 5000");
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Failed to open database: ${err.message}` }] };
+    }
+
+    try {
+      // Verify the learning_edges table exists
+      const tableCheck = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='learning_edges'"
+      ).get() as { name: string } | undefined;
+
+      if (!tableCheck) {
+        db.close();
+        return { content: [{ type: "text" as const, text: "The learning_edges table does not exist in the database." }] };
+      }
+
+      // Depth 1: direct edges for the given learning_id
+      const edgeQuery = db.prepare(
+        "SELECT source_id, target_id, relation, weight FROM learning_edges WHERE source_id = ? OR target_id = ?"
+      );
+
+      interface EdgeRow {
+        source_id: string;
+        target_id: string;
+        relation: string;
+        weight: number;
+      }
+
+      const directEdges = edgeQuery.all(learning_id, learning_id) as EdgeRow[];
+
+      // Collect direct neighbors
+      const neighborsSet = new Set<string>();
+      for (const edge of directEdges) {
+        if (edge.source_id !== learning_id) neighborsSet.add(edge.source_id);
+        if (edge.target_id !== learning_id) neighborsSet.add(edge.target_id);
+      }
+
+      let allEdges = [...directEdges];
+
+      // Depth 2: edges connected to first-hop neighbors
+      if (depth >= 2 && neighborsSet.size > 0) {
+        const neighborIds = Array.from(neighborsSet);
+        // Query edges for each neighbor, avoiding duplicates
+        const edgeSet = new Set(
+          directEdges.map((e) => `${e.source_id}|${e.target_id}|${e.relation}`)
+        );
+
+        for (const neighborId of neighborIds) {
+          const secondHop = edgeQuery.all(neighborId, neighborId) as EdgeRow[];
+          for (const edge of secondHop) {
+            const key = `${edge.source_id}|${edge.target_id}|${edge.relation}`;
+            if (!edgeSet.has(key)) {
+              edgeSet.add(key);
+              allEdges.push(edge);
+              // Also collect second-hop neighbors
+              if (edge.source_id !== neighborId) neighborsSet.add(edge.source_id);
+              if (edge.target_id !== neighborId) neighborsSet.add(edge.target_id);
+            }
+          }
+        }
+      }
+
+      // Remove the center node from neighbors list
+      neighborsSet.delete(learning_id);
+
+      db.close();
+
+      const result = {
+        center: learning_id,
+        edges: allEdges.map((e) => ({
+          source: e.source_id,
+          target: e.target_id,
+          relation: e.relation,
+          weight: e.weight,
+        })),
+        neighbors: Array.from(neighborsSet),
+      };
+
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      db.close();
+      return { content: [{ type: "text" as const, text: `Error querying knowledge graph: ${err.message}` }] };
+    }
   }
 );
 

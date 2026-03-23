@@ -105,7 +105,12 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
 
     // Priority 2: Relevant learnings (hybrid: semantic + keyword)
     if (totalChars < MAX_TOTAL_CHARS) {
-      const learningsSection = await buildLearningsSection(params.prompt, keywords);
+      const learningsSection = await buildLearningsSection(params.prompt, keywords, {
+        agentName: params.agentName,
+        channelId: params.channelId,
+        taskId: params.taskId,
+        projectName: project?.name,
+      });
       if (learningsSection) {
         let finalLearnings = monitor.truncate(learningsSection, SECTION_LIMITS.learnings, "context:learnings");
 
@@ -253,7 +258,11 @@ function buildProjectSection(
   return lines.join("\n");
 }
 
-async function buildLearningsSection(prompt: string, keywords: string[]): Promise<string | null> {
+async function buildLearningsSection(
+  prompt: string,
+  keywords: string[],
+  params: { agentName: string; channelId: string; taskId: string; projectName?: string },
+): Promise<string | null> {
   // Try hybrid search (semantic + keyword) first, fall back to keyword-only
   let results: SearchResult[] = [];
   try {
@@ -269,27 +278,113 @@ async function buildLearningsSection(prompt: string, keywords: string[]): Promis
     return lines.join("\n");
   }
 
-  // Filter to results with meaningful similarity (threshold: 0.3)
-  const relevant = results.filter((r) => r.score > 0.3);
+  // --- P3: Self-RAG relevance filter ---
+  // Compute composite relevance score instead of flat threshold
+  const relevant = results
+    .map((r) => {
+      let relevance = r.score * 0.6; // Base: hybrid search score (60% weight)
+
+      // Keyword overlap boost: fraction of prompt keywords found in result text
+      const resultText = r.text.toLowerCase();
+      const keywordHits = keywords.filter((k) => resultText.includes(k.toLowerCase())).length;
+      const keywordOverlap = keywords.length > 0 ? keywordHits / keywords.length : 0;
+      relevance += keywordOverlap * 0.2;
+
+      // Project affinity boost
+      if (params.projectName && resultText.includes(params.projectName.toLowerCase())) {
+        relevance += 0.1;
+      }
+
+      // Recency boost: files modified in last 7 days
+      try {
+        const fullPath = join(VAULT_DIR, r.path);
+        if (existsSync(fullPath)) {
+          const stat = require("fs").statSync(fullPath);
+          const ageMs = Date.now() - stat.mtimeMs;
+          if (ageMs < 7 * 86400_000) relevance += 0.1;
+        }
+      } catch {}
+
+      return { ...r, compositeScore: relevance };
+    })
+    .filter((r) => r.compositeScore > 0.25)
+    .sort((a, b) => b.compositeScore - a.compositeScore)
+    .slice(0, 8); // Fewer but higher-quality results
+
   if (relevant.length === 0) return null;
+
+  // --- P1: Log retrieval hits ---
+  logRetrievalHits(
+    relevant.map((r) => ({
+      path: r.path,
+      agent: params.agentName,
+      channelId: params.channelId,
+      taskId: params.taskId,
+      score: r.compositeScore,
+      matchType: r.matchType,
+    })),
+  );
+
+  // --- P5: Graph neighbor expansion ---
+  // For top results, pull 1-hop graph neighbors and add if not already present
+  const resultPaths = new Set(relevant.map((r) => r.path));
+  const graphNeighbors = getGraphNeighbors(
+    relevant.slice(0, 3).map((r) => r.path.split("/").pop()?.replace(".md", "") || ""),
+  );
+  for (const neighbor of graphNeighbors) {
+    const neighborPath = `learnings/${neighbor}.md`;
+    if (!resultPaths.has(neighborPath) && relevant.length < 10) {
+      // Add graph neighbor as a lightweight entry
+      const neighborFullPath = join(VAULT_DIR, neighborPath);
+      if (existsSync(neighborFullPath)) {
+        relevant.push({
+          path: neighborPath,
+          text: "",
+          score: 0.3,
+          matchType: "graph" as any,
+          compositeScore: 0.3,
+        });
+        resultPaths.add(neighborPath);
+      }
+    }
+  }
 
   const lines: string[] = ["## Relevant Knowledge"];
   for (const r of relevant) {
     const fileName = r.path.split("/").pop()?.replace(".md", "") || r.path;
-    const matchTag = r.matchType === "hybrid" ? " [hybrid]" : r.matchType === "semantic" ? " [semantic]" : "";
+    const matchTag = r.matchType === "hybrid" ? " [hybrid]"
+      : r.matchType === "semantic" ? " [semantic]"
+      : (r as any).matchType === "graph" ? " [graph]"
+      : "";
 
     // Load full file content for high-relevance results
     const fullPath = join(VAULT_DIR, r.path);
     let body = "";
+    let compressed = "";
+    let frontmatter = "";
     try {
       if (existsSync(fullPath)) {
-        body = stripFrontmatter(readFileSync(fullPath, "utf-8")).trim();
+        const rawContent = readFileSync(fullPath, "utf-8");
+        body = stripFrontmatter(rawContent).trim();
+        frontmatter = rawContent.split("---")[1] || "";
+
+        // --- P4: Prefer compressed version if available ---
+        const compressedMatch = frontmatter.match(/^compressed:\s*"?(.+?)"?\s*$/m);
+        if (compressedMatch) {
+          compressed = compressedMatch[1].trim();
+        }
+
+        // Skip superseded entries (P2)
+        if (/^status:\s*superseded/m.test(frontmatter)) continue;
       }
     } catch {}
 
-    if (body && body.length > 40) {
-      // Include the full learning content, monitored truncation per entry
-      lines.push(`### [${fileName}]${matchTag} (score: ${r.score.toFixed(2)})`);
+    if (compressed && compressed.length > 20) {
+      // Use compressed version — fits more entries in budget
+      lines.push(`### [${fileName}]${matchTag} (score: ${r.compositeScore.toFixed(2)})`);
+      lines.push(compressed);
+    } else if (body && body.length > 40) {
+      lines.push(`### [${fileName}]${matchTag} (score: ${r.compositeScore.toFixed(2)})`);
       lines.push(monitor.truncate(body, 1500, "context:learnings"));
     } else {
       lines.push(`- [${fileName}] ${r.text.slice(0, 200)}${matchTag}`);
@@ -297,6 +392,42 @@ async function buildLearningsSection(prompt: string, keywords: string[]): Promis
   }
 
   return lines.join("\n");
+}
+
+// --- P1: Retrieval hit logging ---
+function logRetrievalHits(hits: { path: string; agent: string; channelId: string; taskId: string; score: number; matchType: string }[]): void {
+  try {
+    const db = getDb();
+    const stmt = db.prepare(
+      "INSERT INTO retrieval_hits (learning_path, agent, channel_id, task_id, score, match_type) VALUES (?, ?, ?, ?, ?, ?)"
+    );
+    const insertMany = db.transaction((items: typeof hits) => {
+      for (const h of items) {
+        stmt.run(h.path, h.agent, h.channelId, h.taskId, h.score, h.matchType);
+      }
+    });
+    insertMany(hits);
+  } catch {
+    // Non-critical — don't break context assembly if logging fails
+  }
+}
+
+// --- P5: Graph neighbor expansion ---
+function getGraphNeighbors(learningIds: string[]): string[] {
+  if (learningIds.length === 0) return [];
+  try {
+    const db = getDb();
+    const placeholders = learningIds.map(() => "?").join(",");
+    const rows = db.prepare(
+      `SELECT DISTINCT CASE WHEN source_id IN (${placeholders}) THEN target_id ELSE source_id END as neighbor
+       FROM learning_edges
+       WHERE source_id IN (${placeholders}) OR target_id IN (${placeholders})
+       ORDER BY weight DESC LIMIT 3`
+    ).all(...learningIds, ...learningIds, ...learningIds) as { neighbor: string }[];
+    return rows.map((r) => r.neighbor).filter((n) => !learningIds.includes(n));
+  } catch {
+    return [];
+  }
 }
 
 function buildProjectKnowledgeSection(projectName: string): string | null {
