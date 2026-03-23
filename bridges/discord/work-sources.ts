@@ -218,6 +218,12 @@ export function enqueueIdeation(opts: {
 /**
  * Parse ideation output from the researcher and create proposals.
  * Called by the task output handler when an ideation-gen task completes.
+ *
+ * Handles multiple LLM output formats:
+ * - Pure JSON array
+ * - JSON wrapped in ```json ... ``` code blocks
+ * - JSON mixed with explanation text
+ * - Multiple JSON objects (one per idea, not wrapped in array)
  */
 export function processIdeationOutput(
   response: string,
@@ -225,19 +231,57 @@ export function processIdeationOutput(
 ): string[] {
   const ids: string[] = [];
 
+  if (!response || response.trim().length === 0) {
+    console.error(`[IDEATION] Empty response — no output to parse`);
+    notifyIdeationFailure(channelId, "Empty response from researcher agent");
+    return ids;
+  }
+
   try {
-    // Extract JSON array from response (may be wrapped in markdown code blocks)
-    let jsonStr = response;
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      jsonStr = jsonMatch[0];
+    let ideas: any[] | null = null;
+
+    // Strategy 1: Extract JSON from ```json ... ``` code block
+    const codeBlockMatch = response.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+    if (codeBlockMatch) {
+      try {
+        ideas = JSON.parse(codeBlockMatch[1]);
+      } catch { /* try next strategy */ }
     }
 
-    const ideas = JSON.parse(jsonStr);
-    if (!Array.isArray(ideas)) return ids;
+    // Strategy 2: Find the outermost JSON array in the response
+    if (!ideas) {
+      const arrayMatch = response.match(/\[[\s\S]*\]/);
+      if (arrayMatch) {
+        try {
+          ideas = JSON.parse(arrayMatch[0]);
+        } catch { /* try next strategy */ }
+      }
+    }
+
+    // Strategy 3: Find individual JSON objects with title+prompt fields
+    if (!ideas) {
+      const objectMatches = [...response.matchAll(/\{[^{}]*"title"\s*:\s*"[^"]+?"[^{}]*"prompt"\s*:\s*"[^"]*?"[^{}]*\}/g)];
+      if (objectMatches.length > 0) {
+        ideas = [];
+        for (const m of objectMatches.slice(0, 3)) {
+          try {
+            ideas.push(JSON.parse(m[0]));
+          } catch { /* skip malformed objects */ }
+        }
+      }
+    }
+
+    if (!ideas || !Array.isArray(ideas) || ideas.length === 0) {
+      console.error(`[IDEATION] Could not extract JSON ideas from response (${response.length} chars). First 500 chars: ${response.slice(0, 500)}`);
+      notifyIdeationFailure(channelId, `Could not parse JSON from researcher output (${response.length} chars)`);
+      return ids;
+    }
 
     for (const idea of ideas.slice(0, 3)) {
-      if (!idea.title || !idea.prompt) continue;
+      if (!idea.title || !idea.prompt) {
+        console.warn(`[IDEATION] Skipping idea missing title or prompt: ${JSON.stringify(idea).slice(0, 100)}`);
+        continue;
+      }
 
       const id = propose({
         channelId,
@@ -254,11 +298,29 @@ export function processIdeationOutput(
     }
 
     console.log(`[IDEATION] Created ${ids.length} proposals from ideation output`);
+    if (ids.length === 0) {
+      notifyIdeationFailure(channelId, "Parsed JSON but no valid ideas (missing title or prompt fields)");
+    }
   } catch (err: any) {
-    console.error(`[IDEATION] Failed to parse ideation output: ${err.message}`);
+    console.error(`[IDEATION] Failed to parse ideation output: ${err.message}. First 500 chars: ${response.slice(0, 500)}`);
+    notifyIdeationFailure(channelId, `Parse error: ${err.message}`);
   }
 
   return ids;
+}
+
+/** Notify Discord when ideation fails so failures aren't silent */
+function notifyIdeationFailure(channelId: string, reason: string): void {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const harnessRoot = process.env.HARNESS_ROOT || path.resolve(__dirname, "../..");
+    const notifyFile = path.join(harnessRoot, "pending-notifications.jsonl");
+    fs.appendFileSync(notifyFile, JSON.stringify({
+      channel: "agent-stream",
+      message: `[Ideation] Failed to generate proposals: ${reason}`,
+    }) + "\n");
+  } catch { /* best effort */ }
 }
 
 // ─── Continuous Project Iteration ────────────────────────────────────────
