@@ -1,0 +1,12 @@
+{
+  "name": "learning-compressor",
+  "description": "Compress verbose vault learnings into compact summaries for context injection",
+  "type": "script",
+  "script": "learning-compressor.py",
+  "schedule": "24h",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "notifications",
+  "timeout": 300,
+  "activeHours": {"start": "02:00", "end": "06:00"}
+}

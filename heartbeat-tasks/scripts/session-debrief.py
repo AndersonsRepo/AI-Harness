@@ -350,6 +350,114 @@ def bump_recurrence(entry):
         return False
 
 
+def decide_conflict_action(new_item, existing_entry, score):
+    """Decide whether a new learning should UPDATE (supersede), BUMP, or NOOP an existing entry.
+
+    Uses an LLM call to make the decision based on content comparison.
+    Falls back to BUMP if LLM fails.
+    """
+    # High similarity (>0.8) with identical pattern-key → almost certainly a duplicate → BUMP
+    if score > 0.8:
+        return "BUMP"
+
+    # For moderate similarity (0.5-0.8), ask the LLM
+    existing_body = existing_entry.get("body_preview", "")
+    new_body = new_item.get("body", "")
+
+    # Load full body if preview is short
+    if len(existing_body) < 100:
+        try:
+            with open(existing_entry["file_path"]) as f:
+                content = f.read()
+            # Extract body after frontmatter
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                existing_body = parts[2].strip()[:500]
+        except Exception:
+            pass
+
+    prompt = (
+        f"Compare these two knowledge entries and decide the action:\n\n"
+        f"EXISTING ENTRY (ID: {existing_entry.get('pattern_key', '?')}):\n"
+        f"Title: {existing_entry.get('title', '?')}\n"
+        f"Body: {existing_body}\n\n"
+        f"NEW ENTRY:\n"
+        f"Title: {new_item.get('title', '?')}\n"
+        f"Body: {new_body}\n\n"
+        f"Choose exactly one action:\n"
+        f"- UPDATE: The new entry supersedes the old one (new info, correction, or better understanding)\n"
+        f"- BUMP: Same knowledge, just confirming it's still relevant (increment recurrence)\n"
+        f"- NOOP: The new entry adds nothing — skip it entirely\n\n"
+        f"Respond with ONLY one word: UPDATE, BUMP, or NOOP"
+    )
+
+    try:
+        llm = get_provider()
+        response = llm.complete(prompt, model=get_default_model(), timeout=30, max_turns=1)
+        action = response.text.strip().upper()
+        if action in ("UPDATE", "BUMP", "NOOP"):
+            return action
+    except Exception as e:
+        print(f"  Conflict resolution LLM failed: {e}", file=sys.stderr)
+
+    return "BUMP"  # Safe fallback
+
+
+def mark_superseded(entry, new_id):
+    """Mark an existing vault entry as superseded by a new entry."""
+    fpath = entry["file_path"]
+    try:
+        with open(fpath) as f:
+            content = f.read()
+
+        # Update status
+        content = re.sub(
+            r'^(status:\s*).+$',
+            f"\\g<1>superseded",
+            content, count=1, flags=re.MULTILINE,
+        )
+
+        # Add superseded_by and superseded_at fields
+        today = datetime.date.today().isoformat()
+        # Insert after status line
+        content = re.sub(
+            r'^(status:\s*superseded)$',
+            f"\\1\nsuperseded_by: {new_id}\nsuperseded_at: {today}",
+            content, count=1, flags=re.MULTILINE,
+        )
+
+        tmp = fpath + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(content)
+        os.rename(tmp, fpath)
+
+        # Also insert a supersedes edge in the knowledge graph
+        _insert_graph_edge(new_id, entry.get("pattern_key", ""), "supersedes")
+
+        return True
+    except Exception as e:
+        print(f"  Failed to mark superseded: {fpath}: {e}", file=sys.stderr)
+        return False
+
+
+def _insert_graph_edge(source_id, target_id, relation, weight=1.0):
+    """Insert an edge into the learning_edges table."""
+    db_path = os.path.join(HARNESS_ROOT, "bridges", "discord", "harness.db")
+    if not os.path.exists(db_path):
+        return
+    try:
+        import sqlite3
+        db = sqlite3.connect(db_path)
+        db.execute(
+            "INSERT OR IGNORE INTO learning_edges (source_id, target_id, relation, weight) VALUES (?, ?, ?, ?)",
+            (source_id, target_id, relation, weight),
+        )
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
 def next_learning_id(prefix="LRN"):
     """Generate the next available learning ID for today."""
     today = datetime.date.today().strftime("%Y%m%d")
@@ -368,7 +476,7 @@ def next_learning_id(prefix="LRN"):
 
 # ─── LLM Knowledge Extraction ────────────────────────────────────────
 
-EXTRACTION_PROMPT = """You are a knowledge extraction system. Read the following conversation transcript and extract learnings worth remembering for future sessions.
+EXTRACTION_PROMPT = """You are a knowledge extraction system. Distill this conversation into actionable knowledge worth remembering for future sessions.
 
 CONVERSATION:
 {conversation}
@@ -377,28 +485,32 @@ PROJECTS DISCUSSED: {projects}
 EXISTING PATTERN KEYS (do NOT duplicate these): {existing_keys}
 EXISTING ENTRY TITLES (reuse similar pattern-keys if the concept overlaps): {existing_titles}
 
-Extract knowledge in the following categories. Only include items that are genuinely useful for future work — skip trivial observations.
+QUALITY BAR: Only extract knowledge that would change how you approach future work. Skip trivial observations, routine operations, and things obvious from reading the code. Ask: "If I encounter this situation again in 3 months, what do I wish I knew?"
 
 Respond with ONLY a JSON array. Each item must have these fields:
 - "type": "learning" or "error"
-- "title": short descriptive title
+- "title": short descriptive title (max 10 words)
 - "pattern_key": unique kebab-case identifier (check it's not in the existing keys list)
 - "area": one of "infra", "architecture", "security", "dependency-management", "ui", "api", "database", "testing", "deployment", "ai-ml"
 - "project": project name if specific to one, or "ai-harness" if general
-- "tags": array of relevant tags
-- "body": 2-4 sentence description of what was learned and why it matters
+- "tags": array of 3-5 relevant tags
+- "body": 1-2 sentences max. Format: "WHAT happened/was decided. WHY it matters / HOW to apply it." No filler, no context that's obvious from the title.
 - "severity": for errors only — "critical", "high", "medium", "low"
 - "priority": for learnings only — "critical", "medium", "low"
 
-Categories to look for:
-1. **Bugs debugged** — root cause + fix (type: error)
-2. **Architecture decisions** — what was decided and why (type: learning)
-3. **Dependency/security fixes** — what was vulnerable and how it was resolved (type: learning)
-4. **Project-specific facts** — stack quirks, API patterns, config gotchas (type: learning)
-5. **Patterns discovered** — reusable approaches that worked well (type: learning)
-6. **Gotchas** — things that fail silently or are easy to get wrong (type: error)
+What to extract:
+1. **Root causes** — Why something broke, not just that it broke (type: error)
+2. **Decisions with tradeoffs** — What was chosen AND what was rejected (type: learning)
+3. **Non-obvious gotchas** — Things that fail silently or waste time if you don't know (type: error)
+4. **Reusable patterns** — Approaches that solved a class of problems, not just one instance (type: learning)
 
-If nothing worth extracting, return an empty array: []
+What to SKIP:
+- Facts derivable from reading the code or git history
+- Routine operations (ran tests, restarted service, updated dependency)
+- Architecture that's already documented in CLAUDE.md
+- Anything where the "body" would just restate the "title"
+
+If nothing meets this bar, return an empty array: []
 
 IMPORTANT: Return ONLY valid JSON. No markdown, no explanation, just the array."""
 
@@ -438,7 +550,7 @@ def extract_knowledge_via_llm(conversation_text, projects, existing_keys, existi
 
 # ─── Write Knowledge to Vault (Deterministic) ────────────────────────
 
-def write_vault_entry(item, existing_keys):
+def write_vault_entry(item, existing_keys, supersedes=None):
     """Write a single learning/error to the vault. Returns the ID or None if skipped."""
     pattern_key = item.get("pattern_key", "")
     if not pattern_key or pattern_key in existing_keys:
@@ -477,7 +589,12 @@ def write_vault_entry(item, existing_keys):
         f"last-seen: {today}",
         f"tags: [{tags_str}]",
         "related: []",
-        "---",
+    ])
+
+    if supersedes:
+        lines.append(f"supersedes: {supersedes}")
+
+    lines.append("---")
         "",
         f"# {item.get('title', 'Untitled')}",
         "",
@@ -651,17 +768,36 @@ def process_transcript(transcript_path, existing_keys, existing_entries, dry_run
     if not items:
         return []
 
-    # 5. Write to vault — dedup against existing entries (deterministic)
+    # 5. Write to vault — dedup + conflict resolution against existing entries
     created = []
     for item in items:
         # Check for semantic similarity with existing entries
         match, score = find_similar_entry(item, existing_entries)
         if match:
-            bumped = bump_recurrence(match)
-            if bumped:
-                print(f"  Bumped: {os.path.basename(match['file_path'])} "
-                      f"(score={score:.2f}, matched '{item.get('title', '?')}')", file=sys.stderr)
+            # P2: Decide action via conflict resolution
+            action = decide_conflict_action(item, match, score)
+
+            if action == "NOOP":
+                print(f"  Skipped (NOOP): '{item.get('title', '?')}' — adds nothing to "
+                      f"'{match.get('title', '?')}' (score={score:.2f})", file=sys.stderr)
                 existing_keys.add(item.get("pattern_key", ""))
+                continue
+            elif action == "BUMP":
+                bumped = bump_recurrence(match)
+                if bumped:
+                    print(f"  Bumped: {os.path.basename(match['file_path'])} "
+                          f"(score={score:.2f}, matched '{item.get('title', '?')}')", file=sys.stderr)
+                    existing_keys.add(item.get("pattern_key", ""))
+                continue
+            elif action == "UPDATE":
+                # Write the new entry, then mark the old one as superseded
+                entry_id = write_vault_entry(item, existing_keys, supersedes=match.get("pattern_key"))
+                if entry_id:
+                    mark_superseded(match, entry_id)
+                    created.append(entry_id)
+                    existing_keys.add(item.get("pattern_key", ""))
+                    print(f"  Updated: {entry_id} supersedes {os.path.basename(match['file_path'])} "
+                          f"(score={score:.2f})", file=sys.stderr)
                 continue
 
         entry_id = write_vault_entry(item, existing_keys)

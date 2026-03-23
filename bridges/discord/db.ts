@@ -92,6 +92,18 @@ function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(8);
     console.log("[DB] Applied schema v8 (tracked events)");
   }
+
+  if (version < 9) {
+    applyV9(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(9);
+    console.log("[DB] Applied schema v9 (retrieval hits)");
+  }
+
+  if (version < 10) {
+    applyV10(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(10);
+    console.log("[DB] Applied schema v10 (learning edges)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -416,6 +428,41 @@ function applyV8(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_tracked_events_status ON tracked_events(status);
     CREATE INDEX IF NOT EXISTS idx_tracked_events_due ON tracked_events(due_date);
     CREATE INDEX IF NOT EXISTS idx_tracked_events_source ON tracked_events(source);
+  `);
+}
+
+function applyV9(database: Database.Database): void {
+  database.exec(`
+    -- Retrieval hit tracking: logs which learnings are retrieved per agent spawn
+    CREATE TABLE IF NOT EXISTS retrieval_hits (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      learning_path TEXT NOT NULL,
+      agent         TEXT,
+      channel_id    TEXT,
+      task_id       TEXT,
+      score         REAL,
+      match_type    TEXT,
+      retrieved_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_retrieval_path ON retrieval_hits(learning_path);
+    CREATE INDEX IF NOT EXISTS idx_retrieval_date ON retrieval_hits(retrieved_at);
+  `);
+}
+
+function applyV10(database: Database.Database): void {
+  database.exec(`
+    -- Learning edges: lightweight knowledge graph for relational queries
+    CREATE TABLE IF NOT EXISTS learning_edges (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_id   TEXT NOT NULL,
+      target_id   TEXT NOT NULL,
+      relation    TEXT NOT NULL CHECK (relation IN ('supersedes','related_to','contradicts','depends_on')),
+      weight      REAL NOT NULL DEFAULT 1.0,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(source_id, target_id, relation)
+    );
+    CREATE INDEX IF NOT EXISTS idx_edges_source ON learning_edges(source_id);
+    CREATE INDEX IF NOT EXISTS idx_edges_target ON learning_edges(target_id);
   `);
 }
 

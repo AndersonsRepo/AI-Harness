@@ -1,0 +1,11 @@
+{
+  "name": "graph-linker",
+  "description": "Build knowledge graph edges between related vault learnings",
+  "type": "script",
+  "script": "graph-linker.py",
+  "schedule": "24h",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "notifications",
+  "timeout": 120
+}

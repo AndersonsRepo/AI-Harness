@@ -9,12 +9,15 @@ Rules:
 3. Archive 'resolved' entries older than 7 days (fix is in the code, learning served its purpose)
 4. Never touch 'promoted' entries
 5. Deduplicate: if two entries have the same title (after normalization), archive the older one
-6. Report stats to Discord
+6. Archive entries with 0 retrieval hits in 30 days AND older than 14 days (dead weight)
+7. Report stats to Discord
 """
 
 import os
 import re
+import sys
 import json
+import sqlite3
 import datetime
 from pathlib import Path
 from collections import defaultdict
@@ -27,6 +30,7 @@ HARNESS_ROOT = os.environ.get(
 TASKS_DIR = os.path.join(HARNESS_ROOT, "heartbeat-tasks")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 VAULT_LEARNINGS = os.path.join(HARNESS_ROOT, "vault", "learnings")
+DB_PATH = os.path.join(HARNESS_ROOT, "bridges", "discord", "harness.db")
 
 
 def notify(message: str):
@@ -85,6 +89,25 @@ def normalize_title(title: str) -> str:
     title = re.sub(r"[^a-z0-9\s]", "", title)
     title = re.sub(r"\s+", " ", title)
     return title
+
+
+def get_retrieval_counts(days: int = 30) -> dict | None:
+    """Get retrieval hit counts per learning path from the last N days."""
+    if not os.path.exists(DB_PATH):
+        return None
+    try:
+        db = sqlite3.connect(DB_PATH)
+        cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).isoformat()
+        rows = db.execute(
+            "SELECT learning_path, COUNT(*) as cnt FROM retrieval_hits "
+            "WHERE retrieved_at > ? GROUP BY learning_path",
+            (cutoff,),
+        ).fetchall()
+        db.close()
+        return {r[0]: r[1] for r in rows}
+    except Exception as e:
+        print(f"Retrieval count query failed: {e}", file=sys.stderr)
+        return None
 
 
 def main():
@@ -170,7 +193,34 @@ def main():
             if update_status(dupe["_path"], dupe["status"], "archived"):
                 dedup_count += 1
 
-    total_archived = archived_count + dedup_count
+    # --- Rule 6: Zero-retrieval-hit archival ---
+    zero_hit_count = 0
+    retrieval_counts = get_retrieval_counts()
+    if retrieval_counts is not None:
+        for e in entries:
+            status = e.get("status", "")
+            if status in ("promoted", "archived", "superseded"):
+                continue
+
+            logged_str = e.get("logged", "")
+            try:
+                logged = datetime.datetime.fromisoformat(logged_str)
+            except (ValueError, TypeError):
+                continue
+
+            age_days = (now - logged).days
+            if age_days < 14:
+                continue
+
+            # Build the path as stored in retrieval_hits
+            entry_path = f"learnings/{e['_path'].name}"
+            hits = retrieval_counts.get(entry_path, 0)
+            if hits == 0:
+                if update_status(e["_path"], status, "archived"):
+                    zero_hit_count += 1
+                    reasons["0 hits >14d"] += 1
+
+    total_archived = archived_count + dedup_count + zero_hit_count
 
     # Report
     remaining = len(entries) - total_archived - by_status.get("archived", 0)

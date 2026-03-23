@@ -57,7 +57,7 @@ Every Claude invocation gets a deterministic context block injected via `--appen
 
 Priority-ordered sections (trimmed if over budget):
 1. Active project + channel config (600 chars)
-2. Relevant learnings — hybrid: semantic embeddings + keyword (8000 chars)
+2. Relevant learnings — hybrid: semantic + keyword + self-RAG relevance filter + graph neighbor expansion (12000 chars)
 3. Project-specific knowledge (3000 chars)
 4. Task history — last 5 (1200 chars)
 5. Recent Outlook — last 24h email summary, watched sender alerts (800 chars)
@@ -69,11 +69,11 @@ Priority-ordered sections (trimmed if over budget):
 
 **Semantic Search**: `bridges/discord/embeddings.ts` — Ollama + nomic-embed-text (768d, local, free). Embeddings stored in `vault/vault-embeddings.json`. Synced on bot startup and when files are written via MCP.
 
-**MCP Vault Server**: `mcp-servers/mcp-vault/` — Registered as `vault` in `~/.claude/Config/mcp-config.json`. Tools: `vault_search`, `vault_read`, `vault_write`, `vault_list`, `vault_promote_candidates`, `vault_sync_embeddings`, `vault_stats`.
+**MCP Vault Server**: `mcp-servers/mcp-vault/` — Registered as `vault` in `~/.claude/Config/mcp-config.json`. Tools: `vault_search`, `vault_read`, `vault_write`, `vault_list`, `vault_promote_candidates`, `vault_sync_embeddings`, `vault_stats`, `vault_graph`.
 
 **MCP Harness Server**: `mcp-servers/mcp-harness/` — Registered as `harness` in `~/.claude/Config/mcp-config.json`. Tools: `harness_health`, `harness_digest`, `harness_heartbeat_list`, `harness_heartbeat_toggle`, `harness_heartbeat_run`, `harness_context_preview`, `harness_skills`, `harness_agents`, `harness_truncation_report`.
 
-**Session Debrief**: `heartbeat-tasks/scripts/session-debrief.py` — Runs every 3h. Reads Claude Code transcripts (`.claude/projects/.../*.jsonl`), extracts conversation text (deterministic), sends to Claude Sonnet for knowledge extraction (non-deterministic), then writes vault entries with pattern-key dedup (deterministic). Also appends learnings to relevant `vault/shared/project-knowledge/<name>.md` files. Uses `--model sonnet` for cost efficiency.
+**Session Debrief**: `heartbeat-tasks/scripts/session-debrief.py` — Runs every 3h. Reads Claude Code transcripts (`.claude/projects/.../*.jsonl`), extracts conversation text (deterministic), sends to Claude Sonnet for knowledge extraction (non-deterministic), then writes vault entries with pattern-key dedup (deterministic). Also appends learnings to relevant `vault/shared/project-knowledge/<name>.md` files. Uses `--model sonnet` for cost efficiency. Includes **conflict resolution**: when a new learning matches an existing entry (by pattern-key or title), an LLM call decides UPDATE (overwrite), BUMP (update timestamp), or NOOP (skip). Superseded entries get `status: superseded` + `superseded_by`/`superseded_at` fields and a `supersedes` edge in `learning_edges`.
 
 **MCP Projects Server**: `mcp-servers/mcp-projects/` — Registered as `projects` in `~/.claude/Config/mcp-config.json`. Tools: `project_list`, `project_register`, `project_scan`, `project_context`, `project_remove`, `project_scan_security`. Manages the project registry (`heartbeat-tasks/projects.json`) and generates knowledge files in `vault/shared/project-knowledge/`. Security scanning delegates to `heartbeat-tasks/scripts/repo-scanner.py`.
 
@@ -100,7 +100,7 @@ Discord user → bot.ts (queue + command dispatch)
 ### Data Layer
 
 **SQLite** (`bridges/discord/harness.db`) — all bot operational state:
-- `schema_version` — migration tracking (current: v4)
+- `schema_version` — migration tracking (current: v10)
 - `sessions` — channelId → sessionId mapping (compound keys for projects: `channelId:agentName`)
 - `channel_configs` — per-channel agent/model/permission/tools settings
 - `subagents` — background task tracking (spawn, status, PID)
@@ -113,6 +113,9 @@ Discord user → bot.ts (queue + command dispatch)
 - `linkedin_posts` — draft→approve→publish flow with single-use approval tokens
 - `task_telemetry` — per-task metrics (tools, cost, duration, loops)
 - `parallel_tasks` — tmux parallel group tracking (group_id, agent, status, result, tmux_window)
+- `tracked_events` — persistent calendar/career/deadline events discovered from emails (categories: internship, career, deadline, event, assignment, meeting; fields: apply_link, contact_name, contact_email, location, organization)
+- `retrieval_hits` — per-spawn log of which vault learnings were retrieved (learning_path, agent, channel_id, task_id, score, match_type). Used by learning-pruner for zero-hit archival.
+- `learning_edges` — knowledge graph relations between vault entries (source_id, target_id, relation: supersedes/related_to/contradicts/depends_on, weight)
 - WAL journal mode for crash safety
 
 **Obsidian Vault** (`vault/`) — long-term agent knowledge/learnings. NOT operational state.
@@ -149,11 +152,15 @@ Discord user → bot.ts (queue + command dispatch)
 | `heartbeat-tasks/scripts/oauth_helper.py` | Python OAuth helper for heartbeat scripts |
 | `bridges/discord/agent-loader.ts` | Shared agent loading, tool restriction definitions |
 | `.claude/agents/*.md` | Agent personalities (orchestrator, researcher, reviewer, builder, ops, commands, project, education) |
-| `heartbeat-tasks/scripts/session-debrief.py` | Knowledge extraction from Claude Code transcripts |
+| `heartbeat-tasks/scripts/session-debrief.py` | Knowledge extraction from Claude Code transcripts + conflict resolution |
 | `heartbeat-tasks/scripts/repo-scanner.py` | Security scanning for registered projects |
 | `heartbeat-tasks/scripts/notes-ingest.py` | GoodNotes PDF → vault course notes pipeline |
-| `heartbeat-tasks/scripts/smart-schedule.py` | Calendar gap detection + Canvas assignment cross-reference |
+| `heartbeat-tasks/scripts/smart-schedule.py` | Calendar gap detection + Canvas assignment cross-reference + email event scanning |
 | `heartbeat-tasks/scripts/cs2600-watch.py` | Weekly CS 2600 website crawler |
+| `heartbeat-tasks/scripts/learning-pruner.py` | Archive stale/duplicate/zero-hit vault learnings (deterministic, no LLM) |
+| `heartbeat-tasks/scripts/learning-compressor.py` | LLM-compress verbose vault entries to 150-250 char summaries |
+| `heartbeat-tasks/scripts/graph-linker.py` | Build knowledge graph edges between vault entries (tag overlap, area match, supersession) |
+| `heartbeat-tasks/scripts/morning-briefing.py` | Comprehensive morning intelligence: calendar + Canvas + email + tracked events + LLM synthesis |
 
 ### Critical: Claude CLI Spawning Rules
 
@@ -295,6 +302,7 @@ Run `HARNESS_ROOT=/path/to/AI-Harness npx tsx bridges/discord/test-upgrade.ts` t
 - **HARNESS_ROOT required**: Always set `HARNESS_ROOT=/path/to/AI-Harness` when starting the bot. Without it, `db.ts` resolves `./bridges/discord/harness.db` relative to cwd, which fails if cwd is `bridges/discord/`.
 - **Google Drive CloudStorage latency**: `~/Library/CloudStorage/GoogleDrive-*/` is a virtual filesystem. `os.walk()` can take 60-90s with many files. Set heartbeat timeouts accordingly (goodnotes-watch uses 120s).
 - **Heartbeat auto-pause**: 3 consecutive failures auto-disables a task. Reset by setting `consecutive_failures: 0` and `enabled: true` in both the `.state.json` and task `.json` config.
+- **Superseded learnings**: Context assembler skips entries with `status: superseded`. Session-debrief sets this status during conflict resolution. Check `superseded_by` field for the replacement entry.
 - **Active hours**: Heartbeat configs can include `"activeHours": {"start": "07:00", "end": "23:00"}` to skip overnight runs. Checked by `heartbeat-runner.py` before execution.
 - **Cron scheduling**: Heartbeat configs can use `"cron": "0 8 * * 1-5"` (5-field expression) instead of `"schedule": "12h"` for exact-time scheduling. Use `heartbeat-tasks/scripts/generate-plist.py <name> --install` to generate and install the plist with `StartCalendarInterval`.
 - **API cooldown**: `task-runner.ts` tracks consecutive API failures. After 3 failures, tasks pause for 5 minutes with a Discord notification. Auto-resumes when cooldown expires.
@@ -372,7 +380,7 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 
 | Task | Schedule | Purpose |
 |------|----------|---------|
-| session-debrief | 3h | Extract learnings from Claude Code transcripts → vault |
+| session-debrief | 3h | Extract learnings from Claude Code transcripts → vault (with conflict resolution) |
 | session-cleanup | 24h | Clean stale sessions (>7d) and old dead letters (>30d) |
 | health-check | 6h | Bot process, DB, launchd status checks |
 | daily-digest | 24h | Summarize vault activity and learnings |
@@ -380,7 +388,10 @@ Run `./scripts/extract-skill.sh <name>` to scaffold a new skill with v2 frontmat
 | lead-gen-pipeline | 12h | Lead generation scanning |
 | smart-schedule | 3h | Calendar gap detection, study block suggestions, assignment alerts |
 | repo-scanner | 6h | Security scanning (secrets, debug artifacts, npm audit) |
-| learning-pruner | 24h | Archive stale/duplicate vault learnings |
+| learning-pruner | 24h | Archive stale/duplicate/zero-hit vault learnings (deterministic Python) |
+| learning-compressor | 24h | LLM-compress verbose entries to 150-250 chars (active 02:00-06:00) |
+| graph-linker | 24h | Build knowledge graph edges between vault entries |
+| morning-briefing | 08:30 daily | Comprehensive intelligence digest: calendar + Canvas + email + tracked events |
 | promotion-check | 12h | Detect recurring learnings for CLAUDE.md promotion |
 | gmail-watcher | 15m | Monitor forwarded Outlook emails via Gmail API |
 | notification-drain | 5m | Drain pending-notifications.jsonl → Discord |
