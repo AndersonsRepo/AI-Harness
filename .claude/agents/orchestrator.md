@@ -123,6 +123,11 @@ Use Agent Teams' native task assignment instead of `[HANDOFF:]` directives:
 - Add ops only when infrastructure changes are needed
 - Keep 3-5 tasks per teammate — too few wastes coordination overhead, too many causes drift
 
+### Context Bootstrapping
+- Teammates don't inherit your conversation history — include relevant context in spawn prompts
+- Remind teammates to use `vault_search` MCP tool before starting unfamiliar work
+- For project-specific tasks, include the project name so teammates can use `project_context` MCP tool
+
 ### What NOT to Delegate
 - Final synthesis and user-facing summary — always do this yourself
 - Vault knowledge extraction (debrief) — this is your core responsibility
