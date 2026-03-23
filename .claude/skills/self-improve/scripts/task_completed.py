@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hook: TaskCompleted
 Fires when a teammate marks a task as complete in an Agent Teams session.
-Enforces quality standards and notifies Discord for visibility.
+Enforces quality standards, review gate for builder tasks, and notifies Discord.
 """
 
 import json
@@ -18,6 +18,9 @@ NOTIFY_FILE = HARNESS_ROOT / "pending-notifications.jsonl"
 TODO_PATTERN = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b", re.I)
 BARE_CATCH = re.compile(r"catch\s*\(\s*\)\s*\{?\s*\}", re.I)
 PLACEHOLDER = re.compile(r"(placeholder|lorem ipsum|example\.com)", re.I)
+
+# Builder agent name patterns (builder, builder-1, builder-2, etc.)
+BUILDER_RE = re.compile(r"^builder(-\d+)?$", re.I)
 
 
 def notify(channel: str, message: str):
@@ -41,6 +44,21 @@ def check_quality(task_result: str) -> list[str]:
     return issues
 
 
+def check_review_gate(teammate_name: str, task_description: str) -> str | None:
+    """Enforce review gate: builder tasks need a reviewer follow-up."""
+    if not BUILDER_RE.match(teammate_name):
+        return None
+
+    # Builder completed a task — remind lead to ensure review exists
+    return (
+        f"Builder teammate '{teammate_name}' completed an implementation task. "
+        "REVIEW GATE: Ensure a dependent reviewer task exists for this work. "
+        "In the Discord bot, this is auto-enforced by infrastructure. "
+        "In Agent Teams, you must create or verify a reviewer task depends on this builder task. "
+        "If no reviewer teammate is active, consider spawning one."
+    )
+
+
 def main():
     # Read hook input from stdin
     try:
@@ -55,15 +73,26 @@ def main():
     # Run quality checks
     issues = check_quality(task_result)
 
-    response = {}
+    # Check review gate for builder tasks
+    review_reminder = check_review_gate(teammate_name, task_description)
+
+    # Build response
+    context_parts = []
 
     if issues:
-        feedback = "Quality check found potential issues:\n" + "\n".join(
-            f"  - {issue}" for issue in issues
+        context_parts.append(
+            "Quality check found potential issues:\n"
+            + "\n".join(f"  - {issue}" for issue in issues)
         )
+
+    if review_reminder:
+        context_parts.append(review_reminder)
+
+    response = {}
+    if context_parts:
         response["hookSpecificOutput"] = {
             "hookEventName": "TaskCompleted",
-            "additionalContext": feedback,
+            "additionalContext": "\n\n".join(context_parts),
         }
 
     # Notify Discord on task completion for visibility
