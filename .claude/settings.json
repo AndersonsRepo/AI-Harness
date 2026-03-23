@@ -1,4 +1,7 @@
 {
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -14,6 +17,26 @@
     "Stop": [
       {
         "command": "python3 .claude/skills/self-improve/scripts/session_flush.py"
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/skills/self-improve/scripts/teammate_idle.py"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/skills/self-improve/scripts/task_completed.py"
+          }
+        ]
       }
     ]
   }
