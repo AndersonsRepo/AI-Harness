@@ -1,0 +1,8 @@
+{
+  "name": "lead-db-backup",
+  "script": "lead-db-backup.py",
+  "schedule": "6h",
+  "notify": "discord",
+  "discord_channel": "notifications",
+  "enabled": true
+}
