@@ -1655,103 +1655,107 @@ async function handleLinkedInApproval(message: Message, token: string, approve: 
 }
 
 // --- Notification Drain ---
-const NOTIFY_FILE = join(
-  HARNESS_ROOT,
-  "heartbeat-tasks",
-  "pending-notifications.jsonl"
-);
+// Two notification paths exist: heartbeat scripts use heartbeat-tasks/, while
+// work-sources.ts, lead-gen, and Agent Teams hooks use the project root.
+// Drain both to prevent pile-up.
+const NOTIFY_FILES = [
+  join(HARNESS_ROOT, "heartbeat-tasks", "pending-notifications.jsonl"),
+  join(HARNESS_ROOT, "pending-notifications.jsonl"),
+];
 const NOTIFY_POLL_MS = 60_000;
 
 async function drainNotifications(): Promise<void> {
-  try {
-    if (!existsSync(NOTIFY_FILE)) return;
-
-    // Atomic claim: rename the file so new writes go to a fresh file
-    // This prevents TOCTOU races with heartbeat scripts appending concurrently
-    const claimedFile = NOTIFY_FILE + ".draining";
+  for (const notifyFile of NOTIFY_FILES) {
     try {
-      const { renameSync } = await import("fs");
-      renameSync(NOTIFY_FILE, claimedFile);
-    } catch (err: any) {
-      if (err.code === "ENOENT") return; // File disappeared between check and rename
-      throw err;
-    }
+      if (!existsSync(notifyFile)) continue;
 
-    const raw = readFileSync(claimedFile, "utf-8").trim();
-    if (!raw) {
-      unlinkSync(claimedFile);
-      return;
-    }
-
-    const lines = raw.split("\n").filter(Boolean);
-    const failed: string[] = [];
-
-    for (const line of lines) {
+      // Atomic claim: rename the file so new writes go to a fresh file
+      // This prevents TOCTOU races with heartbeat scripts appending concurrently
+      const claimedFile = notifyFile + ".draining";
       try {
-        const notif = JSON.parse(line);
-        const channelName: string = notif.channel || "general";
-        const task: string = notif.task || "unknown";
-        const summary: string = notif.summary || "No summary";
-
-        let targetChannel: TextChannel | null = null;
-        for (const guild of client.guilds.cache.values()) {
-          const ch = guild.channels.cache.find(
-            (c) => c.name === channelName && c.isTextBased() && c.type === 0
-          );
-          if (ch) {
-            targetChannel = ch as TextChannel;
-            break;
-          }
-        }
-
-        if (!targetChannel) {
-          console.log(
-            `[NOTIFY] Channel '${channelName}' not found, skipping`
-          );
-          failed.push(line);
-          continue;
-        }
-
-        // Check if this notification carries work-queue directives
-        const workId = checkNotificationForWork(notif, targetChannel.id);
-        if (workId) {
-          console.log(`[NOTIFY] Enqueued work ${workId} from '${task}' notification`);
-        }
-
-        // Pick embed color by task type
-        const color = task.includes("fail") || task.includes("error") ? 0xED4245
-          : task.includes("reminder") || task.includes("assignment") ? 0xFEE75C
-          : task.includes("goodnotes") || task.includes("notes") ? 0x57F287
-          : task.includes("deploy") ? 0x5865F2
-          : task.includes("linkedin") ? 0x0A66C2
-          : task.includes("email") || task.includes("emails") || task.includes("calendar") ? 0x0078D4
-          : 0x2B2D31;
-
-        const embed = new EmbedBuilder()
-          .setTitle(task.replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase()))
-          .setDescription(summary.slice(0, 4000))
-          .setColor(color)
-          .setTimestamp(new Date(notif.timestamp || Date.now()))
-          .setFooter({ text: "AI Harness Heartbeat" });
-
-        await targetChannel.send({ embeds: [embed] }).catch((err: any) =>
-          console.error(`[NOTIFY] Discord send failed: ${err.message}`)
-        );
-        console.log(`[NOTIFY] Sent '${task}' to #${channelName}`);
+        const { renameSync } = await import("fs");
+        renameSync(notifyFile, claimedFile);
       } catch (err: any) {
-        console.error(`[NOTIFY] Failed to process: ${err.message}`);
-        failed.push(line);
+        if (err.code === "ENOENT") continue; // File disappeared between check and rename
+        throw err;
       }
-    }
 
-    if (failed.length > 0) {
-      // Write back failed items to the main file (append, not overwrite, in case new items arrived)
-      appendFileSync(NOTIFY_FILE, failed.join("\n") + "\n");
-    }
-    unlinkSync(claimedFile);
-  } catch (err: any) {
-    if (err.code !== "ENOENT") {
-      console.error(`[NOTIFY] Error: ${err.message}`);
+      const raw = readFileSync(claimedFile, "utf-8").trim();
+      if (!raw) {
+        unlinkSync(claimedFile);
+        continue;
+      }
+
+      const lines = raw.split("\n").filter(Boolean);
+      const failed: string[] = [];
+
+      for (const line of lines) {
+        try {
+          const notif = JSON.parse(line);
+          const channelName: string = notif.channel || "general";
+          const task: string = notif.task || notif.source || "unknown";
+          const summary: string = notif.summary || notif.message || "No summary";
+
+          let targetChannel: TextChannel | null = null;
+          for (const guild of client.guilds.cache.values()) {
+            const ch = guild.channels.cache.find(
+              (c) => c.name === channelName && c.isTextBased() && c.type === 0
+            );
+            if (ch) {
+              targetChannel = ch as TextChannel;
+              break;
+            }
+          }
+
+          if (!targetChannel) {
+            console.log(
+              `[NOTIFY] Channel '${channelName}' not found, skipping`
+            );
+            failed.push(line);
+            continue;
+          }
+
+          // Check if this notification carries work-queue directives
+          const workId = checkNotificationForWork(notif, targetChannel.id);
+          if (workId) {
+            console.log(`[NOTIFY] Enqueued work ${workId} from '${task}' notification`);
+          }
+
+          // Pick embed color by task type
+          const color = task.includes("fail") || task.includes("error") ? 0xED4245
+            : task.includes("reminder") || task.includes("assignment") ? 0xFEE75C
+            : task.includes("goodnotes") || task.includes("notes") ? 0x57F287
+            : task.includes("deploy") ? 0x5865F2
+            : task.includes("linkedin") ? 0x0A66C2
+            : task.includes("email") || task.includes("emails") || task.includes("calendar") ? 0x0078D4
+            : 0x2B2D31;
+
+          const embed = new EmbedBuilder()
+            .setTitle(task.replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase()))
+            .setDescription(summary.slice(0, 4000))
+            .setColor(color)
+            .setTimestamp(new Date(notif.timestamp || Date.now()))
+            .setFooter({ text: "AI Harness Heartbeat" });
+
+          await targetChannel.send({ embeds: [embed] }).catch((err: any) =>
+            console.error(`[NOTIFY] Discord send failed: ${err.message}`)
+          );
+          console.log(`[NOTIFY] Sent '${task}' to #${channelName}`);
+        } catch (err: any) {
+          console.error(`[NOTIFY] Failed to process: ${err.message}`);
+          failed.push(line);
+        }
+      }
+
+      if (failed.length > 0) {
+        // Write back failed items to the same file (append, not overwrite, in case new items arrived)
+        appendFileSync(notifyFile, failed.join("\n") + "\n");
+      }
+      unlinkSync(claimedFile);
+    } catch (err: any) {
+      if (err.code !== "ENOENT") {
+        console.error(`[NOTIFY] Error draining ${notifyFile}: ${err.message}`);
+      }
     }
   }
 }
@@ -1898,26 +1902,25 @@ client.on("clientReady", async () => {
     }
   }, 30 * 60 * 1000);
 
-  // Periodic ideation — generate project ideas every 12 hours
-  // Uses the first text channel in the guild (or "general") as the ideation channel
-  const IDEATION_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
-  setInterval(() => {
-    try {
-      // Find a suitable channel for ideation output
-      for (const guild of client.guilds.cache.values()) {
-        const ch = guild.channels.cache.find(
-          (c) => c.name === "general" && c.isTextBased() && c.type === ChannelType.GuildText
-        ) as TextChannel | undefined;
-        if (ch) {
-          enqueueIdeation({ channelId: ch.id });
-          break;
-        }
-      }
-    } catch (err: any) {
-      console.error(`[IDEATION] Periodic trigger error: ${err.message}`);
-    }
-  }, IDEATION_INTERVAL_MS);
-  console.log(`[IDEATION] Periodic ideation enabled (every 12h)`);
+  // Periodic ideation — DISABLED (2026-03-24) to conserve weekly API limits
+  // Re-enable by uncommenting when budget allows
+  // const IDEATION_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
+  // setInterval(() => {
+  //   try {
+  //     for (const guild of client.guilds.cache.values()) {
+  //       const ch = guild.channels.cache.find(
+  //         (c) => c.name === "general" && c.isTextBased() && c.type === ChannelType.GuildText
+  //       ) as TextChannel | undefined;
+  //       if (ch) {
+  //         enqueueIdeation({ channelId: ch.id });
+  //         break;
+  //       }
+  //     }
+  //   } catch (err: any) {
+  //     console.error(`[IDEATION] Periodic trigger error: ${err.message}`);
+  //   }
+  // }, IDEATION_INTERVAL_MS);
+  console.log(`[IDEATION] Periodic ideation DISABLED (conserving API limits)`);
 
   // ─── Continuous Project Iteration ──────────────────────────────────────
   // Mento: every 3.5 hours, works on harness/auto-dev branch, never pushes to main
@@ -1947,14 +1950,15 @@ client.on("clientReady", async () => {
     }
   }, MENTO_INTERVAL_MS);
 
-  setInterval(() => {
-    try {
-      const ch = resolveProjectChannel("lead-gen-pipeline");
-      if (ch) enqueueLeadGenIteration(ch.id);
-    } catch (err: any) {
-      console.error(`[PROJECT-ITER] Lead-gen trigger error: ${err.message}`);
-    }
-  }, LEAD_GEN_INTERVAL_MS);
+  // Lead-gen auto-iteration: DISABLED by user request (2026-03-25)
+  // setInterval(() => {
+  //   try {
+  //     const ch = resolveProjectChannel("lead-gen-pipeline");
+  //     if (ch) enqueueLeadGenIteration(ch.id);
+  //   } catch (err: any) {
+  //     console.error(`[PROJECT-ITER] Lead-gen trigger error: ${err.message}`);
+  //   }
+  // }, LEAD_GEN_INTERVAL_MS);
 
   // Lattice: disabled — using heartbeat task (6h, active hours only) to conserve credits
   // const LATTICE_INTERVAL_MS = 4 * 60 * 60 * 1000;
@@ -1985,7 +1989,7 @@ client.on("clientReady", async () => {
   }, HACKATHON_INTERVAL_MS);
 
   console.log(`[PROJECT-ITER] Mento iteration enabled (every ${MENTO_INTERVAL_MS / 3600000}h)`);
-  console.log(`[PROJECT-ITER] Lead-gen iteration enabled (every ${LEAD_GEN_INTERVAL_MS / 3600000}h)`);
+  console.log(`[PROJECT-ITER] Lead-gen iteration DISABLED (user request 2026-03-25)`);
   console.log(`[PROJECT-ITER] Lattice parallel iteration disabled (using heartbeat task instead)`);
   console.log(`[PROJECT-ITER] Hackathon iteration enabled: aytm-research + ia-west-match (every ${HACKATHON_INTERVAL_MS / 3600000}h)`);
 
