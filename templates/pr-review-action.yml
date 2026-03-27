@@ -1,0 +1,65 @@
+# PR Review Notification — GitHub Action Template
+#
+# Sends a Discord webhook notification when a PR is opened or updated.
+# The actual AI review is handled by the AI Harness heartbeat (pr-reviewer.py),
+# not this action. This just provides real-time Discord notifications.
+#
+# Required secrets:
+#   DISCORD_WEBHOOK_URL — Discord webhook URL for the notification channel
+#
+# To use: copy this file to .github/workflows/pr-review.yml in your repo.
+
+name: PR Review Notification
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get changed files count
+        id: changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COUNT=$(gh pr diff ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --name-only | wc -l)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          PR_NUM="${{ github.event.pull_request.number }}"
+          PR_ACTION="${{ github.event.action }}"
+          CHANGED_FILES="${{ steps.changes.outputs.count }}"
+          HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+
+          if [ "$PR_ACTION" = "opened" ]; then
+            TITLE="New PR #${PR_NUM}: ${PR_TITLE}"
+            COLOR=3447003
+          else
+            TITLE="PR #${PR_NUM} Updated: ${PR_TITLE}"
+            COLOR=15105570
+          fi
+
+          if [ -n "$DISCORD_WEBHOOK" ]; then
+            curl -s -H "Content-Type: application/json" -d "{
+              \"embeds\": [{
+                \"title\": \"${TITLE}\",
+                \"description\": \"**Author:** ${PR_AUTHOR}\\n**Branch:** \`${HEAD_REF}\` → \`${BASE_REF}\`\\n**Changed files:** ${CHANGED_FILES}\\n\\n[View PR](${PR_URL})\",
+                \"color\": ${COLOR},
+                \"footer\": {\"text\": \"AI Harness — PR Watch\"},
+                \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+              }]
+            }" "$DISCORD_WEBHOOK"
+          else
+            echo "WARNING: DISCORD_WEBHOOK_URL secret not set"
+          fi

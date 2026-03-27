@@ -1,0 +1,9 @@
+{
+  "name": "pr-review",
+  "description": "Review and merge open PRs using Claude reviewer agent",
+  "schedule": "5m",
+  "script": "scripts/pr-reviewer.py",
+  "enabled": true,
+  "discord_channel": "notifications",
+  "timeout": 300
+}

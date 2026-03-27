@@ -1,0 +1,10 @@
+{
+  "repos": [
+    {
+      "owner_repo": "AndersonsRepo/aytm-market-research",
+      "project_scope": "AI-powered simulated market research pipeline for CPP AI Hackathon 2026. Uses Next.js 16, TypeScript, Tailwind, Supabase, Recharts. 6-stage pipeline: Client Discovery, Consumer Interviews, Survey Design, Survey Responses, Data Analysis, Validation Report. Key concerns: bias mitigation, 3-model triangulation (STAMP methodology), product-agnostic prompting.",
+      "discord_channel": "notifications",
+      "auto_merge": true
+    }
+  ]
+}
