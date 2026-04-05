@@ -422,56 +422,65 @@ export function enqueueLeadGenIteration(channelId: string): string {
 const AYTM_ITERATION_PROMPT = `You are autonomously iterating on the Aytm x Neo Smart Living hackathon submission.
 
 **Project Context:**
-- Path: ~/Desktop/ai-hackathon/aytm-pipeline/ (Python + Streamlit, existing prototype)
-- Reference docs: ~/Desktop/ai-hackathon/docs/ (PDFs: Neo Smart Living background, STAMP paper, survey)
-- Full plan: vault/shared/project-knowledge/ai-hackathon-execution-plan.md
-- Project knowledge: vault/shared/project-knowledge/ai-hackathon.md
+- Path: ~/Desktop/ai-hackathon/aytm-pipeline/ (Next.js + TypeScript + Supabase)
+- Deployed: aytm-pipeline.vercel.app
+- Hackathon plan: ~/Desktop/ai-hackathon/HACKATHON-PLAN.md (benchmark data, phases, success metrics)
+- Execution plan: ~/Desktop/ai-hackathon/EXECUTION-PLAN.md
 - Repo: AndersonsRepo/aytm-market-research
-- Event date: April 16, 2026 — TIME SENSITIVE
+- Event date: April 16, 2026 — 13 DAYS AWAY
 
 **Challenge: Aytm x Neo Smart Living ($2K prize)**
-Simulated market research pipeline. Uses GPT-4.1-mini + Gemini 2.5 Flash + Claude Sonnet 4 via OpenRouter.
-6 stages: Client Discovery → Simulated Interviews → Survey Design → Survey Responses → Analysis Dashboard → Validation.
+Simulated market research using 3-model triangulation (GPT + Gemini + Claude via OpenRouter).
+6 stages already implemented: Client Discovery → Consumer Interviews → Survey Design → Quant Simulation → STAMP Analysis → Validation Report.
+Real benchmark data (N=600 US homeowners) hardcoded for comparison.
+Stats: Mann-Whitney U, Kruskal-Wallis H, Krippendorff's alpha, KS test, bootstrap CI.
 
-**What to Work On (pick ONE per iteration):**
-1. If dirs are empty/minimal, scaffold project structure and get basic pipeline running
-2. Implement multi-turn interview follow-ups, enhance combined dashboard
-3. Improve persona diversity, add response validation, bias detection module
-4. Add cross-model statistical validation (KS tests, confidence intervals)
-5. Polish dashboards, write demo scripts, prepare presentation materials
+**What to Work On (priority order — read HACKATHON-PLAN.md for details):**
+1. **Persona alignment** — Filter to homeowners only, add regional quotas (NE 18%, MW 21%, South 37%, West 24%), 50/50 gender, outdoor recreation diversity
+2. **Anti-bias codebook prompts** — STAMP structured prompts per question. Key: storage must rank #1 (not home office), price resistance mean must be near 2.34
+3. **Benchmark overlay UI** — Side-by-side bar charts: real vs synthetic for 5 benchmark questions
+4. **Disagreement analysis** — Where GPT/Gemini/Claude diverge and why, heatmap visualization
+5. **Methodology page** — STAMP explanation, Dr. Lin citation, inter-LLM reliability badges
+6. **Executive summary** — Auto-generated from pipeline output with key insight callouts
+7. **Deliverables** — Growth strategy, responsible AI statement, measurement plan
+
+**Success Metrics:**
+- 5 benchmark questions within ±5pp of real data
+- Krippendorff's alpha ≥ 0.68
+- Storage correctly ranked as #1 use case
+- Price resistance mean within ±0.3 of 2.34
 
 **Rules:**
-- Work on a dev branch, never push to main.
-- Commit changes with descriptive messages.
-- Cost awareness — use free/cheap APIs (OpenRouter ~$0.05/run, local models).
-- Test with generate_test_data.py / generate_test_interviews.py before using API.
+- Commit and push to main (Vercel auto-deploys).
+- Cost awareness — OpenRouter API costs real money. Cache pipeline results, don't re-run unnecessarily.
 - Write a brief summary of what you did at the end.`;
 
 const IA_WEST_ITERATION_PROMPT = `You are autonomously iterating on the IA West Smart Match hackathon submission.
 
 **Project Context:**
 - Path: ~/Desktop/ai-hackathon/ia-west-smart-match/ (Python + Streamlit)
-- Reference docs: ~/Desktop/ai-hackathon/docs/
-- Full plan: vault/shared/project-knowledge/ai-hackathon-execution-plan.md
-- Project knowledge: vault/shared/project-knowledge/ai-hackathon.md
+- Execution plan: ~/Desktop/ai-hackathon/EXECUTION-PLAN.md
 - Repo: AndersonsRepo/ia-west-smart-match
-- Event date: April 16, 2026 — TIME SENSITIVE
+- Event date: April 16, 2026 — 13 DAYS AWAY
 
 **Challenge: IA West Smart Match ($2K prize)**
-AI-powered CRM matching industry speakers (19 IA West board members) to university events at CPP.
-4 modules: Supply Side (speakers) → Demand Side (events) → Matching Engine → Member Journey Pipeline.
+AI-powered CRM matching 18 IA West board members to 50 university engagement opportunities at CPP.
+Existing: Streamlit app with 7 tabs, 6-factor weighted matching (TF-IDF cosine similarity), 900 scored matches.
+Has Supabase persistence option and passing tests.
 
-**What to Work On (pick ONE per iteration):**
-1. If dirs are empty/minimal, scaffold project structure and get basic pipeline running
-2. Enhance matching engine (TF-IDF bigrams, experience bonus, geographic scoring)
-3. Improve web UI for speaker profiles, event calendar, match results
-4. Build pipeline tracker with realistic conversion rates
-5. Polish dashboards, write demo scripts, prepare presentation materials
+**What to Work On (priority order):**
+1. **LLM match explanations** — For each top match, generate natural language WHY this speaker fits this event
+2. **Smart scheduling** — Cross-reference speaker availability with event dates, flag conflicts
+3. **Match confidence scoring** — Beyond cosine similarity, add LLM-assessed quality score
+4. **Interactive explorer** — Click speaker → top 10 events with explanations. Click event → top 10 speakers
+5. **Dashboard metrics** — Coverage %, unmatched speakers/events, quality distribution
+6. **Export workflow** — Generate email templates, meeting agendas, CRM import files
+7. **Deploy** — Get a live demo URL (Streamlit Cloud or alternative)
+8. **Deliverables** — Responsible AI note, growth strategy
 
 **Rules:**
-- Work on a dev branch, never push to main.
-- Commit changes with descriptive messages.
-- Cost awareness — use free/cheap APIs (OpenRouter ~$0.05/run, local models).
+- Commit and push to main.
+- Cost awareness — if using LLM for explanations, cache results.
 - Write a brief summary of what you did at the end.`;
 
 export function enqueueAytmIteration(channelId: string): string {
@@ -481,7 +490,7 @@ export function enqueueAytmIteration(channelId: string): string {
     channelId,
     prompt: AYTM_ITERATION_PROMPT,
     agent: "builder",
-    priority: 30,
+    priority: 75, // High — hackathon deadline April 16
     metadata: { project: "aytm-market-research", iterationType: "continuous" },
     maxAttempts: 1,
   });
@@ -494,7 +503,7 @@ export function enqueueIaWestIteration(channelId: string): string {
     channelId,
     prompt: IA_WEST_ITERATION_PROMPT,
     agent: "builder",
-    priority: 30,
+    priority: 65, // High — hackathon deadline April 16 (lower than AYTM since it's secondary)
     metadata: { project: "ia-west-smart-match", iterationType: "continuous" },
     maxAttempts: 1,
   });

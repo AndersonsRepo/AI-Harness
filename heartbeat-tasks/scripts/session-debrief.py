@@ -594,7 +594,8 @@ def write_vault_entry(item, existing_keys, supersedes=None):
     if supersedes:
         lines.append(f"supersedes: {supersedes}")
 
-    lines.append("---")
+    lines.extend([
+        "---",
         "",
         f"# {item.get('title', 'Untitled')}",
         "",

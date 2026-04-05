@@ -4,7 +4,7 @@
   "type": "script",
   "script": "lead-gen-runner.py",
   "schedule": "12h",
-  "enabled": true,
+  "enabled": false,
   "notify": "discord",
   "discord_channel": "lead-gen-pipeline",
   "timeout": 1800

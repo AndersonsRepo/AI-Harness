@@ -353,10 +353,52 @@ server.tool(
       const config = JSON.parse(readFileSync(configFile, "utf-8"));
       config.enabled = enabled;
       writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n");
+
+      // Reset failure counter on re-enable so task doesn't immediately auto-pause
+      if (enabled) {
+        const stateFile = join(HEARTBEAT_DIR, `${name}.state.json`);
+        if (existsSync(stateFile)) {
+          try {
+            const state = JSON.parse(readFileSync(stateFile, "utf-8"));
+            state.consecutive_failures = 0;
+            writeFileSync(stateFile, JSON.stringify(state, null, 2) + "\n");
+          } catch { /* state file parse error is non-fatal */ }
+        }
+      }
+
+      // Sync scheduler (launchd/schtasks) state with JSON config
+      let schedulerMsg = "";
+      const label = `com.aiharness.heartbeat.${name}`;
+
+      if (process.platform === "darwin") {
+        const home = process.env.HOME || "";
+        const plistPath = join(home, "Library", "LaunchAgents", `${label}.plist`);
+        if (existsSync(plistPath)) {
+          if (enabled) {
+            const result = safeExec(`launchctl load "${plistPath}"`);
+            schedulerMsg = result === "(unavailable)" ? " (warning: plist load failed)" : " Plist loaded.";
+          } else {
+            safeExec(`launchctl unload "${plistPath}"`);
+            schedulerMsg = " Plist unloaded.";
+          }
+        } else {
+          schedulerMsg = " (no plist found — run generate-plist.py to create one)";
+        }
+      } else if (process.platform === "win32") {
+        const schtaskName = `\\${label.replace(/\./g, "\\")}`;
+        if (enabled) {
+          safeExec(`schtasks /Change /TN "${schtaskName}" /ENABLE`);
+          schedulerMsg = " Scheduled task enabled.";
+        } else {
+          safeExec(`schtasks /Change /TN "${schtaskName}" /DISABLE`);
+          schedulerMsg = " Scheduled task disabled.";
+        }
+      }
+
       return {
         content: [{
           type: "text" as const,
-          text: `Task "${name}" ${enabled ? "enabled" : "disabled"}. Note: launchctl load/unload may be needed for the change to take effect.`,
+          text: `Task "${name}" ${enabled ? "enabled" : "disabled"}.${schedulerMsg}`,
         }],
       };
     } catch (err: any) {
@@ -396,6 +438,254 @@ server.tool(
       }
     } catch (err: any) {
       return { content: [{ type: "text" as const, text: `Error running task: ${err.message}` }] };
+    }
+  }
+);
+
+// ─── Tool: harness_heartbeat_create ─────────────────────────────────
+
+server.tool(
+  "harness_heartbeat_create",
+  "Create a new heartbeat (scheduled background) task. Writes JSON config and optionally generates + installs the launchd plist.",
+  {
+    name: z.string().describe("Task name (kebab-case, e.g., 'my-task')"),
+    description: z.string().describe("Short description of what this task does"),
+    type: z.enum(["script", "prompt"]).describe("'script' runs a Python script, 'prompt' runs a Claude prompt"),
+    schedule: z.string().describe("Interval (e.g., '30m', '6h', '24h') or cron expression (e.g., '0 8 * * 1-5')"),
+    scriptOrPrompt: z.string().describe("For type=script: script filename in heartbeat-tasks/scripts/. For type=prompt: the Claude prompt text"),
+    notify: z.enum(["discord", "none"]).optional().default("discord").describe("Notification target"),
+    discordChannel: z.string().optional().default("heartbeat-status").describe("Discord channel name for notifications"),
+    allowedTools: z.array(z.string()).optional().describe("Allowed tools for prompt-type tasks"),
+    activeHours: z.object({
+      start: z.string(),
+      end: z.string(),
+    }).optional().describe("Active hours window, e.g., {start: '07:00', end: '23:00'}"),
+    installPlist: z.boolean().optional().default(true).describe("Generate and load the launchd plist"),
+  },
+  async ({ name, description, type, schedule, scriptOrPrompt, notify, discordChannel, allowedTools, activeHours, installPlist }) => {
+    const configFile = join(HEARTBEAT_DIR, `${name}.json`);
+    if (existsSync(configFile)) {
+      return { content: [{ type: "text" as const, text: `Task "${name}" already exists. Delete it first or choose a different name.` }] };
+    }
+
+    try {
+      // Build task config
+      const isCron = schedule.includes(" ") && schedule.split(" ").length === 5;
+      const config: Record<string, any> = {
+        name,
+        description,
+        type,
+        notify,
+        discord_channel: discordChannel,
+        enabled: true,
+      };
+
+      if (isCron) {
+        config.cron = schedule;
+      } else {
+        config.schedule = schedule;
+      }
+
+      if (type === "script") {
+        config.script = scriptOrPrompt;
+      } else {
+        config.prompt = scriptOrPrompt;
+        if (allowedTools?.length) {
+          config.allowed_tools = allowedTools;
+        }
+      }
+
+      if (activeHours) {
+        config.activeHours = activeHours;
+      }
+
+      writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n");
+
+      // Generate and install plist if requested
+      let plistMsg = "";
+      if (installPlist) {
+        const generateScript = join(HEARTBEAT_SCRIPTS, "generate-plist.py");
+        if (existsSync(generateScript)) {
+          const result = safeExec(
+            `HARNESS_ROOT="${HARNESS_ROOT}" python3 "${generateScript}" "${name}" --install 2>&1`,
+            15000
+          );
+          plistMsg = result.includes("unavailable") || result.includes("Error")
+            ? ` Warning: plist generation issue: ${result.slice(0, 200)}`
+            : " Plist generated and loaded.";
+        } else {
+          plistMsg = " (generate-plist.py not found — create plist manually)";
+        }
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Task "${name}" created successfully.${plistMsg}\n\nConfig: ${configFile}`,
+        }],
+      };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error creating task: ${err.message}` }] };
+    }
+  }
+);
+
+// ─── Tool: harness_heartbeat_delete ─────────────────────────────────
+
+server.tool(
+  "harness_heartbeat_delete",
+  "Delete a heartbeat task: unload plist, remove config/state/plist files.",
+  {
+    name: z.string().describe("Task name to delete"),
+    confirm: z.boolean().describe("Must be true to confirm deletion"),
+  },
+  async ({ name, confirm }) => {
+    if (!confirm) {
+      return { content: [{ type: "text" as const, text: `Deletion not confirmed. Set confirm=true to delete "${name}".` }] };
+    }
+
+    const configFile = join(HEARTBEAT_DIR, `${name}.json`);
+    if (!existsSync(configFile)) {
+      return { content: [{ type: "text" as const, text: `Task "${name}" not found.` }] };
+    }
+
+    try {
+      const removed: string[] = [];
+      const label = `com.aiharness.heartbeat.${name}`;
+      const home = process.env.HOME || "";
+      const plistPath = join(home, "Library", "LaunchAgents", `${label}.plist`);
+
+      // Unload and remove plist
+      if (existsSync(plistPath)) {
+        safeExec(`launchctl unload "${plistPath}"`);
+        const { unlinkSync } = require("fs");
+        unlinkSync(plistPath);
+        removed.push("plist (unloaded + removed)");
+      }
+
+      // Remove config
+      const { unlinkSync } = require("fs");
+      unlinkSync(configFile);
+      removed.push("config");
+
+      // Remove state file
+      const stateFile = join(HEARTBEAT_DIR, `${name}.state.json`);
+      if (existsSync(stateFile)) {
+        unlinkSync(stateFile);
+        removed.push("state");
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Task "${name}" deleted. Removed: ${removed.join(", ")}.`,
+        }],
+      };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error deleting task: ${err.message}` }] };
+    }
+  }
+);
+
+// ─── Tool: harness_heartbeat_logs ───────────────────────────────────
+
+server.tool(
+  "harness_heartbeat_logs",
+  "Read the last N lines of a heartbeat task's log file.",
+  {
+    name: z.string().describe("Task name"),
+    lines: z.number().optional().default(50).describe("Number of lines to read (default 50)"),
+  },
+  async ({ name, lines }) => {
+    const logFile = join(HEARTBEAT_LOGS, `${name}.log`);
+    if (!existsSync(logFile)) {
+      return { content: [{ type: "text" as const, text: `No log file found for "${name}".` }] };
+    }
+
+    try {
+      const output = safeExec(`tail -n ${lines} "${logFile}"`, 5000);
+      return {
+        content: [{
+          type: "text" as const,
+          text: `# ${name} logs (last ${lines} lines)\n\n\`\`\`\n${output}\n\`\`\``,
+        }],
+      };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error reading logs: ${err.message}` }] };
+    }
+  }
+);
+
+// ─── Tool: harness_heartbeat_status ─────────────────────────────────
+
+server.tool(
+  "harness_heartbeat_status",
+  "Comprehensive heartbeat health dashboard. Cross-references task configs with launchd state, flags mismatches, failures, and staleness.",
+  {},
+  async () => {
+    try {
+      const configs = getHeartbeatConfigs();
+      if (configs.length === 0) {
+        return { content: [{ type: "text" as const, text: "No heartbeat tasks found." }] };
+      }
+
+      const now = Date.now();
+      const STALE_MS = 48 * 60 * 60 * 1000;
+
+      const failing: string[] = [];
+      const staleList: string[] = [];
+      const mismatched: string[] = [];
+      const healthy: string[] = [];
+      const disabled: string[] = [];
+
+      for (const task of configs) {
+        const state = getTaskState(task.name);
+        const plistLoaded = getSchedulerStatus(task.name);
+        const lastRunTs = state?.lastRun ? new Date(state.lastRun).getTime() : 0;
+        const shortDate = state?.lastRun ? state.lastRun.slice(0, 16).replace("T", " ") : "never";
+        const failures = state?.consecutiveFailures || 0;
+
+        // Check config/plist mismatch
+        if (task.enabled && !plistLoaded) {
+          mismatched.push(`- ${task.name}: enabled=true but plist NOT loaded`);
+        } else if (!task.enabled && plistLoaded) {
+          mismatched.push(`- ${task.name}: enabled=false but plist IS loaded`);
+        }
+
+        if (!task.enabled) {
+          disabled.push(`- ${task.name}: disabled (last: ${shortDate}, failures: ${failures})`);
+        } else if (failures >= 2) {
+          failing.push(`- ${task.name}: ${failures} consecutive failures (last: ${shortDate})`);
+        } else if (lastRunTs > 0 && now - lastRunTs > STALE_MS) {
+          staleList.push(`- ${task.name}: no run in ${Math.round((now - lastRunTs) / 3600000)}h (last: ${shortDate})`);
+        } else {
+          healthy.push(`- ${task.name}: OK (last: ${shortDate}, runs: ${state?.totalRuns || 0})`);
+        }
+      }
+
+      const lines: string[] = ["# Heartbeat Status Dashboard", ""];
+
+      if (failing.length > 0) {
+        lines.push(`## Failing (${failing.length})`, ...failing, "");
+      }
+      if (mismatched.length > 0) {
+        lines.push(`## Config/Plist Mismatches (${mismatched.length})`, ...mismatched, "");
+      }
+      if (staleList.length > 0) {
+        lines.push(`## Stale >48h (${staleList.length})`, ...staleList, "");
+      }
+      if (disabled.length > 0) {
+        lines.push(`## Disabled (${disabled.length})`, ...disabled, "");
+      }
+      if (healthy.length > 0) {
+        lines.push(`## Healthy (${healthy.length})`, ...healthy, "");
+      }
+
+      lines.push(`---`, `Total: ${configs.length} tasks | Healthy: ${healthy.length} | Failing: ${failing.length} | Stale: ${staleList.length} | Disabled: ${disabled.length} | Mismatched: ${mismatched.length}`);
+
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error building status: ${err.message}` }] };
     }
   }
 );

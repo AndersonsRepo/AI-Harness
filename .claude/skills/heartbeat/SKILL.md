@@ -29,6 +29,9 @@ Create, list, pause, and delete recurring background tasks that run Claude on a 
 - `/heartbeat delete <name>` — Remove a task and its plist
 - `/heartbeat run <name>` — Run a task immediately (one-shot, don't wait for schedule)
 - `/heartbeat logs <name>` — Show recent output from a task
+- `/heartbeat status` — Cross-reference dashboard: live launchctl vs config, tasks with failures>0, stale tasks (no run 48h+), dead letters, queue health
+- `/heartbeat diagnose <name>` — Deep diagnostic: last 50 log lines, state file, config, plist status, suggested fix
+- `/heartbeat sync` — Reconcile configs with launchd: find enabled tasks with unloaded plists, loaded plists for disabled tasks, offer to fix mismatches
 
 ## How It Works
 

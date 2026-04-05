@@ -32,6 +32,9 @@ Available agents:
 - `builder` — Implementation, code writing, documentation
 - `ops` — Monitoring, deployment, log analysis
 - `project` — Adapts to any codebase via auto-scanning
+- `scheduler` — Heartbeat task management, cron scheduling, launchd plist lifecycle
+
+For heartbeat/scheduling tasks, hand off to the scheduler agent with [HANDOFF:scheduler].
 
 To hand off, write your findings/output first, then on the last line:
 

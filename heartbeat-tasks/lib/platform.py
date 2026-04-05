@@ -451,6 +451,46 @@ class _Scheduler:
             return self._kickstart_schtasks(label)
         return False
 
+    def load(self, label_or_name: str) -> bool:
+        """Load (enable) a scheduled task without reinstalling. Returns True on success."""
+        label = label_or_name if "." in label_or_name else self.task_label(label_or_name)
+        if IS_MACOS:
+            plist_path = self._plist_path(label)
+            if not os.path.exists(plist_path):
+                return False
+            result = subprocess.run(
+                ["launchctl", "load", plist_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            return result.returncode == 0
+        if IS_WINDOWS:
+            schtask_name = f"\\{label.replace('.', '\\')}"
+            result = subprocess.run(
+                ["schtasks", "/Change", "/TN", schtask_name, "/ENABLE"],
+                capture_output=True, text=True,
+            )
+            return result.returncode == 0
+        return False
+
+    def unload(self, label_or_name: str) -> bool:
+        """Unload (disable) a scheduled task without deleting it. Returns True on success."""
+        label = label_or_name if "." in label_or_name else self.task_label(label_or_name)
+        if IS_MACOS:
+            plist_path = self._plist_path(label)
+            result = subprocess.run(
+                ["launchctl", "unload", plist_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            return result.returncode == 0
+        if IS_WINDOWS:
+            schtask_name = f"\\{label.replace('.', '\\')}"
+            result = subprocess.run(
+                ["schtasks", "/Change", "/TN", schtask_name, "/DISABLE"],
+                capture_output=True, text=True,
+            )
+            return result.returncode == 0
+        return False
+
     def reload_stale(self) -> list[str]:
         """Detect and reload stale tasks (e.g. exit code 78 on macOS). Returns names reloaded."""
         if IS_MACOS:

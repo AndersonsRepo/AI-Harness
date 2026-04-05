@@ -221,9 +221,66 @@ def main():
     # Count total edges
     cursor.execute("SELECT COUNT(*) FROM learning_edges")
     total_edges = cursor.fetchone()[0]
+
+    # --- Write-back: update vault .md files with [[wikilinks]] in related: frontmatter ---
+    files_updated = 0
+    MAX_RELATED = 8  # Cap to keep frontmatter manageable
+
+    for entry_id in entry_ids:
+        # Get top related entries by weight (both directions)
+        cursor.execute(
+            "SELECT target_id, weight FROM learning_edges "
+            "WHERE source_id = ? AND relation = 'related_to' "
+            "UNION "
+            "SELECT source_id, weight FROM learning_edges "
+            "WHERE target_id = ? AND relation = 'related_to' "
+            "ORDER BY weight DESC LIMIT ?",
+            (entry_id, entry_id, MAX_RELATED)
+        )
+        related_ids = [row[0] for row in cursor.fetchall() if row[0] in entries]
+
+        if not related_ids:
+            continue
+
+        # Format as wikilinks — use YAML list-style, not inline array,
+        # to avoid triple-bracket issue ([[[id]]] from [, [[id]], ])
+        wikilink_items = "\n".join(f"  - \"[[{rid}]]\"" for rid in related_ids)
+        new_related_line = f"related:\n{wikilink_items}"
+
+        # Find and update the file
+        md_file = learnings_dir / f"{entry_id}.md"
+        if not md_file.exists():
+            # Try alternate naming patterns
+            candidates = list(learnings_dir.glob(f"{entry_id}*.md"))
+            if candidates:
+                md_file = candidates[0]
+            else:
+                continue
+
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except Exception:
+            continue
+
+        # Replace the related: field in frontmatter (inline [...] or multi-line list)
+        updated = re.sub(
+            r"^related:\s*\[.*?\]|^related:\n(?:\s+-\s+.*\n?)*",
+            new_related_line,
+            text,
+            count=1,
+            flags=re.MULTILINE
+        )
+
+        if updated != text:
+            md_file.write_text(updated, encoding="utf-8")
+            files_updated += 1
+
     conn.close()
 
-    report = f"Graph linker: {new_edges} new edges created ({total_edges} total), {len(entries)} entries processed"
+    report = (
+        f"Graph linker: {new_edges} new edges, {total_edges} total, "
+        f"{len(entries)} entries, {files_updated} files updated with [[wikilinks]]"
+    )
     notify(report)
     print(report)
 

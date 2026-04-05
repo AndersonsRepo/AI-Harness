@@ -357,7 +357,7 @@ def generate_study_guide(event, course_info):
 
     try:
         llm = get_provider()
-        response = llm.complete(prompt, model=get_default_model(), timeout=120, max_turns=15)
+        response = llm.complete(prompt, model=get_default_model(), timeout=120, max_turns=3)
         text = response.text.strip()
         return text if text and len(text) >= 50 else None
     except (LLMError, Exception) as e:
@@ -383,7 +383,7 @@ def generate_homework_help(event, course_info):
 
     try:
         llm = get_provider()
-        response = llm.complete(prompt, model=get_default_model(), timeout=120, max_turns=15)
+        response = llm.complete(prompt, model=get_default_model(), timeout=120, max_turns=3)
         text = response.text.strip()
         return text or None
     except (LLMError, Exception) as e:
