@@ -24,7 +24,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.llm_provider import get_provider, LLMError
-from lib.platform import paths
+from lib.platform import paths, scheduler
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
@@ -153,7 +153,7 @@ def send_discord_notification(config, summary):
     notify_file = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
     notification = {
         "task": config["name"],
-        "channel": config.get("discord_channel", "general"),
+        "channel": config.get("discord_channel", "heartbeat-status"),
         "summary": summary,
         "timestamp": datetime.datetime.now().isoformat(),
     }
@@ -230,8 +230,17 @@ def run_task(task_name):
         config_path = os.path.join(TASKS_DIR, f"{task_name}.json")
         with open(config_path, "w") as f:
             json.dump(config, f, indent=2)
+        # Unload plist so launchd stops invoking this task
+        if scheduler.unload(task_name):
+            log(task_name, f"Unloaded scheduler: {scheduler.task_label(task_name)}")
+        else:
+            log(task_name, "Warning: failed to unload scheduler (plist may not exist)")
+        # Update state to reflect auto-pause
+        state["last_result"] = "auto-paused"
+        state["last_output_summary"] = "Auto-paused after 3 consecutive failures"
+        save_state(task_name, state)
         if config.get("notify") == "discord":
-            send_discord_notification(config, f"Task '{task_name}' auto-paused after 3 consecutive failures.")
+            send_discord_notification(config, f"Task '{task_name}' auto-paused after 3 consecutive failures. Plist unloaded.")
         return
 
     # Determine task type and provider routing

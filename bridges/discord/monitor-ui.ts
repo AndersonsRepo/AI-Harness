@@ -52,6 +52,9 @@ export async function ensureMonitorChannel(): Promise<TextChannel | null> {
   if (!client) return null;
 
   for (const guild of client.guilds.cache.values()) {
+    // Refresh cache to avoid creating duplicates on rapid restarts
+    await guild.channels.fetch();
+
     const existing = guild.channels.cache.find(
       (c) => c.name === MONITOR_CHANNEL_NAME && c.type === 0 // GuildText
     ) as TextChannel | undefined;

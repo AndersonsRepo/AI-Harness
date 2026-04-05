@@ -329,8 +329,7 @@ export class DiscordTransport implements TransportAdapter {
           }
         });
 
-        // Ensure Discord channels exist
-        await this.ensureChannels();
+        // Channel creation handled by bot.ts — removed here to prevent duplicates
 
         // Notification drain polling
         const notifyFile = join(this.config.harnessRoot, "heartbeat-tasks", "pending-notifications.jsonl");

@@ -1,22 +1,38 @@
 {
   "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1"
   },
   "hooks": {
     "UserPromptSubmit": [
       {
-        "command": "python3 .claude/skills/self-improve/scripts/activator.py \"$PROMPT\""
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/activator.py \"$PROMPT\""
+          }
+        ]
       }
     ],
     "PostToolUse": [
       {
         "matcher": "Bash",
-        "command": "python3 .claude/skills/self-improve/scripts/error_detector.py \"$EXIT_CODE\" \"$STDOUT\" \"$STDERR\""
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/error_detector.py \"$EXIT_CODE\" \"$STDOUT\" \"$STDERR\""
+          }
+        ]
       }
     ],
     "Stop": [
       {
-        "command": "python3 .claude/skills/self-improve/scripts/session_flush.py"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/session_flush.py"
+          }
+        ]
       }
     ],
     "TeammateIdle": [
@@ -24,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/skills/self-improve/scripts/teammate_idle.py"
+            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/teammate_idle.py"
           }
         ]
       }
@@ -34,7 +50,29 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/skills/self-improve/scripts/task_completed.py"
+            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/task_completed.py"
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/task_created.py"
+          }
+        ]
+      }
+    ],
+    "FileChanged": [
+      {
+        "matcher": "vault/**/*.md",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/vault_file_changed.py \"$FILE_PATH\"",
+            "timeout": 30
           }
         ]
       }

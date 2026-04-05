@@ -181,12 +181,18 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 7: Heartbeat status
-    if (totalChars < MAX_TOTAL_CHARS) {
+    // Priority 7: Heartbeat status (scheduler agent gets full untruncated context)
+    if (totalChars < MAX_TOTAL_CHARS || params.agentName === "scheduler") {
       const heartbeatSection = buildHeartbeatSection();
       if (heartbeatSection) {
-        sections.push(monitor.truncate(heartbeatSection, SECTION_LIMITS.heartbeats, "context:heartbeats"));
-        totalChars += Math.min(heartbeatSection.length, SECTION_LIMITS.heartbeats);
+        if (params.agentName === "scheduler") {
+          // Scheduler owns this domain — no truncation, no budget check
+          sections.push(heartbeatSection);
+          totalChars += heartbeatSection.length;
+        } else {
+          sections.push(monitor.truncate(heartbeatSection, SECTION_LIMITS.heartbeats, "context:heartbeats"));
+          totalChars += Math.min(heartbeatSection.length, SECTION_LIMITS.heartbeats);
+        }
       }
     }
 
@@ -507,18 +513,44 @@ function buildHeartbeatSection(): string | null {
     const stateFiles = readdirSync(HEARTBEAT_DIR).filter((f) => f.endsWith(".state.json"));
     if (stateFiles.length === 0) return null;
 
-    const lines: string[] = ["## Heartbeat Status"];
+    const now = Date.now();
+    const STALE_MS = 48 * 60 * 60 * 1000; // 48h — if last run > 48h ago, it's stale
+    const failing: string[] = [];
+    const stale: string[] = [];
+    let healthyCount = 0;
+
     for (const file of stateFiles) {
       try {
         const state = JSON.parse(readFileSync(join(HEARTBEAT_DIR, file), "utf-8"));
         const name = basename(file, ".state.json");
         const status = state.status || "unknown";
         const lastRun = state.last_run || state.lastRun || "never";
-        lines.push(`- ${name}: ${status} (last: ${lastRun})`);
+        const lastRunTs = lastRun !== "never" ? new Date(lastRun).getTime() : 0;
+        const shortDate = lastRun !== "never" ? lastRun.slice(0, 16).replace("T", " ") : "never";
+        const failures = state.consecutive_failures || 0;
+
+        if (status === "error" || status === "failed" || failures >= 2) {
+          failing.push(`- ${name}: ${status} (failures: ${failures}, last: ${shortDate})`);
+        } else if (lastRunTs > 0 && now - lastRunTs > STALE_MS) {
+          stale.push(`- ${name}: stale (last: ${shortDate})`);
+        } else {
+          healthyCount++;
+        }
       } catch {
         // Skip malformed state files
       }
     }
+
+    const lines: string[] = ["## Heartbeat Status"];
+    if (failing.length > 0) {
+      lines.push("**Failing:**");
+      lines.push(...failing);
+    }
+    if (stale.length > 0) {
+      lines.push("**Stale (>48h):**");
+      lines.push(...stale);
+    }
+    lines.push(`Healthy: ${healthyCount}/${healthyCount + failing.length + stale.length} tasks`);
 
     return lines.length > 1 ? lines.join("\n") : null;
   } catch {

@@ -1971,8 +1971,8 @@ client.on("clientReady", async () => {
   //   }
   // }, LATTICE_INTERVAL_MS);
 
-  // Hackathon: every 4 hours, iterate on each project independently (time-sensitive: April 16)
-  const HACKATHON_INTERVAL_MS = 4 * 60 * 60 * 1000;
+  // Hackathon: RE-ENABLED 2026-04-03 — 13 days to April 16 deadline
+  const HACKATHON_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2h iterations (accelerated for deadline)
   setInterval(() => {
     try {
       const aytmCh = resolveProjectChannel("aytm-research");
@@ -1991,7 +1991,7 @@ client.on("clientReady", async () => {
   console.log(`[PROJECT-ITER] Mento iteration enabled (every ${MENTO_INTERVAL_MS / 3600000}h)`);
   console.log(`[PROJECT-ITER] Lead-gen iteration DISABLED (user request 2026-03-25)`);
   console.log(`[PROJECT-ITER] Lattice parallel iteration disabled (using heartbeat task instead)`);
-  console.log(`[PROJECT-ITER] Hackathon iteration enabled: aytm-research + ia-west-match (every ${HACKATHON_INTERVAL_MS / 3600000}h)`);
+  console.log(`[PROJECT-ITER] Hackathon iteration ENABLED (2h cycles — deadline April 16)`);
 
   // Handle parallel group completions — feed results back to orchestrator
   onGroupComplete(async (groupId, status) => {
@@ -2056,6 +2056,9 @@ client.on("clientReady", async () => {
   // Ensure "School" category + "calendar" channel exist
   for (const guild of client.guilds.cache.values()) {
     try {
+      // Refresh channel cache to avoid creating duplicates on rapid restarts
+      await guild.channels.fetch();
+
       let schoolCat = guild.channels.cache.find(
         (c) => c.type === ChannelType.GuildCategory && c.name.toLowerCase() === "school"
       );
@@ -2150,7 +2153,76 @@ client.on("clientReady", async () => {
     }
   }
 
-  // Ensure "LinkedIn" channel exists (top-level or under a general category)
+  // Scheduler category + heartbeat management channels
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      let schedulerCat = guild.channels.cache.find(
+        (c) => c.type === ChannelType.GuildCategory && c.name.toLowerCase() === "scheduler"
+      );
+      if (!schedulerCat) {
+        schedulerCat = await guild.channels.create({
+          name: "Scheduler",
+          type: ChannelType.GuildCategory,
+          reason: "AI Harness heartbeat/scheduling management",
+        });
+        console.log(`[SCHEDULER] Created "Scheduler" category in ${guild.name}`);
+      }
+      const schedulerChannels = [
+        { name: "heartbeat-status", topic: "Live heartbeat task dashboard and notifications" },
+        { name: "task-logs", topic: "Heartbeat task failure details and diagnostic output" },
+        { name: "schedule-mgmt", topic: "Create, edit, pause, resume, delete scheduled tasks" },
+      ];
+      for (const sc of schedulerChannels) {
+        const existing = guild.channels.cache.find(
+          (c) => c.name === sc.name && c.parentId === schedulerCat!.id
+        );
+        if (!existing) {
+          const newCh = await guild.channels.create({
+            name: sc.name,
+            type: ChannelType.GuildText,
+            parent: schedulerCat.id,
+            topic: sc.topic,
+            reason: "AI Harness scheduler channel",
+          });
+          setChannelConfig(newCh.id, { agent: "scheduler" });
+          console.log(`[SCHEDULER] Created #${sc.name} channel with scheduler agent in ${guild.name}`);
+        } else {
+          const cfg = getChannelConfig(existing.id);
+          if (!cfg?.agent) {
+            setChannelConfig(existing.id, { agent: "scheduler" });
+            console.log(`[SCHEDULER] Assigned scheduler agent to existing #${sc.name}`);
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error(`[SCHEDULER] Failed to create scheduler channels: ${err.message}`);
+    }
+  }
+
+  // General-purpose channels for parallel task capacity
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const generalChannels = ["general-2", "general-3", "general-4"];
+      for (const name of generalChannels) {
+        const existing = guild.channels.cache.find(
+          (c) => c.name === name && c.type === ChannelType.GuildText && !c.parentId
+        );
+        if (!existing) {
+          await guild.channels.create({
+            name,
+            type: ChannelType.GuildText,
+            topic: "General purpose AI tasks",
+            reason: "AI Harness parallel task capacity",
+          });
+          console.log(`[GENERAL] Created #${name} channel in ${guild.name}`);
+        }
+      }
+    } catch (err: any) {
+      console.error(`[GENERAL] Failed to create general channels: ${err.message}`);
+    }
+  }
+
+  // LinkedIn channel — uses already-fetched guild cache from above
   for (const guild of client.guilds.cache.values()) {
     try {
       const linkedinCh = guild.channels.cache.find(
