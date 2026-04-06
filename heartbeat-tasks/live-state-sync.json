@@ -1,0 +1,10 @@
+{
+  "name": "live-state-sync",
+  "description": "Refreshes vault/LIVE_STATE.md with current infrastructure health, heartbeat status, and queue stats. Preserves agent-written sections.",
+  "type": "script",
+  "script": "live-state-sync.py",
+  "schedule": "3h",
+  "enabled": true,
+  "notify": "none",
+  "timeout": 30
+}

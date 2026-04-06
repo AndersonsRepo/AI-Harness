@@ -22,6 +22,18 @@ Before context compaction or when a long conversation is winding down, write vau
 
 Use `/learned` for each entry. Fill in ALL fields — no placeholders. If nothing significant was learned, skip this.
 
+## Live State Updates
+
+`vault/LIVE_STATE.md` is the single source of truth for what's happening right now. If your session changes any of the following, update the relevant section of LIVE_STATE.md before finishing:
+
+- **Project status** — deployment state, blockers, or current focus changed
+- **Priorities** — user reordered what matters most
+- **Infrastructure health** — heartbeat failures, dead letters, OAuth issues discovered or resolved
+- **Recent decisions** — architectural or workflow decisions that affect future work
+- **New projects** — add a section with status, focus, blockers, and `[[wikilinks]]` to knowledge files
+
+The `live-state-sync` heartbeat keeps infrastructure data fresh automatically. Agents are responsible for the subjective parts: focus, blockers, decisions, and priorities.
+
 ## Projects I Work On
 
 Projects are registered in `heartbeat-tasks/projects.json` and their knowledge stored in `vault/shared/project-knowledge/`. The Project agent auto-scans any new codebase on first invocation — no manual configuration needed.
