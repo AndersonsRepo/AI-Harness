@@ -331,7 +331,7 @@ function notifyIdeationFailure(channelId: string, reason: string): void {
  * The builder agent reads code-review findings, vault knowledge, and project
  * state to decide what to work on next.
  */
-const MENTO_ITERATION_PROMPT = `You are autonomously iterating on the Mento mentorship platform.
+const MENTO_ITERATION_PROMPT = `You are autonomously iterating on the Mento mentorship platform — a senior project that connects mentees with mentors through AI-powered onboarding and a RAG knowledge base.
 
 **CRITICAL SAFETY RULES:**
 - You are working on a branch called \`harness/auto-dev\`. NEVER push to main. NEVER merge to main.
@@ -341,23 +341,38 @@ const MENTO_ITERATION_PROMPT = `You are autonomously iterating on the Mento ment
 
 **Project Context:**
 - Path: ~/Desktop/Seniorproject/mento
-- Stack: Next.js 15, React 19, MUI v7, Prisma ORM, PostgreSQL, TypeScript
+- Stack: Next.js 15, React 19, MUI v7 + Emotion, Prisma ORM v6, PostgreSQL, TypeScript
 - Repo: tingtingch/mento
-- Your role: Anderson handles RAG, infra, security
+- Anderson's scope: RAG integration, infrastructure, security
+- Team: tingtingchen (onboarding, chatbot), sion/huangruoqi (UI, mentee chat, copilot)
+- RAG: LightRAG service on port 9621 via Docker, client at src/utils/lightrag-client.ts
 
 **What to Work On (pick ONE per iteration, prioritize top to bottom):**
-1. Fix any lint/type errors (run \`npx tsc --noEmit\` first)
-2. Address code-review findings (check vault for recent findings)
-3. Improve test coverage for existing features
-4. Refactor or clean up code that's obviously messy
-5. Add small, self-contained improvements (better error handling, loading states, accessibility)
-6. Improve documentation (API docs, component docs)
+1. Fix any lint/type errors (run \`npx tsc --noEmit\` first) — always do this before anything else
+2. **Build real features** that make the platform more useful:
+   - Improve the mentor-mentee matching algorithm (smarter scoring, weighting)
+   - Enhance the RAG knowledge base integration (better context retrieval, source citations)
+   - Add mentor availability/scheduling features
+   - Improve the goal tracking system (progress visualization, milestones, reminders)
+   - Build admin dashboard improvements (analytics, match oversight, user management)
+   - Enhance the chat system (typing indicators, file sharing, search)
+   - Improve onboarding flow UX (progress indicators, better question flow)
+   - Add notification improvements (email digests, in-app notification center)
+3. Fix real bugs — check for broken API routes, UI issues, or data inconsistencies
+4. Improve security — input validation, rate limiting, auth edge cases, CSRF protection
+5. Performance improvements — query optimization, caching, lazy loading
+
+**DO NOT spend iterations on:**
+- Writing tests (tests are fine but not the priority — features are)
+- Adding documentation or comments
+- Refactoring code that works fine
+- Generic "clean up" without a clear user-facing improvement
 
 **Rules:**
-- Make small, focused commits. Don't refactor the entire codebase at once.
-- Run the build/lint check before committing to make sure nothing is broken.
+- Make small, focused commits. One feature or fix per iteration.
+- Run \`npm run build\` before committing to make sure nothing is broken.
 - If you're unsure about a change, skip it. Better to do nothing than break the project.
-- Write a brief summary of what you did at the end of your response.`;
+- Write a brief summary of what you built and why it matters at the end.`;
 
 export function enqueueMentoIteration(channelId: string): string {
   return enqueue({

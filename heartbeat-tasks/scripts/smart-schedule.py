@@ -148,6 +148,15 @@ def notify(channel: str, message: str):
 
 def get_calendar_events(start: datetime.datetime, end: datetime.datetime) -> list[dict]:
     """Fetch events from Calendar.app via AppleScript."""
+    # Ensure Calendar.app is running (launchd may not have it open)
+    # osascript 'launch' fails with -600 if app isn't running; 'open -a' works reliably
+    subprocess.run(
+        ["open", "-a", "Calendar"],
+        capture_output=True, timeout=10,
+    )
+    import time
+    time.sleep(2)  # Give Calendar.app time to initialize and sync
+
     script = f"""
 on makeDate(y, m, d, h, mn, s)
     set dt to current date
@@ -332,11 +341,20 @@ def main():
     events = get_calendar_events(today_start, tomorrow_end)
     print(f"Found {len(events)} calendar events")
 
+    if not events:
+        print("Warning: no calendar events found — Calendar.app may not be accessible")
+
     today_events = [e for e in events if e["start"].date() == now.date()]
     tomorrow_events = [e for e in events if e["start"].date() == tomorrow.date()]
 
     today_blocks = find_free_blocks(today_events, today_start, today_end)
     tomorrow_blocks = find_free_blocks(tomorrow_events, tomorrow_start, tomorrow_end)
+
+    # If zero events were found, don't report the entire day as "free" —
+    # it likely means Calendar.app failed to respond, not that you have no plans
+    if not events:
+        today_blocks = []
+        tomorrow_blocks = []
 
     # Get upcoming assignments
     assignments = get_upcoming_assignments(days=3)

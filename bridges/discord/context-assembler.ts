@@ -11,7 +11,7 @@
  *   - Filesystem: heartbeat state files, pending notifications
  */
 
-import { existsSync, readFileSync, readdirSync, appendFileSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, readdirSync, appendFileSync, mkdirSync, statSync } from "fs";
 import { execSync } from "child_process";
 import { join, basename } from "path";
 import { getDb } from "./db.js";
@@ -28,12 +28,15 @@ const PROJECT_KNOWLEDGE_DIR = join(SHARED_DIR, "project-knowledge");
 const HEARTBEAT_DIR = join(HARNESS_ROOT, "heartbeat-tasks");
 const NOTIFICATIONS_FILE = join(HEARTBEAT_DIR, "pending-notifications.jsonl");
 
-// Token budget: ~5000-6000 tokens. Cost is negligible on Max subscription.
+// Token budget: ~5000-6000 tokens for most agents.
+// Orchestrator/builder get expanded budgets (1M context available on Max plan).
 // Learnings get the lion's share — that's the whole point of the system.
-const MAX_TOTAL_CHARS = 25000; // ~6000 tokens
+const MAX_TOTAL_CHARS = 25000; // ~6000 tokens (default)
 const COURSE_NOTES_DIR = join(SHARED_DIR, "course-notes");
+const LIVE_STATE_FILE = join(VAULT_DIR, "LIVE_STATE.md");
 
 const SECTION_LIMITS: Record<string, number> = {
+  liveState: 3000,
   project: 600,
   channelState: 400,
   learnings: 12000,
@@ -47,6 +50,35 @@ const SECTION_LIMITS: Record<string, number> = {
   pendingWork: 600,
   workQueue: 400,
 };
+
+/**
+ * Agent-specific limit overrides. Agents with expanded context get more
+ * relevant information without truncation. 1M context window on Max plan
+ * makes this cost-negligible for high-value agents.
+ */
+const AGENT_LIMIT_OVERRIDES: Record<string, { limits: Partial<Record<string, number>>; maxTotal: number }> = {
+  orchestrator: {
+    limits: { liveState: Infinity, learnings: Infinity, projectKnowledge: 6000, taskHistory: 3000 },
+    maxTotal: 50000,
+  },
+  builder: {
+    limits: { liveState: 6000, learnings: Infinity, projectKnowledge: Infinity },
+    maxTotal: 50000,
+  },
+  scheduler: {
+    limits: { heartbeats: Infinity },
+    maxTotal: 30000,
+  },
+};
+
+function getAgentLimits(agentName: string): { limits: Record<string, number>; maxTotal: number } {
+  const overrides = AGENT_LIMIT_OVERRIDES[agentName];
+  if (!overrides) return { limits: SECTION_LIMITS, maxTotal: MAX_TOTAL_CHARS };
+  return {
+    limits: { ...SECTION_LIMITS, ...overrides.limits },
+    maxTotal: overrides.maxTotal,
+  };
+}
 
 // Common English stopwords for keyword extraction
 const STOPWORDS = new Set([
@@ -85,6 +117,192 @@ interface VaultEntry {
   score: number;
 }
 
+// ─── Live State + Wikilink Resolution ────────────────────────────────
+
+/**
+ * Resolve [[wikilinks]] in text to actual file contents.
+ * Searches: vault/learnings/, vault/shared/project-knowledge/, vault/shared/course-notes/
+ * Returns the text with wikilinks replaced by resolved content (or left as-is if not found).
+ * Only resolves links in sections whose keywords match the prompt.
+ */
+function resolveWikilinks(text: string, keywords: Set<string>, maxResolvedChars: number = 8000): string {
+  const wikilinkRegex = /\[\[([^\]]+)\]\]/g;
+  const matches = [...text.matchAll(wikilinkRegex)];
+  if (matches.length === 0) return text;
+
+  // Build a lookup of resolvable files
+  const resolvedContents: Map<string, string> = new Map();
+  let totalResolved = 0;
+
+  for (const match of matches) {
+    const linkTarget = match[1];
+    if (resolvedContents.has(linkTarget)) continue;
+    if (totalResolved >= maxResolvedChars) break;
+
+    const content = resolveWikilinkTarget(linkTarget);
+    if (content) {
+      const trimmed = content.slice(0, 2000); // Cap each resolved link
+      resolvedContents.set(linkTarget, trimmed);
+      totalResolved += trimmed.length;
+    }
+  }
+
+  // Now selectively resolve: parse sections, check keyword overlap
+  return resolveInRelevantSections(text, keywords, resolvedContents);
+}
+
+/**
+ * Resolve a single wikilink target to file content.
+ * Search order: project-knowledge > learnings > course-notes
+ */
+function resolveWikilinkTarget(target: string): string | null {
+  // Normalize: strip .md extension if present for matching, add it for file lookup
+  const cleanTarget = target.replace(/\.md$/, "");
+
+  // 1. Project knowledge: vault/shared/project-knowledge/<target>.md
+  const pkPath = join(PROJECT_KNOWLEDGE_DIR, `${cleanTarget}.md`);
+  if (existsSync(pkPath)) {
+    return readFileSync(pkPath, "utf-8");
+  }
+
+  // 2. Learnings: vault/learnings/<target>.md (exact match or prefix match)
+  if (existsSync(LEARNINGS_DIR)) {
+    const exactPath = join(LEARNINGS_DIR, `${cleanTarget}.md`);
+    if (existsSync(exactPath)) {
+      return readFileSync(exactPath, "utf-8");
+    }
+    // Prefix match: [[ERR-client-project-vercel-limits]] → find file starting with that
+    try {
+      const files = readdirSync(LEARNINGS_DIR);
+      const match = files.find((f) => f.startsWith(cleanTarget) && f.endsWith(".md"));
+      if (match) {
+        return readFileSync(join(LEARNINGS_DIR, match), "utf-8");
+      }
+    } catch {}
+  }
+
+  // 3. Course notes directory: vault/shared/course-notes/<target>/
+  const coursePath = join(COURSE_NOTES_DIR, cleanTarget);
+  if (existsSync(coursePath) && statSyncSafe(coursePath)?.isDirectory()) {
+    // Return a listing of notes in the directory
+    try {
+      const notes = readdirSync(coursePath)
+        .filter((f) => f.endsWith(".md"))
+        .sort()
+        .slice(-5); // Last 5 notes
+      return `Course notes (${cleanTarget}): ${notes.join(", ")}`;
+    } catch {}
+  }
+
+  return null;
+}
+
+/** Safe statSync that returns null on error */
+function statSyncSafe(p: string): ReturnType<typeof statSync> | null {
+  try {
+    return statSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse LIVE_STATE.md into sections (split by ## headers).
+ * For each section, check if its keywords overlap with the prompt keywords.
+ * If they do, resolve the [[wikilinks]] in that section and append the content.
+ * If not, keep the section as-is (wikilinks stay as plain text references).
+ */
+function resolveInRelevantSections(
+  text: string,
+  keywords: Set<string>,
+  resolvedContents: Map<string, string>,
+): string {
+  // Split into sections by ## or ### headers
+  const lines = text.split("\n");
+  const sections: { header: string; body: string[] }[] = [];
+  let current: { header: string; body: string[] } = { header: "", body: [] };
+
+  for (const line of lines) {
+    if (/^#{2,3}\s/.test(line)) {
+      if (current.header || current.body.length > 0) {
+        sections.push(current);
+      }
+      current = { header: line, body: [] };
+    } else {
+      current.body.push(line);
+    }
+  }
+  if (current.header || current.body.length > 0) {
+    sections.push(current);
+  }
+
+  // Rebuild, resolving wikilinks only in keyword-matching sections
+  const result: string[] = [];
+  for (const section of sections) {
+    const sectionText = section.header + "\n" + section.body.join("\n");
+    const sectionWords = new Set(
+      (section.header + " " + section.body.join(" "))
+        .toLowerCase()
+        .split(/\W+/)
+        .filter((w) => w.length > 2)
+    );
+
+    // Check keyword overlap
+    let overlap = 0;
+    for (const kw of keywords) {
+      if (sectionWords.has(kw)) overlap++;
+    }
+
+    if (overlap > 0) {
+      // Resolve wikilinks in this section
+      let resolved = sectionText;
+      const appendedContent: string[] = [];
+
+      for (const [target, content] of resolvedContents) {
+        if (resolved.includes(`[[${target}]]`)) {
+          // Replace the link with a reference marker
+          resolved = resolved.replace(`[[${target}]]`, `[→${target}]`);
+          appendedContent.push(`\n<resolved-ref name="${target}">\n${content.slice(0, 1500)}\n</resolved-ref>`);
+        }
+      }
+
+      result.push(resolved);
+      if (appendedContent.length > 0) {
+        result.push(...appendedContent);
+      }
+    } else {
+      // Keep section as-is — wikilinks stay as plain text references
+      result.push(sectionText);
+    }
+  }
+
+  return result.join("\n");
+}
+
+/**
+ * Build the live state section from vault/LIVE_STATE.md.
+ * Resolves [[wikilinks]] in sections that match the prompt keywords.
+ */
+function buildLiveStateSection(keywords: Set<string>): string | null {
+  if (!existsSync(LIVE_STATE_FILE)) return null;
+
+  try {
+    let content = readFileSync(LIVE_STATE_FILE, "utf-8");
+
+    // Strip the instruction block (between > lines at the top)
+    content = content.replace(/^(?:>.*\n)+\n?/, "");
+
+    if (!content.trim()) return null;
+
+    // Resolve wikilinks in relevant sections
+    const resolved = resolveWikilinks(content, keywords);
+
+    return `## Live State\n${resolved}`;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Main Entry Point ────────────────────────────────────────────────
 
 export async function assembleContext(params: AssembleContextParams): Promise<string> {
@@ -92,9 +310,29 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     const sections: string[] = [];
     let totalChars = 0;
 
+    const { limits: agentLimits, maxTotal } = getAgentLimits(params.agentName);
+
     const project = getProject(params.channelId);
     const channelConfig = getChannelConfig(params.channelId);
     const keywords = extractKeywords(params.prompt);
+
+    // Helper: apply agent-aware truncation (Infinity = no truncation)
+    function agentTruncate(section: string, key: string, label: string): string {
+      const limit = agentLimits[key] ?? SECTION_LIMITS[key] ?? Infinity;
+      if (limit === Infinity) return section;
+      return monitor.truncate(section, limit, label);
+    }
+    function agentLimit(key: string): number {
+      return agentLimits[key] ?? SECTION_LIMITS[key] ?? Infinity;
+    }
+
+    // Priority 0: Live state (always include — the "what's happening now" file)
+    const liveStateSection = buildLiveStateSection(keywords);
+    if (liveStateSection) {
+      const truncated = agentTruncate(liveStateSection, "liveState", "context:live-state");
+      sections.push(truncated);
+      totalChars += truncated.length;
+    }
 
     // Priority 1: Active project + channel config (always include)
     const projectSection = buildProjectSection(project, channelConfig, params.agentName);
@@ -104,7 +342,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     }
 
     // Priority 2: Relevant learnings (hybrid: semantic + keyword)
-    if (totalChars < MAX_TOTAL_CHARS) {
+    if (totalChars < maxTotal) {
       const learningsSection = await buildLearningsSection(params.prompt, keywords, {
         agentName: params.agentName,
         channelId: params.channelId,
@@ -112,7 +350,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
         projectName: project?.name,
       });
       if (learningsSection) {
-        let finalLearnings = monitor.truncate(learningsSection, SECTION_LIMITS.learnings, "context:learnings");
+        let finalLearnings = agentTruncate(learningsSection, "learnings", "context:learnings");
 
         // Check if any learnings were significantly truncated and notify the LLM
         const truncationEvents = monitor.drainRecentEvents("context:learnings");
@@ -129,88 +367,91 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     }
 
     // Priority 3: Project-specific knowledge
-    if (totalChars < MAX_TOTAL_CHARS && project) {
+    if (totalChars < maxTotal && project) {
       const knowledgeSection = buildProjectKnowledgeSection(project.name);
       if (knowledgeSection) {
-        sections.push(monitor.truncate(knowledgeSection, SECTION_LIMITS.projectKnowledge, "context:project-knowledge"));
-        totalChars += Math.min(knowledgeSection.length, SECTION_LIMITS.projectKnowledge);
+        const truncated = agentTruncate(knowledgeSection, "projectKnowledge", "context:project-knowledge");
+        sections.push(truncated);
+        totalChars += truncated.length;
       }
     }
 
     // Priority 4: Task history
-    if (totalChars < MAX_TOTAL_CHARS) {
+    if (totalChars < maxTotal) {
       const taskSection = buildTaskHistorySection(params.channelId);
       if (taskSection) {
-        sections.push(monitor.truncate(taskSection, SECTION_LIMITS.taskHistory, "context:task-history"));
-        totalChars += Math.min(taskSection.length, SECTION_LIMITS.taskHistory);
+        const truncated = agentTruncate(taskSection, "taskHistory", "context:task-history");
+        sections.push(truncated);
+        totalChars += truncated.length;
       }
     }
 
     // Priority 5: Recent Outlook (email + calendar digest)
-    if (totalChars < MAX_TOTAL_CHARS) {
+    if (totalChars < maxTotal) {
       const outlookSection = buildRecentOutlookSection();
       if (outlookSection) {
-        sections.push(monitor.truncate(outlookSection, SECTION_LIMITS.recentOutlook, "context:recent-outlook"));
-        totalChars += Math.min(outlookSection.length, SECTION_LIMITS.recentOutlook);
+        const truncated = agentTruncate(outlookSection, "recentOutlook", "context:recent-outlook");
+        sections.push(truncated);
+        totalChars += truncated.length;
       }
     }
 
     // Priority 5.5: Recent academic notes (course-specific if in a course channel)
-    if (totalChars < MAX_TOTAL_CHARS) {
+    if (totalChars < maxTotal) {
       const academicSection = buildRecentAcademicSection(params.channelId);
       if (academicSection) {
-        sections.push(monitor.truncate(academicSection, SECTION_LIMITS.recentAcademic, "context:recent-academic"));
-        totalChars += Math.min(academicSection.length, SECTION_LIMITS.recentAcademic);
+        const truncated = agentTruncate(academicSection, "recentAcademic", "context:recent-academic");
+        sections.push(truncated);
+        totalChars += truncated.length;
       }
     }
 
     // Priority 6: Conventions + tool gotchas (always load — small files)
-    if (totalChars < MAX_TOTAL_CHARS) {
+    if (totalChars < maxTotal) {
       const conventionsSection = buildConventionsSection();
       if (conventionsSection) {
-        sections.push(monitor.truncate(conventionsSection, SECTION_LIMITS.conventions, "context:conventions"));
-        totalChars += Math.min(conventionsSection.length, SECTION_LIMITS.conventions);
+        const truncated = agentTruncate(conventionsSection, "conventions", "context:conventions");
+        sections.push(truncated);
+        totalChars += truncated.length;
       }
     }
 
-    if (totalChars < MAX_TOTAL_CHARS) {
+    if (totalChars < maxTotal) {
       const gotchasSection = buildGotchasSection();
       if (gotchasSection) {
-        sections.push(monitor.truncate(gotchasSection, SECTION_LIMITS.gotchas, "context:gotchas"));
-        totalChars += Math.min(gotchasSection.length, SECTION_LIMITS.gotchas);
+        const truncated = agentTruncate(gotchasSection, "gotchas", "context:gotchas");
+        sections.push(truncated);
+        totalChars += truncated.length;
       }
     }
 
-    // Priority 7: Heartbeat status (scheduler agent gets full untruncated context)
-    if (totalChars < MAX_TOTAL_CHARS || params.agentName === "scheduler") {
+    // Priority 7: Heartbeat status (agent-aware limits, scheduler gets unlimited)
+    if (totalChars < maxTotal || agentLimit("heartbeats") === Infinity) {
       const heartbeatSection = buildHeartbeatSection();
       if (heartbeatSection) {
-        if (params.agentName === "scheduler") {
-          // Scheduler owns this domain — no truncation, no budget check
-          sections.push(heartbeatSection);
-          totalChars += heartbeatSection.length;
-        } else {
-          sections.push(monitor.truncate(heartbeatSection, SECTION_LIMITS.heartbeats, "context:heartbeats"));
-          totalChars += Math.min(heartbeatSection.length, SECTION_LIMITS.heartbeats);
-        }
+        const truncated = agentTruncate(heartbeatSection, "heartbeats", "context:heartbeats");
+        sections.push(truncated);
+        totalChars += truncated.length;
       }
     }
 
     // Priority 8: Pending work
-    if (totalChars < MAX_TOTAL_CHARS) {
+    if (totalChars < maxTotal) {
       const pendingSection = buildPendingWorkSection(params.channelId);
       if (pendingSection) {
-        sections.push(monitor.truncate(pendingSection, SECTION_LIMITS.pendingWork, "context:pending-work"));
-        totalChars += Math.min(pendingSection.length, SECTION_LIMITS.pendingWork);
+        const truncated = agentTruncate(pendingSection, "pendingWork", "context:pending-work");
+        sections.push(truncated);
+        totalChars += truncated.length;
       }
     }
 
     // Priority 9: Autonomous work queue status
-    if (totalChars < MAX_TOTAL_CHARS) {
+    if (totalChars < maxTotal) {
       const workQueueSection = buildWorkQueueSection();
       if (workQueueSection) {
-        sections.push(monitor.truncate(workQueueSection, SECTION_LIMITS.workQueue, "context:work-queue"));
-        totalChars += Math.min(workQueueSection.length, SECTION_LIMITS.workQueue);
+        const truncated = agentTruncate(workQueueSection, "workQueue", "context:work-queue");
+        sections.push(truncated);
+        totalChars += truncated.length;
       }
     }
 
@@ -599,7 +840,7 @@ function buildWorkQueueSection(): string | null {
   try {
     const db = getDb();
     const rows = db.prepare(
-      "SELECT status, COUNT(*) as c FROM work_queue WHERE status IN ('pending', 'gated', 'running') GROUP BY status"
+      "SELECT status, COUNT(*) as c FROM work_queue WHERE status IN ('pending', 'gated', 'running', 'evaluating') GROUP BY status"
     ).all() as { status: string; c: number }[];
 
     if (rows.length === 0) return null;

@@ -104,6 +104,12 @@ function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(10);
     console.log("[DB] Applied schema v10 (learning edges)");
   }
+
+  if (version < 11) {
+    applyV11(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(11);
+    console.log("[DB] Applied schema v11 (work queue evaluation fields)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -463,6 +469,50 @@ function applyV10(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_edges_source ON learning_edges(source_id);
     CREATE INDEX IF NOT EXISTS idx_edges_target ON learning_edges(target_id);
+  `);
+}
+
+function applyV11(database: Database.Database): void {
+  // Add evaluation fields + 'evaluating' status to work_queue for execute→evaluate→adjust loop
+  // Must recreate table to update CHECK constraint (SQLite limitation)
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS work_queue_v11 (
+      id                TEXT PRIMARY KEY,
+      source            TEXT NOT NULL,
+      source_id         TEXT,
+      channel_id        TEXT NOT NULL,
+      prompt            TEXT NOT NULL,
+      agent             TEXT,
+      priority          INTEGER NOT NULL DEFAULT 50,
+      status            TEXT NOT NULL CHECK (status IN ('proposed','approved','pending','gated','running','evaluating','completed','failed','cancelled')),
+      gate_reason       TEXT,
+      depends_on        TEXT,
+      scheduled_at      TEXT,
+      started_at        TEXT,
+      completed_at      TEXT,
+      task_id           TEXT,
+      attempt           INTEGER NOT NULL DEFAULT 0,
+      max_attempts      INTEGER NOT NULL DEFAULT 3,
+      last_error        TEXT,
+      metadata          TEXT,
+      evaluation_prompt TEXT,
+      evaluation_result TEXT,
+      iteration         INTEGER NOT NULL DEFAULT 0,
+      max_iterations    INTEGER NOT NULL DEFAULT 3,
+      parent_id         TEXT,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO work_queue_v11 (id, source, source_id, channel_id, prompt, agent, priority, status, gate_reason, depends_on, scheduled_at, started_at, completed_at, task_id, attempt, max_attempts, last_error, metadata, created_at, updated_at)
+      SELECT id, source, source_id, channel_id, prompt, agent, priority, status, gate_reason, depends_on, scheduled_at, started_at, completed_at, task_id, attempt, max_attempts, last_error, metadata, created_at, updated_at FROM work_queue;
+    DROP TABLE work_queue;
+    ALTER TABLE work_queue_v11 RENAME TO work_queue;
+    CREATE INDEX IF NOT EXISTS idx_work_queue_status ON work_queue(status);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_priority ON work_queue(priority DESC, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_source ON work_queue(source);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_channel ON work_queue(channel_id);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_scheduled ON work_queue(scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_work_queue_parent ON work_queue(parent_id);
   `);
 }
 
