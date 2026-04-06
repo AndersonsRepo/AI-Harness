@@ -1,0 +1,12 @@
+{
+  "name": "ci-autofix",
+  "description": "Polls GitHub Actions for CI failures and spawns Claude to auto-fix on a new branch. Prompts user to merge.",
+  "type": "script",
+  "script": "ci-autofix.py",
+  "schedule": "30m",
+  "enabled": true,
+  "notify": "discord",
+  "discord_channel": "heartbeat-status",
+  "activeHours": {"start": "07:00", "end": "23:00"},
+  "timeout": 360
+}

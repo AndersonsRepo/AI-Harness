@@ -1971,27 +1971,27 @@ client.on("clientReady", async () => {
   //   }
   // }, LATTICE_INTERVAL_MS);
 
-  // Hackathon: RE-ENABLED 2026-04-03 — 13 days to April 16 deadline
-  const HACKATHON_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2h iterations (accelerated for deadline)
-  setInterval(() => {
-    try {
-      const aytmCh = resolveProjectChannel("aytm-research");
-      if (aytmCh) enqueueAytmIteration(aytmCh.id);
-    } catch (err: any) {
-      console.error(`[PROJECT-ITER] Aytm trigger error: ${err.message}`);
-    }
-    try {
-      const iaWestCh = resolveProjectChannel("ia-west-match");
-      if (iaWestCh) enqueueIaWestIteration(iaWestCh.id);
-    } catch (err: any) {
-      console.error(`[PROJECT-ITER] IA West trigger error: ${err.message}`);
-    }
-  }, HACKATHON_INTERVAL_MS);
+  // Hackathon: DISABLED 2026-04-06 — user request to stop iterations
+  // const HACKATHON_INTERVAL_MS = 2 * 60 * 60 * 1000;
+  // setInterval(() => {
+  //   try {
+  //     const aytmCh = resolveProjectChannel("aytm-research");
+  //     if (aytmCh) enqueueAytmIteration(aytmCh.id);
+  //   } catch (err: any) {
+  //     console.error(`[PROJECT-ITER] Aytm trigger error: ${err.message}`);
+  //   }
+  //   try {
+  //     const iaWestCh = resolveProjectChannel("ia-west-match");
+  //     if (iaWestCh) enqueueIaWestIteration(iaWestCh.id);
+  //   } catch (err: any) {
+  //     console.error(`[PROJECT-ITER] IA West trigger error: ${err.message}`);
+  //   }
+  // }, HACKATHON_INTERVAL_MS);
 
   console.log(`[PROJECT-ITER] Mento iteration enabled (every ${MENTO_INTERVAL_MS / 3600000}h)`);
   console.log(`[PROJECT-ITER] Lead-gen iteration DISABLED (user request 2026-03-25)`);
   console.log(`[PROJECT-ITER] Lattice parallel iteration disabled (using heartbeat task instead)`);
-  console.log(`[PROJECT-ITER] Hackathon iteration ENABLED (2h cycles — deadline April 16)`);
+  console.log(`[PROJECT-ITER] Hackathon iteration DISABLED (user request 2026-04-06)`);
 
   // Handle parallel group completions — feed results back to orchestrator
   onGroupComplete(async (groupId, status) => {

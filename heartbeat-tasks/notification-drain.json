@@ -2,9 +2,9 @@
   "name": "notification-drain",
   "type": "script",
   "script": "notification-drain.py",
-  "interval_minutes": 5,
   "notify": null,
   "enabled": true,
   "timeout": 30,
-  "created": "2025-03-10T00:00:00"
+  "created": "2025-03-10T00:00:00",
+  "schedule": "5m"
 }

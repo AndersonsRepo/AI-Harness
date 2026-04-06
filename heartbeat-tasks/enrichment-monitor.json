@@ -1,8 +1,0 @@
-{
-  "name": "enrichment-monitor",
-  "script": "check-enrichment.py",
-  "schedule": "30m",
-  "notify": "discord",
-  "discord_channel": "lead-gen-pipeline",
-  "enabled": false
-}

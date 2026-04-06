@@ -313,6 +313,7 @@ Run `HARNESS_ROOT=/path/to/AI-Harness npx tsx bridges/discord/test-upgrade.ts` t
 - **Loop detection**: `task-runner.ts` tracks the last 30 tool calls per task. If the same tool+args pattern repeats 4+ times, the task is killed with a warning.
 - **Temporal decay**: Embedding search scores decay with a 30-day half-life (`score × e^(-λ × age)`). Files under `shared/` and `agents/` are exempt (evergreen).
 - **Pre-compaction flush**: A `Stop` hook runs `session-debrief.py` when a Claude Code conversation ends, capturing learnings before context is lost.
+- **No outbound email**: AI Harness has robust email *receiving/indexing* (mcp-outlook, gmail-watcher, email-monitor.py) but zero email *sending* capability. Features needing outbound email require a new Gmail Send MCP or SMTP integration.
 
 ### Agent Teams (Interactive CLI)
 

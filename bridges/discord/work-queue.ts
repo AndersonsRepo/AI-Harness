@@ -53,6 +53,12 @@ export interface WorkItem {
   max_attempts: number;
   last_error: string | null;
   metadata: string | null;
+  // Evaluation loop fields (execute → evaluate → adjust)
+  evaluation_prompt: string | null;
+  evaluation_result: string | null;
+  iteration: number;
+  max_iterations: number;
+  parent_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -68,6 +74,12 @@ export interface EnqueueOptions {
   scheduledAt?: string;
   metadata?: Record<string, any>;
   maxAttempts?: number;
+  /** Optional evaluation prompt — runs after completion to assess quality */
+  evaluationPrompt?: string;
+  /** Max evaluate→adjust iterations (default 3) */
+  maxIterations?: number;
+  /** Parent work item ID (for adjusted re-enqueues) */
+  parentId?: string;
 }
 
 export type GateCheckResult = { pass: true } | { pass: false; reason: string };
@@ -156,8 +168,8 @@ export function enqueue(opts: EnqueueOptions): string {
   }
 
   db.prepare(`
-    INSERT INTO work_queue (id, source, source_id, channel_id, prompt, agent, priority, status, gate_reason, depends_on, scheduled_at, max_attempts, metadata, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO work_queue (id, source, source_id, channel_id, prompt, agent, priority, status, gate_reason, depends_on, scheduled_at, max_attempts, metadata, evaluation_prompt, max_iterations, parent_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     opts.source,
@@ -172,6 +184,9 @@ export function enqueue(opts: EnqueueOptions): string {
     opts.scheduledAt || null,
     opts.maxAttempts ?? 3,
     opts.metadata ? JSON.stringify(opts.metadata) : null,
+    opts.evaluationPrompt || null,
+    opts.maxIterations ?? 3,
+    opts.parentId || null,
     now,
     now
   );
@@ -530,9 +545,10 @@ async function dispatchNext(): Promise<boolean> {
 }
 
 /** Main dispatch tick — called periodically */
-export async function dispatchTick(): Promise<{ promoted: number; dispatched: number }> {
+export async function dispatchTick(): Promise<{ promoted: number; dispatched: number; evaluated: number }> {
   let promoted = 0;
   let dispatched = 0;
+  let evaluated = 0;
 
   try {
     // Phase 1: Promote gated items whose gates now pass
@@ -540,6 +556,9 @@ export async function dispatchTick(): Promise<{ promoted: number; dispatched: nu
 
     // Phase 2: Sync running items — mark completed/failed based on task-runner status
     syncRunningItems();
+
+    // Phase 2.5: Evaluate completed items that have evaluation prompts
+    evaluated = await evaluateCompletedItems();
 
     // Phase 3: Dispatch pending items (up to capacity)
     const capacity = maxConcurrentWork - getRunningWork().length;
@@ -552,11 +571,11 @@ export async function dispatchTick(): Promise<{ promoted: number; dispatched: nu
     console.error(`[WORK-QUEUE] Dispatch tick error: ${err.message}`);
   }
 
-  if (promoted > 0 || dispatched > 0) {
-    console.log(`[WORK-QUEUE] Tick: promoted=${promoted}, dispatched=${dispatched}`);
+  if (promoted > 0 || dispatched > 0 || evaluated > 0) {
+    console.log(`[WORK-QUEUE] Tick: promoted=${promoted}, dispatched=${dispatched}, evaluated=${evaluated}`);
   }
 
-  return { promoted, dispatched };
+  return { promoted, dispatched, evaluated };
 }
 
 /** Check task-runner for completed/failed tasks and update work items */
@@ -577,8 +596,15 @@ function syncRunningItems(): void {
     }
 
     if (task.status === "completed") {
-      updateWorkItem(item.id, { status: "completed", completed_at: new Date().toISOString() });
-      console.log(`[WORK-QUEUE] ${item.id} completed (task ${item.task_id})`);
+      // Check if this item has an evaluation prompt — if so, enter evaluation
+      if (item.evaluation_prompt && item.iteration < item.max_iterations) {
+        updateWorkItem(item.id, { status: "evaluating" as any });
+        console.log(`[WORK-QUEUE] ${item.id} completed task, entering evaluation (iteration ${item.iteration + 1}/${item.max_iterations})`);
+        // Evaluation is handled asynchronously by evaluateCompletedItems()
+      } else {
+        updateWorkItem(item.id, { status: "completed", completed_at: new Date().toISOString() });
+        console.log(`[WORK-QUEUE] ${item.id} completed (task ${item.task_id})`);
+      }
     } else if (task.status === "dead" || task.status === "failed") {
       // Check retry
       if (item.attempt < item.max_attempts) {
@@ -600,6 +626,122 @@ function syncRunningItems(): void {
     }
     // running/waiting_continue/pending — still in progress, leave it
   }
+}
+
+// ─── Evaluation Loop ────────────────────────────────────────────────────
+
+/** Callback for evaluation — set by bot.ts to spawn reviewer agent */
+let evaluationCallback: ((item: WorkItem, evaluationPrompt: string) => Promise<EvaluationResult>) | null = null;
+
+export interface EvaluationResult {
+  verdict: "pass" | "adjust" | "fail";
+  feedback: string;
+  adjustedPrompt?: string;
+}
+
+/** Set the evaluation handler (called by bot.ts to wire up agent spawning) */
+export function onEvaluationNeeded(callback: (item: WorkItem, evaluationPrompt: string) => Promise<EvaluationResult>): void {
+  evaluationCallback = callback;
+}
+
+/** Get items waiting for evaluation */
+export function getEvaluatingWork(): WorkItem[] {
+  return getDb().prepare(
+    "SELECT * FROM work_queue WHERE status = 'evaluating' ORDER BY updated_at ASC"
+  ).all() as WorkItem[];
+}
+
+/**
+ * Process items in 'evaluating' status.
+ * Spawns a reviewer agent to assess the completed work, then:
+ *   PASS   → mark completed
+ *   ADJUST → create a new child item with adjusted prompt, link via parent_id
+ *   FAIL   → mark failed with evaluation feedback
+ */
+async function evaluateCompletedItems(): Promise<number> {
+  if (!evaluationCallback) return 0;
+
+  const evaluating = getEvaluatingWork();
+  let evaluated = 0;
+
+  for (const item of evaluating) {
+    if (!item.evaluation_prompt) {
+      // No evaluation prompt — shouldn't be in this state, complete it
+      updateWorkItem(item.id, { status: "completed", completed_at: new Date().toISOString() });
+      continue;
+    }
+
+    try {
+      const task = item.task_id ? getTask(item.task_id) as TaskRecord | null : null;
+      const taskOutput = (task as any)?.response || (task as any)?.last_response || "";
+
+      // Build evaluation context
+      const evalPrompt = `## Original Task\n${item.prompt}\n\n## Task Output\n${taskOutput}\n\n## Evaluation Criteria\n${item.evaluation_prompt}\n\nRespond with a JSON object: {"verdict": "pass"|"adjust"|"fail", "feedback": "...", "adjustedPrompt": "..." (only if verdict is adjust)}`;
+
+      const result = await evaluationCallback(item, evalPrompt);
+
+      if (result.verdict === "pass") {
+        updateWorkItem(item.id, {
+          status: "completed",
+          completed_at: new Date().toISOString(),
+          evaluation_result: JSON.stringify(result),
+        });
+        console.log(`[WORK-QUEUE] ${item.id} passed evaluation (iteration ${item.iteration + 1})`);
+      } else if (result.verdict === "adjust" && result.adjustedPrompt) {
+        // Mark current item as completed (this iteration is done)
+        updateWorkItem(item.id, {
+          status: "completed",
+          completed_at: new Date().toISOString(),
+          evaluation_result: JSON.stringify(result),
+        });
+
+        // Enqueue adjusted follow-up
+        const childId = enqueue({
+          source: item.source,
+          sourceId: `${item.source_id || item.id}:iter${item.iteration + 1}`,
+          channelId: item.channel_id,
+          prompt: `${result.adjustedPrompt}\n\n## Previous Feedback\n${result.feedback}`,
+          agent: item.agent || undefined,
+          priority: item.priority,
+          evaluationPrompt: item.evaluation_prompt,
+          maxIterations: item.max_iterations,
+          parentId: item.id,
+          metadata: {
+            ...parseMetadata(item),
+            iteration: item.iteration + 1,
+            parentFeedback: result.feedback.slice(0, 500),
+          },
+        });
+
+        // Set iteration on child
+        updateWorkItem(childId, { iteration: item.iteration + 1 } as any);
+
+        console.log(`[WORK-QUEUE] ${item.id} needs adjustment → spawned child ${childId} (iteration ${item.iteration + 2}/${item.max_iterations})`);
+      } else {
+        // fail
+        updateWorkItem(item.id, {
+          status: "failed",
+          completed_at: new Date().toISOString(),
+          last_error: `Evaluation failed: ${result.feedback}`,
+          evaluation_result: JSON.stringify(result),
+        });
+        console.log(`[WORK-QUEUE] ${item.id} failed evaluation: ${result.feedback.slice(0, 100)}`);
+      }
+
+      evaluated++;
+    } catch (err: any) {
+      console.error(`[WORK-QUEUE] Evaluation error for ${item.id}: ${err.message}`);
+      // Don't get stuck — move to completed after eval error
+      updateWorkItem(item.id, {
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        last_error: `Evaluation error: ${err.message}`,
+      });
+      evaluated++;
+    }
+  }
+
+  return evaluated;
 }
 
 // ─── Lifecycle ──────────────────────────────────────────────────────────

@@ -1,7 +1,6 @@
 {
   "name": "promotion-check",
   "prompt": "Scan all files in vault/learnings/ and read their YAML frontmatter. Find entries where recurrence-count >= 3 AND status is NOT 'promoted' AND status is NOT 'archived'. For each qualifying entry: (1) Read the full file, (2) Format a promotion request as a Discord notification with the learning title, pattern-key, recurrence count, and a summary of what was learned. Write the notification to heartbeat-tasks/pending-notifications.jsonl in this format: {\"channel\": \"notifications\", \"task\": \"promotion-check\", \"timestamp\": \"<now>\", \"summary\": \"**Promotion candidate:** <title>\\nPattern: <pattern-key> (seen <N> times)\\nLearning: <summary>\\n\\nReply in #notifications with 'approve <id>' or 'reject <id>'\"} \u2014 one line per candidate. If no candidates found, write nothing. Be concise.",
-  "interval_minutes": 1440,
   "notify": null,
   "discord_channel": null,
   "allowed_tools": [
@@ -12,5 +11,6 @@
   ],
   "enabled": true,
   "timeout": 300,
-  "created": "2026-03-10T00:00:00"
+  "created": "2026-03-10T00:00:00",
+  "schedule": "24h"
 }

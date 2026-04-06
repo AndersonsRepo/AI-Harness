@@ -3,7 +3,7 @@
   "description": "Monitor CS 2600 Systems Programming course website for updates",
   "type": "script",
   "script": "cs2600-watch.py",
-  "schedule": "weekly",
+  "cron": "0 9 * * 1",
   "enabled": true,
   "notify": "discord",
   "discord_channel": "systems-programming",
