@@ -6,6 +6,7 @@ const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const DB_PATH = join(HARNESS_ROOT, "bridges", "discord", "harness.db");
 
 let db: Database.Database | null = null;
+let checkpointTimer: ReturnType<typeof setInterval> | null = null;
 
 export function getDb(): Database.Database {
   if (db) return db;
@@ -15,13 +16,33 @@ export function getDb(): Database.Database {
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
+  // Auto-checkpoint after 100 pages (~400KB) instead of default 1000 (~4MB)
+  db.pragma("wal_autocheckpoint = 100");
 
   runMigrations(db);
+
+  // Periodic WAL checkpoint every 5 minutes to prevent WAL bloat
+  if (!checkpointTimer) {
+    checkpointTimer = setInterval(() => {
+      try {
+        db?.pragma("wal_checkpoint(PASSIVE)");
+      } catch (_) {
+        // Ignore — checkpoint is best-effort
+      }
+    }, 5 * 60 * 1000);
+    checkpointTimer.unref(); // Don't prevent process exit
+  }
+
   return db;
 }
 
 export function closeDb(): void {
+  if (checkpointTimer) {
+    clearInterval(checkpointTimer);
+    checkpointTimer = null;
+  }
   if (db) {
+    try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch (_) {}
     db.close();
     db = null;
   }
