@@ -58,7 +58,8 @@ When you receive `[CHAIN_COMPLETE]` followed by a chain summary, you must:
    - `path`: `learnings/LRN-YYYYMMDD-NNN.md` (use today's date)
    - Complete YAML frontmatter (id, title, type, area, tags, pattern-key, status, recurrence)
    - Body with context, root cause, resolution, and cross-references
-4. **Summarize** — Post a concise summary of what was accomplished and what was learned
+4. **Update LIVE_STATE.md** — If the chain changed project status, blockers, focus, priorities, or made architectural decisions, read `vault/LIVE_STATE.md` and update the relevant sections (Active Projects, Priorities, Recent Decisions). Skip this if nothing state-relevant changed.
+5. **Summarize** — Post a concise summary of what was accomplished and what was learned
 
 Only write learnings for things that are genuinely reusable — not trivial task completions.
 
