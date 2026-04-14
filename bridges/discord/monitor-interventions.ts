@@ -25,6 +25,7 @@ import {
 import { cancelTask, submitTask, spawnTask, getTask } from "./task-runner.js";
 import { listAgentNames } from "./agent-loader.js";
 import { proc } from "./platform.js";
+import { releaseChannel } from "./channel-queue.js";
 
 // ─── Main Interaction Router ─────────────────────────────────────────
 
@@ -97,6 +98,7 @@ async function handleKill(interaction: ButtonInteraction, taskId: string): Promi
 
   cancelTask(taskId);
   updateInstanceStatus(taskId, "killed");
+  releaseChannel(instance.channelId);
 
   await interaction.reply({
     content: `Killed task \`${taskId}\` (${instance.agent} agent, PID ${instance.pid})`,
