@@ -60,6 +60,8 @@ import {
   writeFileSync,
   appendFileSync,
   readdirSync,
+  statSync,
+  renameSync,
 } from "fs";
 import { join } from "path";
 import {
@@ -69,6 +71,7 @@ import {
 } from "./promotion-handler.js";
 import { getDb, closeDb } from "./db.js";
 import { FileWatcher, trackWatcher, untrackWatcher, stopAllWatchers } from "./file-watcher.js";
+import { generateResponsePdf, cleanupPdf } from "./pdf-generator.js";
 import {
   submitTask,
   spawnTask,
@@ -161,6 +164,23 @@ import { proc, onShutdown } from "./platform.js";
 
 config();
 
+// --- Log Rotation (runs once at startup) ---
+// Launchd directs stdout+stderr to bot.log. Rotate if over 5MB to prevent
+// hitting the 50MB SoftResourceLimits FileSize cap which causes EFBIG crashes.
+const LOG_FILE = join(import.meta.dirname || ".", "bot.log");
+const LOG_MAX_BYTES = 5 * 1024 * 1024; // 5MB
+
+function rotateLogIfNeeded(): void {
+  try {
+    if (!existsSync(LOG_FILE)) return;
+    const size = statSync(LOG_FILE).size;
+    if (size < LOG_MAX_BYTES) return;
+    renameSync(LOG_FILE, LOG_FILE + ".1");
+    writeFileSync(LOG_FILE, `[LOG ROTATED] Previous log (${(size / 1024 / 1024).toFixed(1)}MB) moved to bot.log.1\n`);
+  } catch {}
+}
+rotateLogIfNeeded();
+
 // PID file to prevent multiple instances
 const PID_FILE = join(import.meta.dirname || ".", ".bot.pid");
 try {
@@ -192,6 +212,7 @@ const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "")
   .filter(Boolean);
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const MAX_DISCORD_LENGTH = 1900;
+const PDF_THRESHOLD = 3800; // Generate PDF when response exceeds ~2 Discord messages
 // No concurrency cap — let API rate limits be the natural throttle
 // const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_PROCESSES || "5", 10);
 
@@ -216,52 +237,11 @@ const client = new Client({
 });
 
 // --- Per-Channel Queue System (backed by task_queue) ---
-interface QueuedTask {
-  execute: () => void;
-  message: Message;
-}
-
-const channelQueues: Map<string, QueuedTask[]> = new Map();
-const activeChannels: Set<string> = new Set();
+import { releaseChannel, enqueueTask, type QueuedTask } from "./channel-queue.js";
 
 // Track stream pollers and stream messages for active tasks
 const activeStreamPollers: Map<string, StreamPoller> = new Map(); // taskId → StreamPoller
 const activeStreamMessages: Map<string, Message> = new Map(); // taskId → Discord stream message
-
-function processChannelQueue(channelId: string): void {
-  if (activeChannels.has(channelId)) return;
-
-  const queue = channelQueues.get(channelId);
-  if (!queue || queue.length === 0) return;
-
-  const task = queue.shift()!;
-  activeChannels.add(channelId);
-
-  task.execute();
-}
-
-function releaseChannel(channelId: string): void {
-  activeChannels.delete(channelId);
-  // Try to process this channel's next task
-  processChannelQueue(channelId);
-  // Try to unblock other channels that were waiting on global capacity
-  for (const [queuedChannelId, queue] of channelQueues) {
-    if (queue.length > 0 && !activeChannels.has(queuedChannelId)) {
-      processChannelQueue(queuedChannelId);
-    }
-  }
-}
-
-function enqueueTask(channelId: string, task: QueuedTask): boolean {
-  if (!channelQueues.has(channelId)) {
-    channelQueues.set(channelId, []);
-  }
-
-  const isQueued = activeChannels.has(channelId);
-  channelQueues.get(channelId)!.push(task);
-  processChannelQueue(channelId);
-  return isQueued;
-}
 
 // Split long messages at line boundaries, preserving code blocks
 function splitMessage(text: string): string[] {
@@ -598,24 +578,59 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
       return;
     }
 
-    // Normal response — cap at 5 messages to prevent raw doc dumps
-    const MAX_RESPONSE_MESSAGES = 5;
+    // Normal response — if too long, generate PDF instead of splitting into many messages
     const chunks = splitMessage(response);
-    const cappedChunks = chunks.slice(0, MAX_RESPONSE_MESSAGES);
-    const wasCapped = chunks.length > MAX_RESPONSE_MESSAGES;
 
-    if (streamMessage) {
-      await streamMessage.edit(cappedChunks[0]);
-      for (let i = 1; i < cappedChunks.length; i++) {
-        await message.reply(cappedChunks[i]);
+    if (response.length > PDF_THRESHOLD) {
+      // Generate PDF of full response
+      const channelName = (message.channel as TextChannel).name ?? "unknown";
+      let pdfPath: string | null = null;
+      try {
+        pdfPath = await generateResponsePdf(response, {
+          agent: ctx.agentName,
+          channel: channelName,
+          query: ctx.userText,
+        });
+        // Post a summary (first chunk) + PDF attachment
+        const summary = chunks[0] + `\n\n*Full response attached as PDF (${chunks.length} sections, ${response.length.toLocaleString()} chars)*`;
+        if (streamMessage) {
+          await streamMessage.edit({ content: summary, files: [{ attachment: pdfPath, name: "response.pdf" }] });
+        } else {
+          await message.reply({ content: summary, files: [{ attachment: pdfPath, name: "response.pdf" }] });
+        }
+      } catch (pdfErr) {
+        // PDF generation failed — fall back to chunked messages
+        console.warn("[PDF] Generation failed, falling back to chunked messages:", pdfErr);
+        const MAX_RESPONSE_MESSAGES = 5;
+        const cappedChunks = chunks.slice(0, MAX_RESPONSE_MESSAGES);
+        if (streamMessage) {
+          await streamMessage.edit(cappedChunks[0]);
+          for (let i = 1; i < cappedChunks.length; i++) {
+            await message.reply(cappedChunks[i]);
+          }
+        } else {
+          for (const chunk of cappedChunks) {
+            await message.reply(chunk);
+          }
+        }
+        if (chunks.length > MAX_RESPONSE_MESSAGES) {
+          await message.reply(`*(Response truncated — ${chunks.length - MAX_RESPONSE_MESSAGES} additional messages omitted.)*`);
+        }
+      } finally {
+        if (pdfPath) cleanupPdf(pdfPath);
       }
     } else {
-      for (const chunk of cappedChunks) {
-        await message.reply(chunk);
+      // Short enough — post as regular messages
+      if (streamMessage) {
+        await streamMessage.edit(chunks[0]);
+        for (let i = 1; i < chunks.length; i++) {
+          await message.reply(chunks[i]);
+        }
+      } else {
+        for (const chunk of chunks) {
+          await message.reply(chunk);
+        }
       }
-    }
-    if (wasCapped) {
-      await message.reply(`*(Response truncated — ${chunks.length - MAX_RESPONSE_MESSAGES} additional messages omitted. Ask me to continue or be more specific.)*`);
     }
 
     postAgentComplete(ctx.activity, response).catch(() => {});
@@ -1239,6 +1254,21 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     return true;
   }
 
+  // /wal-fix — force WAL checkpoint (TRUNCATE) to reclaim disk space
+  if (content === "/wal-fix") {
+    const db = getDb();
+    try {
+      const result = db.pragma("wal_checkpoint(TRUNCATE)") as { busy: number; log: number; checkpointed: number }[];
+      const { busy, log, checkpointed } = result[0];
+      await message.reply(
+        `**WAL Checkpoint (TRUNCATE) complete:**\n• Pages in WAL: ${log}\n• Pages checkpointed: ${checkpointed}\n• Busy (not checkpointed): ${busy}`
+      );
+    } catch (err: any) {
+      await message.reply(`WAL checkpoint failed: ${err.message}`);
+    }
+    return true;
+  }
+
   // /restart — graceful bot restart via platform scheduler
   if (content === "/restart") {
     await message.reply("Restarting bot... (scheduler will bring it back in ~30s)");
@@ -1372,6 +1402,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
             "`/dead-letter` — List failed tasks",
             "`/retry <id>` — Re-enqueue failed task",
             "`/db-status` — Database stats",
+            "`/wal-fix` — Force WAL checkpoint (TRUNCATE)",
             "`/restart` — Restart the bot",
           ].join("\n"),
           inline: true,
@@ -1673,7 +1704,6 @@ async function drainNotifications(): Promise<void> {
       // This prevents TOCTOU races with heartbeat scripts appending concurrently
       const claimedFile = notifyFile + ".draining";
       try {
-        const { renameSync } = await import("fs");
         renameSync(notifyFile, claimedFile);
       } catch (err: any) {
         if (err.code === "ENOENT") continue; // File disappeared between check and rename
@@ -1941,14 +1971,15 @@ client.on("clientReady", async () => {
     return null;
   }
 
-  setInterval(() => {
-    try {
-      const ch = resolveProjectChannel("mento");
-      if (ch) enqueueMentoIteration(ch.id);
-    } catch (err: any) {
-      console.error(`[PROJECT-ITER] Mento trigger error: ${err.message}`);
-    }
-  }, MENTO_INTERVAL_MS);
+  // Mento auto-iteration: DISABLED by user request (2026-04-07) — conserving credits for ITC hackathon
+  // setInterval(() => {
+  //   try {
+  //     const ch = resolveProjectChannel("mento");
+  //     if (ch) enqueueMentoIteration(ch.id);
+  //   } catch (err: any) {
+  //     console.error(`[PROJECT-ITER] Mento trigger error: ${err.message}`);
+  //   }
+  // }, MENTO_INTERVAL_MS);
 
   // Lead-gen auto-iteration: DISABLED by user request (2026-03-25)
   // setInterval(() => {
@@ -1988,7 +2019,7 @@ client.on("clientReady", async () => {
   //   }
   // }, HACKATHON_INTERVAL_MS);
 
-  console.log(`[PROJECT-ITER] Mento iteration enabled (every ${MENTO_INTERVAL_MS / 3600000}h)`);
+  console.log(`[PROJECT-ITER] Mento iteration DISABLED (user request 2026-04-07 — ITC hackathon focus)`);
   console.log(`[PROJECT-ITER] Lead-gen iteration DISABLED (user request 2026-03-25)`);
   console.log(`[PROJECT-ITER] Lattice parallel iteration disabled (using heartbeat task instead)`);
   console.log(`[PROJECT-ITER] Hackathon iteration DISABLED (user request 2026-04-06)`);
