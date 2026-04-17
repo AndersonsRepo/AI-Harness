@@ -12,6 +12,14 @@
             "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/activator.py \"$PROMPT\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/handoff_nudge.py"
+          }
+        ]
       }
     ],
     "PostToolUse": [
