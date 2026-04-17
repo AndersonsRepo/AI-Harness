@@ -8,5 +8,8 @@
   "notify": "discord",
   "discord_channel": "notifications",
   "timeout": 300,
-  "activeHours": {"start": "02:00", "end": "06:00"}
+  "activeHours": {
+    "start": "02:00",
+    "end": "06:00"
+  }
 }

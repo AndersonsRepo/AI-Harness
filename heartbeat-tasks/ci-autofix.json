@@ -7,6 +7,9 @@
   "enabled": true,
   "notify": "discord",
   "discord_channel": "heartbeat-status",
-  "activeHours": {"start": "07:00", "end": "23:00"},
+  "activeHours": {
+    "start": "07:00",
+    "end": "23:00"
+  },
   "timeout": 360
 }

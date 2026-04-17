@@ -4,5 +4,5 @@
   "schedule": "6h",
   "notify": "discord",
   "discord_channel": "notifications",
-  "enabled": true
+  "enabled": false
 }

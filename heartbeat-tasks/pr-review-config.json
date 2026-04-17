@@ -6,5 +6,6 @@
       "discord_channel": "notifications",
       "auto_merge": true
     }
-  ]
+  ],
+  "enabled": false
 }
