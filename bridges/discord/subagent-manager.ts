@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync, mkdirSync } from "fs";
+import { existsSync, unlinkSync, mkdirSync } from "fs";
 import { join } from "path";
 import * as registry from "./process-registry.js";
 import {
@@ -9,45 +9,16 @@ import {
   postError,
 } from "./activity-stream.js";
 import { getChannelConfig } from "./channel-config-store.js";
-import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
-import { assembleContext } from "./context-assembler.js";
-import { AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
 import { proc } from "./platform.js";
+import {
+  HARNESS_ROOT,
+  extractResponse,
+  buildClaudeConfig,
+} from "./claude-config.js";
 
-const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const SUBAGENT_TIMEOUT = parseInt(process.env.SUBAGENT_TIMEOUT || "300", 10);
-// No concurrency cap — API rate limits are the natural throttle
-
-// Safety guardrails applied to all subagents
-const GLOBAL_DISALLOWED = [
-  "Bash(rm -rf:*)",
-  "Bash(git push --force:*)",
-  "Bash(git reset --hard:*)",
-  "Bash(DROP:*)",
-  "Bash(DELETE FROM:*)",
-  "Bash(kill -9:*)",
-].join(",");
-
-// Extract response from Claude JSON output
-function extractResponse(output: string): string | null {
-  try {
-    const jsonStart = output.indexOf('{"type"');
-    if (jsonStart !== -1) {
-      const jsonEnd = output.lastIndexOf("}") + 1;
-      const parsed = JSON.parse(output.slice(jsonStart, jsonEnd));
-      if (parsed.is_error) return `Error: ${parsed.result || "Unknown error"}`;
-      const text = parsed.result || parsed.text || parsed.content;
-      return text ? text.trim() : null;
-    }
-  } catch {}
-  const match = output.match(/"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  if (match) {
-    return match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').trim();
-  }
-  return null;
-}
 
 export interface SpawnOptions {
   channelId: string;
@@ -71,93 +42,33 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
     mkdirSync(TEMP_DIR, { recursive: true });
   } catch {}
 
-  // Build claude args
-  const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
-
-  // Agent personality
-  const agentName = options.agent || getChannelConfig(options.channelId)?.agent;
-  if (agentName) {
-    const agentFile = join(HARNESS_ROOT, ".claude", "agents", `${agentName}.md`);
-    if (existsSync(agentFile)) {
-      args.push("--append-system-prompt", readFileSync(agentFile, "utf-8"));
-    }
-  }
-
-  // Context injection (deterministic daemon)
-  const context = await assembleContext({
+  // Build shared config
+  const channelConfig = getChannelConfig(options.channelId);
+  const agentName = options.agent || channelConfig?.agent;
+  const config = await buildClaudeConfig({
     channelId: options.channelId,
     prompt: options.description,
-    agentName: agentName || "default",
+    agentName,
     sessionKey: options.channelId,
     taskId: `subagent-${Date.now()}`,
+    skipSessionResume: true,
   });
-  if (context) {
-    args.push("--append-system-prompt", context);
-  }
-
-  // Permission mode from channel config
-  const channelConfig = getChannelConfig(options.channelId);
-  if (channelConfig?.permissionMode) {
-    args.push("--permission-mode", channelConfig.permissionMode);
-  }
-
-  // Merge all tool restrictions into single flags
-  const allDisallowed: string[] = [GLOBAL_DISALLOWED];
-  const allAllowed: string[] = [];
-
-  // Agent-specific tool restrictions (deterministic, enforced at CLI level)
-  if (agentName) {
-    const restrictions = AGENT_TOOL_RESTRICTIONS[agentName];
-    if (restrictions?.disallowed?.length) {
-      allDisallowed.push(restrictions.disallowed.join(","));
-    }
-    if (restrictions?.allowed?.length) {
-      allAllowed.push(...restrictions.allowed);
-    }
-  }
-
-  // Channel-specific overrides
-  if (channelConfig?.disallowedTools?.length) {
-    allDisallowed.push(channelConfig.disallowedTools.join(","));
-  }
-
-  args.push("--disallowedTools", allDisallowed.join(","));
-  if (allAllowed.length) {
-    args.push("--allowedTools", allAllowed.join(","));
-  }
-
-  // Model: channel override > agent default > CLI default
-  const model = getAgentModel(options.agent, channelConfig?.model);
-  if (model) {
-    args.push("--model", model);
-  }
-
-  // The prompt (-- separator prevents flags from consuming it)
-  args.push("--", options.description);
 
   const pythonArgs = [
     `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
     outputFile,
     "--timeout",
     String(SUBAGENT_TIMEOUT),
-    ...args,
+    ...config.args,
   ];
 
-  // Resolve project working directory (passed via env to claude-runner.py)
-  const project = getProject(options.channelId);
-  const projectCwd = project ? resolveProjectWorkdir(project.name) : null;
-
-  const proc = spawn("python3", pythonArgs, {
-    cwd: HARNESS_ROOT,
-    env: {
-      ...process.env,
-      HARNESS_ROOT,
-      ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
-    },
+  const childProc = spawn("python3", pythonArgs, {
+    cwd: config.cwd,
+    env: config.env,
     detached: true,
     stdio: "ignore",
   });
-  proc.unref();
+  childProc.unref();
 
   const entry: registry.SubagentEntry = {
     id,
@@ -165,7 +76,7 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
     description: options.description,
     agent: agentName,
     outputFile,
-    pid: proc.pid!,
+    pid: childProc.pid!,
     status: "running",
     startedAt: new Date().toISOString(),
   };
@@ -207,7 +118,7 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
   trackWatcher(watcher);
   watcher.start();
 
-  console.log(`[SUBAGENT] Spawned ${id}: "${options.description}" (PID ${proc.pid})`);
+  console.log(`[SUBAGENT] Spawned ${id}: "${options.description}" (PID ${childProc.pid})`);
   return entry;
 }
 

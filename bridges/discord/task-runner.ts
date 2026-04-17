@@ -4,27 +4,21 @@ import { join } from "path";
 import { getDb } from "./db.js";
 import { getSession, setSession, validateSession } from "./session-store.js";
 import { getChannelConfig } from "./channel-config-store.js";
-import { getProject, resolveProjectWorkdir } from "./project-manager.js";
+// project-manager used indirectly via claude-config.ts
 import { getProjectSessionKey } from "./handoff-router.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
-import { assembleContext } from "./context-assembler.js";
-import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
+// agent-loader used indirectly via claude-config.ts
 import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance } from "./instance-monitor.js";
 import { proc } from "./platform.js";
+import {
+  HARNESS_ROOT,
+  extractResponse as sharedExtractResponse,
+  extractSessionId as sharedExtractSessionId,
+  buildClaudeConfig,
+} from "./claude-config.js";
 
-const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const STREAM_DIR = join(TEMP_DIR, "streams");
-
-// Global safety guardrails
-const GLOBAL_DISALLOWED_TOOLS = [
-  "Bash(rm -rf:*)",
-  "Bash(git push --force:*)",
-  "Bash(git reset --hard:*)",
-  "Bash(DROP:*)",
-  "Bash(DELETE FROM:*)",
-  "Bash(kill -9:*)",
-].join(",");
 
 // Retry backoff: 5s, 25s, 125s (exponential base-5)
 const RETRY_BACKOFF_BASE = 5;
@@ -188,74 +182,10 @@ function generateId(): string {
   return `task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// --- Extract helpers (shared with bot.ts) ---
+// --- Extract helpers (delegating to claude-config.ts) ---
 
-export function extractResponse(output: string): string | null {
-  let lastAssistantText: string | null = null;
-
-  // Stream-json output: multiple JSON lines. Find the "result" type line.
-  // Also track the last assistant text as fallback (result can be empty
-  // when a permission denial ends the turn without final text).
-  for (const line of output.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed.type === "result") {
-        if (parsed.is_error) return `Error: ${parsed.result || "Unknown error"}`;
-        const text = parsed.result || parsed.text || parsed.content;
-        if (text && text.trim()) return text.trim();
-        // result is empty — fall through to use lastAssistantText
-        break;
-      }
-      // Track assistant text blocks as fallback
-      if (parsed.type === "assistant" && parsed.message?.content) {
-        for (const block of parsed.message.content) {
-          if (block.type === "text" && block.text?.trim()) {
-            lastAssistantText = block.text.trim();
-          }
-        }
-      }
-    } catch {}
-  }
-
-  // If result was empty but we captured assistant text from the stream, use it
-  if (lastAssistantText) return lastAssistantText;
-
-  // Fallback: single JSON object (non-streaming output format)
-  try {
-    const jsonStart = output.indexOf('{"type"');
-    if (jsonStart !== -1) {
-      const jsonEnd = output.lastIndexOf("}") + 1;
-      const parsed = JSON.parse(output.slice(jsonStart, jsonEnd));
-      if (parsed.is_error) return `Error: ${parsed.result || "Unknown error"}`;
-      const text = parsed.result || parsed.text || parsed.content;
-      return text ? text.trim() : null;
-    }
-  } catch {}
-
-  // Last resort: regex match
-  const match = output.match(/"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  if (match) {
-    return match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').trim();
-  }
-  return null;
-}
-
-export function extractSessionId(output: string): string | null {
-  // Stream-json: find session_id in the result or system init line
-  for (const line of output.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed.session_id) return parsed.session_id;
-    } catch {}
-  }
-  // Fallback regex
-  const match = output.match(/"session_id"\s*:\s*"([^"]+)"/);
-  return match ? match[1] : null;
-}
+export const extractResponse = sharedExtractResponse;
+export const extractSessionId = sharedExtractSessionId;
 
 /** Detect if Claude needs another step */
 export function needsContinuation(response: string): boolean {
@@ -359,121 +289,46 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
   // Reuse the same stream dir for continuation steps so the StreamPoller keeps working
   const streamDir = opts?.reuseStreamDir || join(STREAM_DIR, requestId);
 
-  // Build claude command args
-  const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
-
-  // Channel config
-  const channelConfig = getChannelConfig(task.channel_id);
-
-  // Agent personality
-  const agentName = task.agent || channelConfig?.agent;
-  if (agentName) {
-    const agentPrompt = readAgentPrompt(agentName);
-    if (agentPrompt) {
-      args.push("--append-system-prompt", agentPrompt);
-    }
-  }
-
-  // Context injection (deterministic daemon)
-  const context = await assembleContext({
-    channelId: task.channel_id,
-    prompt: task.prompt,
-    agentName: agentName || "default",
-    sessionKey: task.session_key || task.channel_id,
-    taskId: task.id,
-  });
-  if (context) {
-    args.push("--append-system-prompt", context);
-  }
-
-  // Monitor intervention note — inject guidance for this step
+  // Build intervention notes for extra system prompts
+  const extraSystemPrompts: string[] = [];
   const interventionNote = getInterventionNote(task.id);
   if (interventionNote) {
-    args.push("--append-system-prompt", `\n[OPERATOR GUIDANCE]: ${interventionNote}`);
+    extraSystemPrompts.push(`\n[OPERATOR GUIDANCE]: ${interventionNote}`);
     clearInterventionNote(task.id);
     console.log(`[TASK] ${task.id} injected intervention note: ${interventionNote.slice(0, 80)}`);
   }
 
-  // Permission mode
-  if (channelConfig?.permissionMode) {
-    args.push("--permission-mode", channelConfig.permissionMode);
-  }
-
-  // Model: channel override > agent default > CLI default
-  const model = getAgentModel(agentName, channelConfig?.model);
-  if (model) {
-    args.push("--model", model);
-  }
-
-  // Merge all tool restrictions into single flags to avoid Commander.js last-wins behavior
-  const allDisallowed: string[] = [GLOBAL_DISALLOWED_TOOLS];
-  const allAllowed: string[] = [];
-
-  // Agent-specific tool restrictions (deterministic, enforced at CLI level)
-  if (agentName) {
-    const restrictions = AGENT_TOOL_RESTRICTIONS[agentName];
-    if (restrictions?.disallowed?.length) {
-      allDisallowed.push(restrictions.disallowed.join(","));
-    }
-    if (restrictions?.allowed?.length) {
-      allAllowed.push(...restrictions.allowed);
-    }
-  }
-
-  // Channel-specific overrides
-  if (channelConfig?.disallowedTools?.length) {
-    allDisallowed.push(channelConfig.disallowedTools.join(","));
-  }
-  if (channelConfig?.allowedTools?.length) {
-    allAllowed.push(...channelConfig.allowedTools);
-  }
-
-  args.push("--disallowedTools", allDisallowed.join(","));
-  if (allAllowed.length) {
-    args.push("--allowedTools", allAllowed.join(","));
-  }
-
-  // Session resume
-  const sessionKey = task.session_key || task.channel_id;
-  const existingSession = getSession(sessionKey);
-
-  // For continuation steps, always resume
-  if (task.step_count > 0 && existingSession) {
-    args.push("--resume", existingSession);
-    // Continuation prompt
-    args.push("--", "Continue where you left off. If you are done, do not include [CONTINUE].");
-  } else if (existingSession) {
-    args.push("--resume", existingSession);
-    args.push("--", task.prompt);
-  } else {
-    args.push("--", task.prompt);
-  }
+  // Build shared config
+  const channelConfig = getChannelConfig(task.channel_id);
+  const agentName = task.agent || channelConfig?.agent;
+  const config = await buildClaudeConfig({
+    channelId: task.channel_id,
+    prompt: task.prompt,
+    agentName,
+    sessionKey: task.session_key || task.channel_id,
+    taskId: task.id,
+    isContinuation: task.step_count > 0,
+    extraSystemPrompts,
+    worktreePath: opts?.worktreePath,
+  });
 
   const pythonArgs = [
     `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
     outputFile,
     "--stream-dir",
     streamDir,
-    ...args,
+    ...config.args,
   ];
 
-  // Resolve project working directory — prefer worktree if provided
-  const project = getProject(task.channel_id);
-  const projectCwd = opts?.worktreePath || (project ? resolveProjectWorkdir(project.name) : null);
-
-  const proc = spawn("python3", pythonArgs, {
-    cwd: HARNESS_ROOT,
-    env: {
-      ...process.env,
-      HARNESS_ROOT,
-      ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
-    },
+  const childProc = spawn("python3", pythonArgs, {
+    cwd: config.cwd,
+    env: config.env,
     detached: true,
     stdio: "ignore",
   });
-  proc.unref();
+  childProc.unref();
 
-  const pid = proc.pid!;
+  const pid = childProc.pid!;
 
   updateTask(taskId, {
     status: "running",

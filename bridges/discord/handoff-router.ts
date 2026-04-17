@@ -10,27 +10,20 @@ import {
   resetHandoffDepth,
   resolveProjectWorkdir,
 } from "./project-manager.js";
-import { getSession, setSession } from "./session-store.js";
+import { setSession } from "./session-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
-import { assembleContext } from "./context-assembler.js";
 import { monitor } from "./truncation-monitor.js";
-import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
 import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, isGitRepo } from "./worktree-manager.js";
+import {
+  HARNESS_ROOT,
+  extractResponse,
+  extractSessionId,
+  buildClaudeConfig,
+} from "./claude-config.js";
 
-const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const MAX_CONTEXT_MESSAGES = 15;
 const MAX_MSG_LENGTH = 500;
-
-// Global safety guardrails
-const GLOBAL_DISALLOWED_TOOLS = [
-  "Bash(rm -rf:*)",
-  "Bash(git push --force:*)",
-  "Bash(git reset --hard:*)",
-  "Bash(DROP:*)",
-  "Bash(DELETE FROM:*)",
-  "Bash(kill -9:*)",
-].join(",");
 
 export interface HandoffDirective {
   targetAgent: string;
@@ -153,29 +146,7 @@ function getTimeAgo(timestamp: number): string {
   return `${Math.floor(seconds / 3600)}h ago`;
 }
 
-// Extract response from Claude JSON output (same logic as bot.ts)
-function extractResponse(output: string): string | null {
-  try {
-    const jsonStart = output.indexOf('{"type"');
-    if (jsonStart !== -1) {
-      const jsonEnd = output.lastIndexOf("}") + 1;
-      const parsed = JSON.parse(output.slice(jsonStart, jsonEnd));
-      if (parsed.is_error) return `Error: ${parsed.result || "Unknown error"}`;
-      const text = parsed.result || parsed.text || parsed.content;
-      return text ? text.trim() : null;
-    }
-  } catch {}
-  const match = output.match(/"result"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  if (match) {
-    return match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').trim();
-  }
-  return null;
-}
-
-function extractSessionId(output: string): string | null {
-  const match = output.match(/"session_id"\s*:\s*"([^"]+)"/);
-  return match ? match[1] : null;
-}
+// extractResponse and extractSessionId imported from claude-config.ts
 
 export function getProjectSessionKey(
   channelId: string,
@@ -271,58 +242,16 @@ export async function executeHandoff(
   const context = await buildProjectContext(channel, toAgent, project, chainContext);
   const prompt = `${context}\n\n${capitalize(fromAgent)} has handed off to you with this request:\n${handoffMessage}`;
 
-  // Build claude args
-  const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
-
-  // Agent personality
-  const agentPrompt = readAgentPrompt(toAgent);
-  if (agentPrompt) {
-    args.push("--append-system-prompt", agentPrompt);
-  }
-
-  // Context injection (deterministic daemon)
-  const daemonContext = await assembleContext({
-    channelId: channel.id,
-    prompt: handoffMessage,
-    agentName: toAgent,
-    sessionKey: getProjectSessionKey(channel.id, toAgent),
-    taskId: "handoff",
-  });
-  if (daemonContext) {
-    args.push("--append-system-prompt", daemonContext);
-  }
-
-  // Merge all tool restrictions into single flags
-  const allDisallowed: string[] = [GLOBAL_DISALLOWED_TOOLS];
-  const allAllowed: string[] = [];
-
-  const restrictions = AGENT_TOOL_RESTRICTIONS[toAgent];
-  if (restrictions?.disallowed?.length) {
-    allDisallowed.push(restrictions.disallowed.join(","));
-  }
-  if (restrictions?.allowed?.length) {
-    allAllowed.push(...restrictions.allowed);
-  }
-
-  args.push("--disallowedTools", allDisallowed.join(","));
-  if (allAllowed.length) {
-    args.push("--allowedTools", allAllowed.join(","));
-  }
-
-  // Model: agent default (no channel override for handoffs — agent dictates)
-  const model = getAgentModel(toAgent, undefined);
-  if (model) {
-    args.push("--model", model);
-  }
-
-  // Session resume with compound key
+  // Build shared config
   const sessionKey = getProjectSessionKey(channel.id, toAgent);
-  const existingSession = getSession(sessionKey);
-  if (existingSession) {
-    args.push("--resume", existingSession);
-  }
-
-  args.push("--", prompt);
+  const config = await buildClaudeConfig({
+    channelId: channel.id,
+    prompt,
+    agentName: toAgent,
+    sessionKey,
+    taskId: "handoff",
+    worktreePath,
+  });
 
   const outputFile = join(
     TEMP_DIR,
@@ -334,24 +263,17 @@ export async function executeHandoff(
     outputFile,
     "--timeout",
     "180",
-    ...args,
+    ...config.args,
   ];
 
-  // Resolve project working directory — prefer worktree if provided
-  const projectCwd = worktreePath || (project ? resolveProjectWorkdir(project.name) : null);
-
   return new Promise((resolve) => {
-    const proc = spawn("python3", pythonArgs, {
-      cwd: HARNESS_ROOT,
-      env: {
-        ...process.env,
-        HARNESS_ROOT,
-        ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
-      },
+    const childProc = spawn("python3", pythonArgs, {
+      cwd: config.cwd,
+      env: config.env,
       detached: true,
       stdio: "ignore",
     });
-    proc.unref();
+    childProc.unref();
 
     // Show typing
     channel.sendTyping().catch(() => {});

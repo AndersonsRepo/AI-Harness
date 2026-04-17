@@ -18,30 +18,22 @@ import { spawn } from "child_process";
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { getDb } from "./db.js";
-import { getChannelConfig } from "./channel-config-store.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
-import { assembleContext } from "./context-assembler.js";
-import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
-import { extractResponse, extractSessionId, submitTask } from "./task-runner.js";
+import { submitTask } from "./task-runner.js";
 import { setSession } from "./session-store.js";
 import * as tmux from "./tmux-session.js";
 import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, getWorktreeForGroup, isGitRepo } from "./worktree-manager.js";
+import {
+  HARNESS_ROOT,
+  extractResponse,
+  extractSessionId,
+  buildClaudeConfig,
+} from "./claude-config.js";
 
-const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const STREAM_DIR = join(TEMP_DIR, "streams");
-// No hard cap on parallel agents — API rate limits are the natural throttle
-const PARALLEL_TIMEOUT_MS = parseInt(process.env.PARALLEL_TIMEOUT_MS || "1800000", 10); // 30 min default
-
-const GLOBAL_DISALLOWED_TOOLS = [
-  "Bash(rm -rf:*)",
-  "Bash(git push --force:*)",
-  "Bash(git reset --hard:*)",
-  "Bash(DROP:*)",
-  "Bash(DELETE FROM:*)",
-  "Bash(kill -9:*)",
-].join(",");
+const PARALLEL_TIMEOUT_MS = parseInt(process.env.PARALLEL_TIMEOUT_MS || "1800000", 10);
 
 /**
  * Resolve agent label to actual agent name.
@@ -258,92 +250,34 @@ async function spawnParallelAgent(
   // Resolve numbered labels (e.g., "builder-1" → "builder") for agent personality/tools
   const resolvedAgent = resolveAgentName(agent);
 
-  // Build claude command args (mirrors task-runner.ts spawnTask logic)
-  const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
-
-  // Channel config
-  const channelConfig = getChannelConfig(channelId);
-
-  // Agent personality (use resolved name for lookup)
-  const agentPrompt = readAgentPrompt(resolvedAgent);
-  if (agentPrompt) {
-    args.push("--append-system-prompt", agentPrompt);
-  }
-
-  // Context injection
-  const context = await assembleContext({
+  // Build shared config — no session resume for parallel tasks (fresh context)
+  const config = await buildClaudeConfig({
     channelId,
     prompt: description,
     agentName: resolvedAgent,
-    sessionKey: `${channelId}:${agent}`, // keep label for unique session
+    sessionKey: `${channelId}:${agent}`,
     taskId,
+    skipSessionResume: true,
+    worktreePath,
   });
-  if (context) {
-    args.push("--append-system-prompt", context);
-  }
-
-  // Model (use resolved name for lookup)
-  const model = getAgentModel(resolvedAgent, channelConfig?.model);
-  if (model) {
-    args.push("--model", model);
-  }
-
-  // Tool restrictions (use resolved name for lookup)
-  const allDisallowed: string[] = [GLOBAL_DISALLOWED_TOOLS];
-  const allAllowed: string[] = [];
-
-  const restrictions = AGENT_TOOL_RESTRICTIONS[resolvedAgent];
-  if (restrictions?.disallowed?.length) {
-    allDisallowed.push(restrictions.disallowed.join(","));
-  }
-  if (restrictions?.allowed?.length) {
-    allAllowed.push(...restrictions.allowed);
-  }
-
-  if (channelConfig?.disallowedTools?.length) {
-    allDisallowed.push(channelConfig.disallowedTools.join(","));
-  }
-  if (channelConfig?.allowedTools?.length) {
-    allAllowed.push(...channelConfig.allowedTools);
-  }
-
-  args.push("--disallowedTools", allDisallowed.join(","));
-  if (allAllowed.length) {
-    args.push("--allowedTools", allAllowed.join(","));
-  }
-
-  // No session resume for parallel tasks — fresh context each time
-  args.push("--", description);
 
   const pythonArgs = [
     `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
     outputFile,
     "--stream-dir",
     streamDir,
-    ...args,
+    ...config.args,
   ];
 
-  // Resolve project working directory — prefer worktree if provided
-  const project = getProject(channelId);
-  const projectCwd = worktreePath || (project ? resolveProjectWorkdir(project.name) : null);
-
-  const env = {
-    ...process.env,
-    HARNESS_ROOT,
-    ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
-  };
-
-  // Spawn via detached subprocess (same as task-runner)
-  // tmux window provides visibility, but the process runs independently
-  const proc = spawn("python3", pythonArgs, {
-    cwd: HARNESS_ROOT,
-    env,
+  const childProc = spawn("python3", pythonArgs, {
+    cwd: config.cwd,
+    env: config.env,
     detached: true,
     stdio: "ignore",
   });
-  proc.unref();
+  childProc.unref();
 
-  const pid = proc.pid!;
+  const pid = childProc.pid!;
 
   // Also try to create a tmux window for visibility
   const cmdStr = `python3 ${pythonArgs.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")}`;
