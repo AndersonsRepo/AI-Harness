@@ -1115,6 +1115,165 @@ server.tool(
   }
 );
 
+// ─── Tool: harness_channels ─────────────────────────────────────────
+
+server.tool(
+  "harness_channels",
+  "Check the status of Discord bot channels — running tasks, recent completions, elapsed time, live output preview, and process health. Use this to monitor what agents are working on.",
+  {
+    channel: z.string().optional().describe("Filter by channel name or ID (shows all if omitted)"),
+    status: z.enum(["running", "completed", "failed", "all"]).optional().default("running").describe("Task status filter"),
+    limit: z.number().optional().default(5).describe("Max tasks to show"),
+    live: z.boolean().optional().default(true).describe("Include live stream output preview for running tasks"),
+  },
+  async ({ channel, status, limit, live }) => {
+    if (!existsSync(DB_PATH)) {
+      return { content: [{ type: "text" as const, text: "Database not found at " + DB_PATH }] };
+    }
+
+    try {
+      // Build channel name map from projects table
+      const channelMap = new Map<string, string>();
+      try {
+        const projRaw = execSync(
+          `sqlite3 -json "${DB_PATH}" "SELECT channel_id, name FROM projects"`,
+          { encoding: "utf-8", timeout: 5000 }
+        );
+        const projects = JSON.parse(projRaw) as Array<{ channel_id: string; name: string }>;
+        for (const p of projects) channelMap.set(p.channel_id, p.name);
+      } catch { /* no projects table or empty */ }
+
+      // Build WHERE clause
+      const conditions: string[] = [];
+      if (status !== "all") conditions.push(`status = '${status}'`);
+      if (channel) {
+        // Match by name (via project map) or direct ID
+        const matchingIds: string[] = [];
+        for (const [id, name] of channelMap) {
+          if (name.toLowerCase().includes(channel.toLowerCase())) matchingIds.push(id);
+        }
+        if (/^\d+$/.test(channel)) matchingIds.push(channel);
+        if (matchingIds.length > 0) {
+          conditions.push(`channel_id IN (${matchingIds.map(id => `'${id}'`).join(",")})`);
+        } else {
+          return { content: [{ type: "text" as const, text: `No channel found matching "${channel}".` }] };
+        }
+      }
+
+      const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+      const query = `SELECT id, channel_id, status, agent, step_count, max_steps, pid, output_file, substr(prompt, 1, 200) as prompt, created_at, updated_at, last_error FROM task_queue ${where} ORDER BY created_at DESC LIMIT ${limit}`;
+
+      const raw = execSync(`sqlite3 -json "${DB_PATH}" "${query.replace(/"/g, '\\"')}"`, {
+        encoding: "utf-8",
+        timeout: 10000,
+      });
+
+      const tasks = JSON.parse(raw || "[]") as Array<{
+        id: string;
+        channel_id: string;
+        status: string;
+        agent: string;
+        step_count: number;
+        max_steps: number;
+        pid: number;
+        output_file: string;
+        prompt: string;
+        created_at: string;
+        updated_at: string;
+        last_error: string;
+      }>;
+
+      if (tasks.length === 0) {
+        return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}tasks found.` }] };
+      }
+
+      const lines: string[] = [`# Channel Status (${status})\n`];
+
+      for (const task of tasks) {
+        const channelName = channelMap.get(task.channel_id) || `channel-${task.channel_id.slice(-6)}`;
+        const elapsed = task.created_at
+          ? `${((Date.now() - new Date(task.created_at).getTime()) / 60000).toFixed(1)}min`
+          : "?";
+
+        // Check process health
+        let processStatus = "";
+        if (task.status === "running" && task.pid) {
+          processStatus = isPidAlive(task.pid) ? "alive" : "DEAD";
+        }
+
+        lines.push(`## #${channelName}`);
+        lines.push(`- **Task**: ${task.id}`);
+        lines.push(`- **Status**: ${task.status}${processStatus ? ` (PID ${task.pid}: ${processStatus})` : ""}`);
+        lines.push(`- **Agent**: ${task.agent || "default"}`);
+        lines.push(`- **Steps**: ${task.step_count}/${task.max_steps}`);
+        lines.push(`- **Elapsed**: ${elapsed}`);
+        lines.push(`- **Prompt**: ${task.prompt}`);
+        if (task.last_error) lines.push(`- **Error**: ${task.last_error.slice(0, 200)}`);
+
+        // Read live stream output for running tasks
+        if (live && task.status === "running" && task.output_file) {
+          // output_file: .../bridges/discord/.tmp/response-TIMESTAMP-ID.json
+          // stream dir:  .../bridges/discord/.tmp/streams/TIMESTAMP-ID/
+          const streamDir = task.output_file
+            .replace(/response-/, "streams/")
+            .replace(/\.json$/, "");
+
+          if (existsSync(streamDir)) {
+            try {
+              const chunks = readdirSync(streamDir).filter(f => f.startsWith("chunk-")).sort();
+              lines.push(`- **Stream**: ${chunks.length} chunks`);
+
+              // Find the last result chunk for a summary
+              for (let i = chunks.length - 1; i >= 0; i--) {
+                try {
+                  const chunkData = JSON.parse(readFileSync(join(streamDir, chunks[i]), "utf-8"));
+                  if (chunkData.type === "result" && chunkData.result) {
+                    const preview = chunkData.result.slice(0, 500);
+                    lines.push(`- **Latest output**:\n\`\`\`\n${preview}${chunkData.result.length > 500 ? "\n..." : ""}\n\`\`\``);
+                    if (chunkData.num_turns) lines.push(`- **Turns**: ${chunkData.num_turns}`);
+                    if (chunkData.total_cost_usd) lines.push(`- **Cost**: $${chunkData.total_cost_usd.toFixed(4)}`);
+                    break;
+                  }
+                  // Show latest text delta if no result yet
+                  if (chunkData.type === "content_block_delta" && chunkData.delta?.text) {
+                    lines.push(`- **Live text**: ...${chunkData.delta.text.slice(-200)}`);
+                    break;
+                  }
+                } catch { continue; }
+              }
+            } catch { /* stream dir unreadable */ }
+          }
+        }
+
+        // Check for completed output file
+        if (task.status !== "running" && task.output_file) {
+          const outPath = task.output_file.startsWith("/")
+            ? task.output_file
+            : join(HARNESS_ROOT, "bridges", "discord", ".tmp", basename(task.output_file));
+          if (existsSync(outPath)) {
+            try {
+              const output = JSON.parse(readFileSync(outPath, "utf-8"));
+              if (output.result) {
+                const preview = typeof output.result === "string"
+                  ? output.result.slice(0, 300)
+                  : JSON.stringify(output.result).slice(0, 300);
+                lines.push(`- **Result**: ${preview}${preview.length >= 300 ? "..." : ""}`);
+              }
+              if (output.total_cost_usd) lines.push(`- **Cost**: $${output.total_cost_usd.toFixed(4)}`);
+            } catch { /* output unreadable */ }
+          }
+        }
+
+        lines.push("");
+      }
+
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error querying channels: ${err.message}` }] };
+    }
+  }
+);
+
 // ─── Start Server ────────────────────────────────────────────────────
 
 async function main() {
