@@ -323,6 +323,11 @@ AI-Harness/
 │   ├── agents/                # 9 agent personalities
 │   └── settings.json          # Hooks: activator, error-detector, session-flush
 │
+├── .codex/                    # Codex-only operational notes (not shared agent policy)
+│   ├── README.md              # What belongs in .codex/
+│   ├── repository-guidelines.md # Codex contributor guide
+│   └── memory-system.md       # Summary of harness memory pipeline
+│
 ├── heartbeat-tasks/           # 21+ background task configs + scripts
 │   ├── *.json                 # Task configs (schedule/cron, activeHours, notify)
 │   ├── scripts/*.py           # Task implementations
@@ -358,6 +363,16 @@ AI-Harness/
 | Monitoring | Custom instance monitor | Real-time agent observability |
 | OAuth | Google + Microsoft + LinkedIn | Email, calendar, social integrations |
 | Testing | Node.js test runner | 139 tests across 4 suites |
+
+## Codex Notes
+
+Use `.codex/` for Codex-specific operational guidance that should not be interpreted as shared repository policy by other agents. Keep shared documentation in `README.md`, `docs/`, `vault/`, or `CLAUDE.md`.
+
+Examples:
+- `.codex/repository-guidelines.md` for Codex contributor workflow
+- `.codex/memory-system.md` for a compact subsystem summary
+
+Avoid placing Codex-only instructions in root-level agent files such as `AGENTS.md` when the goal is to keep them out of Claude-facing defaults.
 
 ---
 
