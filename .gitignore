@@ -33,12 +33,19 @@ heartbeat-tasks/.cs2600-cache/
 vault/shared/course-notes/
 
 # Vault entries contain personal session data
+vault/LIVE_STATE.md
+vault/.error-hashes
+vault/*.canvas
+vault/*.base
+vault/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md
 vault/learnings/*
 !vault/learnings/.gitkeep
+vault/shared/*.md
 vault/shared/scouted/*
 !vault/shared/scouted/.gitkeep
 vault/agents/*
 !vault/agents/.gitkeep
+vault/shared/*digest.md
 
 .claude/agents/client-project.md
 .claude/agents/mento.md
