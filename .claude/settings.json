@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/activator.py \"$PROMPT\""
+            "command": "python3 .claude/skills/self-improve/scripts/activator.py \"$PROMPT\""
           }
         ]
       },
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/handoff_nudge.py"
+            "command": "python3 .claude/skills/self-improve/scripts/handoff_nudge.py"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/error_detector.py \"$EXIT_CODE\" \"$STDOUT\" \"$STDERR\""
+            "command": "python3 .claude/skills/self-improve/scripts/error_detector.py \"$EXIT_CODE\" \"$STDOUT\" \"$STDERR\""
           }
         ]
       }
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/session_flush.py"
+            "command": "python3 .claude/skills/self-improve/scripts/session_flush.py"
           }
         ]
       }
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/teammate_idle.py"
+            "command": "python3 .claude/skills/self-improve/scripts/teammate_idle.py"
           }
         ]
       }
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/task_completed.py"
+            "command": "python3 .claude/skills/self-improve/scripts/task_completed.py"
           }
         ]
       }
@@ -68,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/task_created.py"
+            "command": "python3 .claude/skills/self-improve/scripts/task_created.py"
           }
         ]
       }
@@ -79,7 +79,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/andersonedmond/Desktop/AI-Harness/.claude/skills/self-improve/scripts/vault_file_changed.py \"$FILE_PATH\"",
+            "command": "python3 .claude/skills/self-improve/scripts/vault_file_changed.py \"$FILE_PATH\"",
             "timeout": 30
           }
         ]
