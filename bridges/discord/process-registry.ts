@@ -6,6 +6,7 @@ export interface SubagentEntry {
   parentChannelId: string;
   description: string;
   agent?: string;
+  runtime?: "claude" | "codex";
   outputFile: string;
   pid: number;
   status: "running" | "completed" | "failed" | "cancelled";
@@ -20,6 +21,7 @@ function rowToEntry(row: any): SubagentEntry {
     parentChannelId: row.parent_channel_id,
     description: row.description,
     agent: row.agent || undefined,
+    runtime: row.runtime === "codex" ? "codex" : "claude",
     outputFile: row.output_file,
     pid: row.pid,
     status: row.status,
@@ -32,13 +34,14 @@ function rowToEntry(row: any): SubagentEntry {
 export function register(entry: SubagentEntry): void {
   const db = getDb();
   db.prepare(`
-    INSERT INTO subagents (id, parent_channel_id, description, agent, output_file, pid, status, started_at, completed_at, stream_message_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO subagents (id, parent_channel_id, description, agent, runtime, output_file, pid, status, started_at, completed_at, stream_message_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     entry.id,
     entry.parentChannelId,
     entry.description,
     entry.agent || null,
+    entry.runtime || "claude",
     entry.outputFile,
     entry.pid,
     entry.status,
@@ -65,6 +68,7 @@ export function update(
   if (updates.parentChannelId !== undefined) { fields.push("parent_channel_id = ?"); values.push(updates.parentChannelId); }
   if (updates.description !== undefined) { fields.push("description = ?"); values.push(updates.description); }
   if (updates.agent !== undefined) { fields.push("agent = ?"); values.push(updates.agent); }
+  if (updates.runtime !== undefined) { fields.push("runtime = ?"); values.push(updates.runtime); }
   if (updates.outputFile !== undefined) { fields.push("output_file = ?"); values.push(updates.outputFile); }
   if (updates.pid !== undefined) { fields.push("pid = ?"); values.push(updates.pid); }
 

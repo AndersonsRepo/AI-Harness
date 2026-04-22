@@ -94,34 +94,28 @@ This is the layer monitor UI, task history, and dead-letter handling should cons
   - Codex: builder
 - Add explicit fallback order, such as `["claude", "codex"]`
 
-### Phase 3: RuntimeAdapter Extraction
-- Remove direct Claude assumptions from spawn code
-- Put Claude and Codex behind the same execution interface
-- Normalize event parsing and cancellation
+### Phase 3: Stable Mixed-Runtime Orchestration
+- Extend mixed-runtime support beyond the main queue into handoffs, subagents, and monitoring only where runtime boundaries are explicit
+- Preserve canonical implementation artifacts across review/test chains so later agents verify the implementation output, not commentary
+- Add runtime-aware telemetry and dead-letter handling as first-class behavior before broader refactors
 
-### Phase 4: Claude -> Codex Delegation
-- Keep Claude as orchestrator
-- Add `codex-builder` as the default implementation worker
-- Optionally add `codex-tester` for mechanical verification and test fixing
+### Phase 4: Runtime Control Plane
+- Introduce a real `RuntimeAdapter` layer for Claude and Codex
+- Normalize spawn, cancel, event parsing, session extraction, and capability reporting behind one internal runtime interface
+- Keep the role/router layer above runtime selection
+- Make runtime differences explicit rather than attempting to force feature parity
 
-### Phase 5: Codex-Native Control Plane
-Build the pieces required for full fallback:
-- `.codex/agents/` for Codex-native role prompts
-- `.codex/skills/` or `.codex/playbooks/` for Codex-native workflows
-- Codex planner, reviewer, and tester definitions
-- runtime-neutral role router that can swap Claude out entirely
+### Phase 5: Codex-Native Role Layer
+- Add `.codex/agents/` and `.codex/playbooks/` as the Codex-native control plane
+- Define Codex-native `planner`, `researcher`, `builder`, `reviewer`, and `tester` roles
+- Build Codex-specific workflows for implementation, review, verification, and fallback mode
+- Treat this as the prerequisite for reliable Codex-only operation
 
-This phase is what makes Codex-only mode viable. Without it, fallback quality will be inconsistent because Claude-oriented prompts and assumptions will leak into Codex execution.
-
-### Phase 6: Full Codex-Only Degraded Mode
-When Claude is unavailable:
-- switch runtime policy to Codex-only
-- use Codex-native planner/researcher/builder/reviewer/tester prompts
-- continue consuming the same vault, embeddings, context assembler, and telemetry pipeline
-
-The degraded mode should be explicit and observable, not silent:
-- report that the system is operating in Codex-only mode
-- adjust expected behaviors where fine-grained tool control is not available
+### Phase 6: Explicit Codex-Only Operating Mode
+- Add a manual Codex-only mode that switches runtime policy to Codex for all roles
+- Use Codex-native role docs and playbooks instead of Claude-oriented prompts
+- Keep vault, embeddings, context assembly, and telemetry shared across runtimes
+- Surface the mode explicitly in configuration and monitoring so degraded operation is visible, not silent
 
 ## Codex-Only Workstream
 ### Codex-native docs to create
@@ -147,9 +141,10 @@ Codex should not be asked to imitate Claude. It should be optimized for the work
 ## Immediate Next Milestones
 1. Ship mixed-runtime main queue support
 2. Make runtime visible in monitoring and config
-3. Extract `RuntimeAdapter`
-4. Add Codex-native role docs under `.codex/agents/`
-5. Implement a manual Codex-only mode toggle before building automatic failover
+3. Stabilize artifact-preserving post-chain gates
+4. Extend mixed-runtime behavior to orchestration paths deliberately
+5. Introduce `RuntimeAdapter`
+6. Build Codex-native role docs and manual Codex-only mode
 
 ## Sources
 - Anthropic subagents: https://code.claude.com/docs/en/sub-agents

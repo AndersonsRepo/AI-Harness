@@ -79,9 +79,14 @@ const instances = new Map<string, MonitoredInstance>();
 
 // UI update callback — set by monitor-ui.ts
 let onUpdateCallback: ((instance: MonitoredInstance) => void) | null = null;
+let onCompleteCallback: ((instance: MonitoredInstance) => void) | null = null;
 
 export function setMonitorUpdateCallback(cb: (instance: MonitoredInstance) => void): void {
   onUpdateCallback = cb;
+}
+
+export function setMonitorCompletionCallback(cb: (instance: MonitoredInstance) => void): void {
+  onCompleteCallback = cb;
 }
 
 // ─── Registry CRUD ───────────────────────────────────────────────────
@@ -134,6 +139,17 @@ export function unregisterInstance(taskId: string): MonitoredInstance | null {
   if (!instance) return null;
   instances.delete(taskId);
   console.log(`[MONITOR] Unregistered instance ${taskId}`);
+  return instance;
+}
+
+export function finalizeInstance(
+  taskId: string,
+  status: MonitoredInstance["status"],
+): MonitoredInstance | null {
+  const instance = unregisterInstance(taskId);
+  if (!instance) return null;
+  instance.status = status;
+  if (onCompleteCallback) onCompleteCallback(instance);
   return instance;
 }
 

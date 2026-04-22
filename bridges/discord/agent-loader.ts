@@ -28,6 +28,13 @@ export function listAgentNames(): string[] {
     .map((f) => f.replace(".md", ""));
 }
 
+export type AgentRuntime = "claude" | "codex";
+
+export function getAgentRuntime(agentName?: string | null): AgentRuntime {
+  if (!agentName) return "claude";
+  return agentName.startsWith("codex-") ? "codex" : "claude";
+}
+
 // --- Tool Restriction Definitions ---
 
 /**

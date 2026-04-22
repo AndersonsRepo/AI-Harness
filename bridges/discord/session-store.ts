@@ -4,32 +4,42 @@ interface SessionEntry {
   sessionId: string;
   createdAt: string;
   lastUsed: string;
+  runtime?: string;
 }
 
 type SessionMap = Record<string, SessionEntry>;
 
-export function getSession(channelId: string): string | null {
+export function getSession(channelId: string, runtime?: "claude" | "codex"): string | null {
   const db = getDb();
-  const row = db.prepare(
-    "SELECT session_id FROM sessions WHERE channel_id = ?"
-  ).get(channelId) as { session_id: string } | undefined;
+  const row = runtime
+    ? db.prepare(
+        "SELECT session_id FROM sessions WHERE channel_id = ? AND runtime = ?"
+      ).get(channelId, runtime) as { session_id: string } | undefined
+    : db.prepare(
+        "SELECT session_id FROM sessions WHERE channel_id = ?"
+      ).get(channelId) as { session_id: string } | undefined;
 
   if (!row) return null;
 
   // Update last used
-  db.prepare("UPDATE sessions SET last_used = datetime('now') WHERE channel_id = ?").run(channelId);
+  if (runtime) {
+    db.prepare("UPDATE sessions SET last_used = datetime('now') WHERE channel_id = ? AND runtime = ?").run(channelId, runtime);
+  } else {
+    db.prepare("UPDATE sessions SET last_used = datetime('now') WHERE channel_id = ?").run(channelId);
+  }
   return row.session_id;
 }
 
-export function setSession(channelId: string, sessionId: string): void {
+export function setSession(channelId: string, sessionId: string, runtime: "claude" | "codex" = "claude"): void {
   const db = getDb();
   db.prepare(`
-    INSERT INTO sessions (channel_id, session_id, created_at, last_used)
-    VALUES (?, ?, datetime('now'), datetime('now'))
+    INSERT INTO sessions (channel_id, session_id, runtime, created_at, last_used)
+    VALUES (?, ?, ?, datetime('now'), datetime('now'))
     ON CONFLICT(channel_id) DO UPDATE SET
       session_id = excluded.session_id,
+      runtime = excluded.runtime,
       last_used = datetime('now')
-  `).run(channelId, sessionId);
+  `).run(channelId, sessionId, runtime);
 }
 
 export function clearSession(channelId: string): boolean {
@@ -65,6 +75,7 @@ export function listSessions(): SessionMap {
   const rows = db.prepare("SELECT * FROM sessions").all() as Array<{
     channel_id: string;
     session_id: string;
+    runtime?: string;
     created_at: string;
     last_used: string;
   }>;
@@ -73,6 +84,7 @@ export function listSessions(): SessionMap {
   for (const row of rows) {
     map[row.channel_id] = {
       sessionId: row.session_id,
+      runtime: row.runtime,
       createdAt: row.created_at,
       lastUsed: row.last_used,
     };

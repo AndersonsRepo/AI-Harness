@@ -1,12 +1,23 @@
+# Public-repo boundary:
+# Track source code, tests, and example/template files.
+# Ignore local runtime state, secrets, generated artifacts, and personal vault/planning notes.
+
+# Package manager / build outputs
 node_modules/
-.env
-.env.local
-*.log
-*.log.*
-.DS_Store
 dist/
 build/
 *.tgz
+
+# Local secrets / env files
+.env
+.env.local
+
+# Generic logs / OS noise
+*.log
+*.log.*
+.DS_Store
+
+# Repo-local runtime artifacts
 .claude/heartbeat-state/
 .claude/worktrees/
 .tmp/
@@ -15,9 +26,21 @@ harness.db
 harness.db-wal
 harness.db-shm
 *.json.bak
+
+# Generated caches
+__pycache__/
+heartbeat-tasks/.cs2600-cache/
+vault/vault-embeddings.json
+
+# Project-local state and private knowledge
 vault/.obsidian/
 vault/shared/project-knowledge/*.md
 !vault/shared/project-knowledge/_example.md
+vault/shared/course-notes/
+projects/
+context-log/
+
+# Heartbeat task local data
 heartbeat-tasks/*.state.json
 heartbeat-tasks/*.state-files.json
 heartbeat-tasks/*.vercel-state.json
@@ -28,14 +51,8 @@ heartbeat-tasks/projects.json
 !heartbeat-tasks/projects.example.json
 heartbeat-tasks/course-map.json
 !heartbeat-tasks/course-map.example.json
-projects/
-context-log/
-vault/vault-embeddings.json
-__pycache__/
-heartbeat-tasks/.cs2600-cache/
-vault/shared/course-notes/
 
-# Vault entries contain personal session data
+# Vault entries contain personal session data and should not ship in a public repo
 vault/LIVE_STATE.md
 vault/.error-hashes
 vault/*.canvas
@@ -50,6 +67,7 @@ vault/agents/*
 !vault/agents/.gitkeep
 vault/shared/*digest.md
 
+# Local/private Claude agent definitions
 .claude/agents/client-project.md
 .claude/agents/mento.md
 .claude/agents/lightrag.md
@@ -57,7 +75,7 @@ vault/shared/*digest.md
 .claude/agents/*.md
 !.claude/agents/.gitkeep
 
-# Development planning docs (contain personal project references)
+# Development planning docs contain personal project references
 PLAN.md
 PLAN-*.md
 CONTEXT.md

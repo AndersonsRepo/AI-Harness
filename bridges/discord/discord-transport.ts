@@ -76,7 +76,7 @@ import {
 import { handleMonitorInteraction } from "./monitor-interventions.js";
 import {
   setMonitorUpdateCallback,
-  unregisterInstance,
+  setMonitorCompletionCallback,
 } from "./instance-monitor.js";
 import { syncEmbeddings, watchVaultForEmbeddings, stopEmbeddingWatchers } from "./embeddings.js";
 import { getDb } from "./db.js";
@@ -289,6 +289,9 @@ export class DiscordTransport implements TransportAdapter {
           } else {
             onInstanceUpdate(instance).catch(() => {});
           }
+        });
+        setMonitorCompletionCallback((instance) => {
+          onInstanceCompleted(instance).catch(() => {});
         });
         startMonitorUI();
         await ensureMonitorChannel();

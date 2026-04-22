@@ -30,6 +30,7 @@ export async function postStart(entry: SubagentEntry): Promise<string | null> {
       .addFields(
         { name: "ID", value: entry.id, inline: true },
         { name: "Agent", value: entry.agent || "default", inline: true },
+        { name: "Runtime", value: entry.runtime || "claude", inline: true },
         { name: "Channel", value: `<#${entry.parentChannelId}>`, inline: true }
       )
       .setColor(0x3498db)
@@ -72,6 +73,7 @@ export async function postComplete(
       .addFields(
         { name: "ID", value: entry.id, inline: true },
         { name: "Agent", value: entry.agent || "default", inline: true },
+        { name: "Runtime", value: entry.runtime || "claude", inline: true },
         { name: "Duration", value: getDuration(entry), inline: true }
       )
       .setColor(0x2ecc71)
@@ -105,6 +107,7 @@ export async function postError(
       .addFields(
         { name: "ID", value: entry.id, inline: true },
         { name: "Agent", value: entry.agent || "default", inline: true },
+        { name: "Runtime", value: entry.runtime || "claude", inline: true },
         { name: "Duration", value: getDuration(entry), inline: true }
       )
       .setColor(0xe74c3c)

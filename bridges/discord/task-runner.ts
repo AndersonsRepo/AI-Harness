@@ -5,9 +5,9 @@ import { getDb } from "./db.js";
 import { setSession, validateSession } from "./session-store.js";
 import { getChannelConfig } from "./channel-config-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
-import { getAgentRuntime } from "./agent-loader.js";
 import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance } from "./instance-monitor.js";
 import { proc } from "./platform.js";
+import { resolveRuntimePolicy } from "./role-policy.js";
 import {
   HARNESS_ROOT,
   extractResponse as sharedExtractResponse,
@@ -162,6 +162,7 @@ export interface DeadLetterRecord {
   channel_id: string;
   prompt: string;
   agent: string | null;
+  runtime: AgentRuntime | null;
   error: string;
   attempts: number;
   created_at: string;
@@ -204,16 +205,11 @@ export const extractResponse = sharedExtractResponse;
 export const extractSessionId = sharedExtractSessionId;
 
 export function resolveTaskRuntime(task: Pick<TaskRecord, "runtime" | "agent" | "channel_id">): AgentRuntime {
-  if (task.runtime === "claude" || task.runtime === "codex") {
-    return task.runtime;
-  }
-
-  const channelRuntime = getChannelConfig(task.channel_id)?.runtime;
-  if (channelRuntime === "claude" || channelRuntime === "codex") {
-    return channelRuntime;
-  }
-
-  return getAgentRuntime(task.agent);
+  return resolveRuntimePolicy({
+    channelId: task.channel_id,
+    agentName: task.agent,
+    explicitRuntime: task.runtime,
+  }).selectedRuntime;
 }
 
 /** Detect if Claude needs another step */
@@ -595,9 +591,9 @@ async function handleFailure(taskId: string, error: string): Promise<void> {
     const db = getDb();
     const dlId = `dl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     db.prepare(`
-      INSERT INTO dead_letter (id, task_id, channel_id, prompt, agent, error, attempts)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(dlId, taskId, task.channel_id, task.prompt, task.agent, error, nextAttempt);
+      INSERT INTO dead_letter (id, task_id, channel_id, prompt, agent, runtime, error, attempts)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(dlId, taskId, task.channel_id, task.prompt, task.agent, task.runtime, error, nextAttempt);
 
     if (deadLetterHandler) {
       const dlRecord: DeadLetterRecord = {
@@ -606,6 +602,7 @@ async function handleFailure(taskId: string, error: string): Promise<void> {
         channel_id: task.channel_id,
         prompt: task.prompt,
         agent: task.agent,
+        runtime: task.runtime,
         error,
         attempts: nextAttempt,
         created_at: new Date().toISOString(),
@@ -660,6 +657,7 @@ export function retryDeadLetter(deadLetterId: string): string | null {
     channelId: dl.channel_id,
     prompt: dl.prompt,
     agent: dl.agent || undefined,
+    runtime: dl.runtime || undefined,
   });
 
   // Remove from dead letter

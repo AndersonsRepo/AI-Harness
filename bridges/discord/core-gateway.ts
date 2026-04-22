@@ -37,7 +37,7 @@ import { getProject } from "./project-manager.js";
 import { getProjectSessionKey } from "./handoff-router.js";
 import {
   registerInstance,
-  unregisterInstance,
+  finalizeInstance,
   processMonitorEvent,
   getCompletedSummary,
 } from "./instance-monitor.js";
@@ -45,6 +45,7 @@ import { StreamPoller } from "./stream-poller.js";
 import { getDb } from "./db.js";
 import { join } from "path";
 import { mkdirSync, readdirSync, unlinkSync, existsSync, readFileSync, appendFileSync } from "fs";
+import { persistTaskTelemetry } from "./task-telemetry.js";
 
 // ─── Queue System ────────────────────────────────────────────────────
 
@@ -312,10 +313,7 @@ export class Gateway {
         }
       }
       // Clean up monitor
-      const completedInstance = unregisterInstance(taskId);
-      if (completedInstance) {
-        completedInstance.status = "completed";
-      }
+      finalizeInstance(taskId, "completed");
       return;
     }
 
@@ -356,21 +354,18 @@ export class Gateway {
 
     // Persist telemetry
     const telemetry = getCompletedSummary(taskId);
-    const completedInstance = unregisterInstance(taskId);
+    finalizeInstance(taskId, task?.status === "dead" ? "failed" : "completed");
     if (telemetry && task) {
       try {
-        const db = getDb();
-        db.prepare(`
-          INSERT OR REPLACE INTO task_telemetry
-          (task_id, channel_id, agent, prompt, started_at, completed_at, status, tool_calls, total_tools, duration_ms, est_input_tokens, est_output_tokens, est_cost_cents, intervention, error)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          taskId, task.channel_id, task.agent || "default", task.prompt?.slice(0, 500) || "",
-          new Date(Date.now() - telemetry.durationMs).toISOString(), new Date().toISOString(),
-          task.status, JSON.stringify(telemetry.toolCalls.slice(-50)), telemetry.totalTools,
-          telemetry.durationMs, telemetry.estInputTokens, telemetry.estOutputTokens,
-          telemetry.estCostCents, telemetry.intervention, error || null
-        );
+        persistTaskTelemetry({
+          taskId,
+          channelId: task.channel_id,
+          agent: task.agent || "default",
+          prompt: task.prompt || "",
+          status: task.status,
+          telemetry,
+          error,
+        });
       } catch (err: any) {
         console.error(`[GATEWAY] Telemetry persist failed: ${err.message}`);
       }

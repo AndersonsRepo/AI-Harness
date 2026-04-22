@@ -143,6 +143,18 @@ function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(13);
     console.log("[DB] Applied schema v13 (channel/task runtime columns)");
   }
+
+  if (version < 14) {
+    applyV14(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(14);
+    console.log("[DB] Applied schema v14 (subagent/dead-letter runtime columns)");
+  }
+
+  if (version < 15) {
+    applyV15(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(15);
+    console.log("[DB] Applied schema v15 (parallel task runtime column)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -172,6 +184,7 @@ function applyV1(database: Database.Database): void {
       parent_channel_id TEXT NOT NULL,
       description       TEXT NOT NULL,
       agent             TEXT,
+      runtime           TEXT NOT NULL DEFAULT 'claude',
       output_file       TEXT NOT NULL,
       pid               INTEGER NOT NULL,
       status            TEXT NOT NULL CHECK (status IN ('running','completed','failed','cancelled')),
@@ -226,6 +239,7 @@ function applyV1(database: Database.Database): void {
       channel_id TEXT NOT NULL,
       prompt     TEXT NOT NULL,
       agent      TEXT,
+      runtime    TEXT,
       error      TEXT NOT NULL,
       attempts   INTEGER NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -330,6 +344,7 @@ function applyV4(database: Database.Database): void {
       parent_task_id TEXT,
       channel_id     TEXT NOT NULL,
       agent          TEXT NOT NULL,
+      runtime        TEXT NOT NULL DEFAULT 'claude',
       description    TEXT NOT NULL,
       tmux_window    TEXT,
       status         TEXT NOT NULL CHECK (status IN ('pending','running','completed','failed','cancelled')),
@@ -563,6 +578,19 @@ function applyV13(database: Database.Database): void {
   database.exec(`
     ALTER TABLE channel_configs ADD COLUMN runtime TEXT;
     ALTER TABLE task_queue ADD COLUMN runtime TEXT;
+  `);
+}
+
+function applyV14(database: Database.Database): void {
+  database.exec(`
+    ALTER TABLE subagents ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude';
+    ALTER TABLE dead_letter ADD COLUMN runtime TEXT;
+  `);
+}
+
+function applyV15(database: Database.Database): void {
+  database.exec(`
+    ALTER TABLE parallel_tasks ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude';
   `);
 }
 

@@ -21,6 +21,7 @@ import { getDb } from "./db.js";
 import { existsSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
 import { proc } from "./platform.js";
+import { resolveRuntimePolicy } from "./role-policy.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 
@@ -270,6 +271,11 @@ function commandConfig(ctx: CommandContext): CommandResult {
   const lines: string[] = ["**Channel Config:**"];
   if (cfg?.agent) lines.push(`• Agent: \`${cfg.agent}\``);
   if (cfg?.runtime) lines.push(`• Runtime override: \`${cfg.runtime}\``);
+  const policy = resolveRuntimePolicy({
+    channelId: ctx.channelId,
+    agentName: cfg?.agent,
+  });
+  lines.push(`• Runtime policy: \`${policy.selectedRuntime}\` (source: ${policy.source}, fallback: ${policy.fallbackOrder.join(" -> ")})`);
   if (cfg?.model) lines.push(`• Model: \`${cfg.model}\``);
   if (cfg?.permissionMode) lines.push(`• Permission mode: \`${cfg.permissionMode}\``);
   if (session) lines.push(`• Session: \`${session}\``);

@@ -53,4 +53,16 @@ describe("Core Commands — Runtime Routing", () => {
     assert.ok(result.text.includes("Runtime override"));
     assert.ok(result.text.includes("codex"));
   });
+
+  it("/config shows effective role policy and fallback order without an override", async () => {
+    setChannelConfig("runtime-command-chan", { agent: "builder" });
+    const result = await executeCommand(makeCtx({
+      channelId: "runtime-command-chan",
+      rawText: "/config",
+    }));
+    assert.ok(result);
+    assert.ok(result.text.includes("Runtime policy"));
+    assert.ok(result.text.includes("codex"));
+    assert.ok(result.text.includes("codex -> claude"));
+  });
 });

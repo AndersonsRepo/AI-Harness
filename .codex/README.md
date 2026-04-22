@@ -18,3 +18,17 @@ Conventions:
 - Prefer `.codex/` for Codex-only notes instead of root-level `AGENTS.md`
 - Do not store secrets here
 - Treat these files as operational guidance, not product documentation
+
+## Public vs Private Branch Rules
+
+Codex should assume:
+- public `main` is template-safe only
+- private runtime behavior may live on a separate local branch/worktree
+
+Workflow rules:
+- Do not move private local state back onto `main`
+- Do not commit active `.claude/agents/*.md`, active `heartbeat-tasks/*.json`, `vault/` data, logs, DBs, `.env` files, or other local runtime artifacts
+- Put tracked examples in inert locations such as `.claude/examples/` and `heartbeat-tasks/examples/`
+- If a requested improvement is useful locally but encodes private projects, paths, prompts, or workflow assumptions, keep it on the private branch unless the user explicitly asks to generalize it for public `main`
+- When preparing public changes from private work, prefer cherry-picking only the safe commit(s) instead of merging the private branch wholesale
+- Never push a private branch without explicit user confirmation

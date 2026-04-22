@@ -1,6 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildPostChainGateRequests, type ChainEntry } from "../handoff-router.js";
+import { getDb } from "../db.js";
+import { setChannelConfig } from "../channel-config-store.js";
+import { buildPostChainGateRequests, resolveHandoffRuntime, type ChainEntry } from "../handoff-router.js";
+
+function cleanupChannel(channelId: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM channel_configs WHERE channel_id = ?").run(channelId);
+}
 
 describe("Handoff Router — Post-chain Gates", () => {
   it("keeps builder output as the canonical artifact for reviewer and tester gates", () => {
@@ -40,5 +47,20 @@ describe("Handoff Router — Post-chain Gates", () => {
 
     const requests = buildPostChainGateRequests(chainEntries, ["builder", "reviewer"]);
     assert.equal(requests.length, 0);
+  });
+});
+
+describe("Handoff Router — Runtime Resolution", () => {
+  it("uses channel runtime override when present", () => {
+    const channelId = "handoff-runtime-override";
+    setChannelConfig(channelId, { runtime: "codex" });
+
+    assert.equal(resolveHandoffRuntime(channelId, "reviewer"), "codex");
+    cleanupChannel(channelId);
+  });
+
+  it("falls back to agent runtime metadata when no channel override exists", () => {
+    assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "codex-builder"), "codex");
+    assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "reviewer"), "claude");
   });
 });

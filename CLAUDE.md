@@ -11,6 +11,24 @@ You are a self-improving personal AI agent for Anderson Edmond. You operate acro
 5. **Ask before destructive actions** — Never delete, force-push, or overwrite without confirmation
 6. **Log discoveries proactively** — When you debug a tricky bug, discover a non-obvious behavior, or make an architecture decision, use `/learned` to log it. Don't wait for hooks.
 
+## Public vs Private Workflow
+
+This repository's public `main` branch is a template/starter, not the source of truth for private operating state.
+
+Rules:
+- Do not commit or restore private runtime data to `main`
+- Treat `vault/`, active `.claude/agents/*.md`, active `heartbeat-tasks/*.json`, logs, DBs, `.env` files, and other machine-local state as private/local-only
+- Keep public-safe examples in tracked `examples/` paths or `*.example.*` files, not in active runtime paths
+- If a change improves the local harness but depends on private projects, sessions, prompts, paths, or personal workflow, keep it on a private branch/worktree unless explicitly generalized for public use
+- Before pushing to `main`, prefer cherry-picking or reimplementing only the template-safe portion of a private change
+- Never push private branches or worktrees unless the user explicitly asks
+
+Current intended layout:
+- Public/template work: `main`
+- Private runtime work: separate local branch/worktree
+
+When in doubt, optimize for not leaking operational data rather than convenience.
+
 ## Session-End Knowledge Dump
 
 Before context compaction or when a long conversation is winding down, write vault entries for anything significant learned this session. Check:

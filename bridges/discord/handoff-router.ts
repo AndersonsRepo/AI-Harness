@@ -1,6 +1,6 @@
 import { TextChannel, Message } from "discord.js";
 import { spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync, mkdirSync, readdirSync } from "fs";
+import { existsSync, readFileSync, unlinkSync, mkdirSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { parseParallelDirective, spawnParallelGroup } from "./tmux-orchestrator.js";
 import {
@@ -14,12 +14,15 @@ import { setSession } from "./session-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { monitor } from "./truncation-monitor.js";
 import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, isGitRepo } from "./worktree-manager.js";
+import type { AgentRuntime } from "./agent-loader.js";
+import { resolveRuntimePolicy } from "./role-policy.js";
 import {
   HARNESS_ROOT,
   extractResponse,
   extractSessionId,
   buildClaudeConfig,
 } from "./claude-config.js";
+import { buildCodexConfig, extractCodexResponse, extractCodexSessionId } from "./codex-config.js";
 
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const MAX_CONTEXT_MESSAGES = 15;
@@ -199,6 +202,13 @@ export interface PostChainGateRequest {
   prompt: string;
 }
 
+export function resolveHandoffRuntime(channelId: string, agentName: string): AgentRuntime {
+  return resolveRuntimePolicy({
+    channelId,
+    agentName,
+  }).selectedRuntime;
+}
+
 export function buildPostChainGateRequests(
   chainEntries: ChainEntry[],
   projectAgents?: string[],
@@ -288,32 +298,67 @@ export async function executeHandoff(
 
   // Build shared config
   const sessionKey = getProjectSessionKey(channel.id, toAgent);
-  const config = await buildClaudeConfig({
-    channelId: channel.id,
-    prompt,
-    agentName: toAgent,
-    sessionKey,
-    taskId: "handoff",
-    worktreePath,
-  });
+  const runtime = resolveHandoffRuntime(channel.id, toAgent);
 
   const outputFile = join(
     TEMP_DIR,
     `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
   );
+  let promptFile: string | null = null;
 
-  const pythonArgs = [
-    `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
-    outputFile,
-    "--timeout",
-    "180",
-    ...config.args,
-  ];
+  let pythonArgs: string[];
+  let childCwd: string;
+  let childEnv: Record<string, string>;
+
+  if (runtime === "codex") {
+    const config = await buildCodexConfig({
+      channelId: channel.id,
+      prompt,
+      agentName: toAgent,
+      sessionKey,
+      taskId: "handoff",
+      worktreePath,
+    });
+
+    promptFile = join(TEMP_DIR, `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.prompt.txt`);
+    writeFileSync(promptFile, config.prompt, "utf-8");
+
+    pythonArgs = [
+      `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
+      outputFile,
+      "--timeout",
+      "180",
+      "--prompt-file",
+      promptFile,
+      ...config.runnerArgs,
+    ];
+    childCwd = config.cwd;
+    childEnv = config.env;
+  } else {
+    const config = await buildClaudeConfig({
+      channelId: channel.id,
+      prompt,
+      agentName: toAgent,
+      sessionKey,
+      taskId: "handoff",
+      worktreePath,
+    });
+
+    pythonArgs = [
+      `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
+      outputFile,
+      "--timeout",
+      "180",
+      ...config.args,
+    ];
+    childCwd = config.cwd;
+    childEnv = config.env;
+  }
 
   return new Promise((resolve) => {
     const childProc = spawn("python3", pythonArgs, {
-      cwd: config.cwd,
-      env: config.env,
+      cwd: childCwd,
+      env: childEnv,
       detached: true,
       stdio: "ignore",
     });
@@ -330,6 +375,9 @@ export async function executeHandoff(
 
         try {
           // Clean up
+          if (promptFile && existsSync(promptFile)) {
+            unlinkSync(promptFile);
+          }
           if (existsSync(outputFile)) {
             unlinkSync(outputFile);
           }
@@ -346,11 +394,15 @@ export async function executeHandoff(
             return;
           }
 
-          const responseText = extractResponse(stdout);
-          const sessionId = extractSessionId(stdout);
+          const responseText = runtime === "codex"
+            ? extractCodexResponse(result)
+            : extractResponse(stdout);
+          const sessionId = runtime === "codex"
+            ? extractCodexSessionId(result)
+            : extractSessionId(stdout);
 
           if (sessionId) {
-            setSession(sessionKey, sessionId);
+            setSession(sessionKey, sessionId, runtime);
           }
 
           if (!responseText) {
@@ -376,6 +428,9 @@ export async function executeHandoff(
       },
       onTimeout: async () => {
         untrackWatcher(watcher);
+        if (promptFile && existsSync(promptFile)) {
+          unlinkSync(promptFile);
+        }
         await channel.send(
           `**${capitalize(toAgent)}:** Timed out after 3 minutes.`
         ).catch((err) => console.error(`[HANDOFF] Failed to send timeout notice: ${err.message}`));

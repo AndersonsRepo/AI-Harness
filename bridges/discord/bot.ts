@@ -142,9 +142,10 @@ import {
 } from "./work-sources.js";
 import {
   registerInstance,
-  unregisterInstance,
+  finalizeInstance,
   processMonitorEvent,
   setMonitorUpdateCallback,
+  setMonitorCompletionCallback,
   getCompletedSummary,
   isHoldingContinuation,
   getInterventionNote,
@@ -161,6 +162,7 @@ import {
 } from "./monitor-ui.js";
 import { handleMonitorInteraction } from "./monitor-interventions.js";
 import { proc, onShutdown } from "./platform.js";
+import { persistTaskTelemetry } from "./task-telemetry.js";
 
 config();
 
@@ -355,11 +357,7 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
             }
           }
           // Clean up monitor and return — don't post raw ideation JSON
-          const completedInstance = unregisterInstance(taskId);
-          if (completedInstance) {
-            completedInstance.status = "completed";
-            onInstanceCompleted(completedInstance).catch(() => {});
-          }
+          finalizeInstance(taskId, "completed");
           return;
         }
       } catch (err: any) {
@@ -384,11 +382,7 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
       console.log(`[OUTPUT] No context for task ${taskId} — skipping (re-attached or orphaned)`);
     }
     // Clean up monitor
-    const completedInstance = unregisterInstance(taskId);
-    if (completedInstance) {
-      completedInstance.status = "completed";
-      onInstanceCompleted(completedInstance).catch(() => {});
-    }
+    finalizeInstance(taskId, "completed");
     return;
   }
 
@@ -438,25 +432,18 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
 
   // Update instance monitor + persist telemetry
   const telemetry = getCompletedSummary(taskId);
-  const completedInstance = unregisterInstance(taskId);
-  if (completedInstance) {
-    completedInstance.status = task?.status === "dead" ? "failed" : "completed";
-    onInstanceCompleted(completedInstance).catch(() => {});
-  }
+  finalizeInstance(taskId, task?.status === "dead" ? "failed" : "completed");
   if (telemetry && task) {
     try {
-      const db = getDb();
-      db.prepare(`
-        INSERT OR REPLACE INTO task_telemetry
-        (task_id, channel_id, agent, prompt, started_at, completed_at, status, tool_calls, total_tools, duration_ms, est_input_tokens, est_output_tokens, est_cost_cents, intervention, error)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        taskId, task.channel_id, task.agent || "default", task.prompt?.slice(0, 500) || "",
-        new Date(Date.now() - telemetry.durationMs).toISOString(), new Date().toISOString(),
-        task.status, JSON.stringify(telemetry.toolCalls.slice(-50)), telemetry.totalTools,
-        telemetry.durationMs, telemetry.estInputTokens, telemetry.estOutputTokens,
-        telemetry.estCostCents, telemetry.intervention, error || null
-      );
+      persistTaskTelemetry({
+        taskId,
+        channelId: task.channel_id,
+        agent: task.agent || "default",
+        prompt: task.prompt || "",
+        status: task.status,
+        telemetry,
+        error,
+      });
     } catch (err: any) {
       console.error(`[TELEMETRY] Failed to persist: ${err.message}`);
     }
@@ -1814,6 +1801,9 @@ client.on("clientReady", async () => {
     } else {
       onInstanceUpdate(instance).catch(() => {});
     }
+  });
+  setMonitorCompletionCallback((instance) => {
+    onInstanceCompleted(instance).catch(() => {});
   });
   startMonitorUI();
   await ensureMonitorChannel();
