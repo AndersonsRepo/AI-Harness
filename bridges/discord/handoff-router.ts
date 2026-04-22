@@ -169,12 +169,56 @@ export interface ChainResult {
   parallelGroupId?: string; // Set when chain is suspended for parallel execution
 }
 
-// --- Review Gate (deterministic) ---
-// After chain terminates, if the final agent is in this map and the target
-// reviewer hasn't already participated, a review is auto-injected.
-const REVIEW_GATE: Record<string, string> = {
-  builder: "reviewer",
+// --- Post-Chain Gates (deterministic) ---
+// After chain terminates, if the final agent is a key in this map, each gate
+// agent in the list runs in sequence (provided it hasn't already participated
+// in the chain AND is a member of the project's agents). Each gate sees the
+// previous agent's output as its input.
+//
+// Order matters: reviewer first (static analysis of the diff), then tester
+// (runtime verification). Both are injected automatically — the LLM cannot
+// skip either one.
+const POST_CHAIN_GATES: Record<string, string[]> = {
+  builder: ["reviewer", "tester"],
 };
+
+function gatePromptFor(gateAgent: string, fromAgent: string, previousOutput: string): string {
+  if (gateAgent === "reviewer") {
+    return `Review the following ${fromAgent} output for quality, correctness, and potential issues:\n\n${previousOutput}`;
+  }
+  if (gateAgent === "tester") {
+    return `Verify that the following ${fromAgent} changes actually run and behave correctly. Pick the minimum viable verification strategy based on the scope of the change, execute it, and report PASS/FAIL with concrete evidence.\n\nChange summary:\n\n${previousOutput}`;
+  }
+  return `Process the following ${fromAgent} output:\n\n${previousOutput}`;
+}
+
+export interface PostChainGateRequest {
+  gateAgent: string;
+  fromAgent: string;
+  artifact: string;
+  prompt: string;
+}
+
+export function buildPostChainGateRequests(
+  chainEntries: ChainEntry[],
+  projectAgents?: string[],
+): PostChainGateRequest[] {
+  const finalEntry = chainEntries[chainEntries.length - 1];
+  if (!finalEntry) return [];
+
+  const gateAgents = POST_CHAIN_GATES[finalEntry.agent];
+  if (!gateAgents?.length) return [];
+
+  return gateAgents
+    .filter((gateAgent) => !chainEntries.some((entry) => entry.agent === gateAgent))
+    .filter((gateAgent) => !projectAgents || projectAgents.includes(gateAgent))
+    .map((gateAgent) => ({
+      gateAgent,
+      fromAgent: finalEntry.agent,
+      artifact: finalEntry.response,
+      prompt: gatePromptFor(gateAgent, finalEntry.agent, finalEntry.response),
+    }));
+}
 
 export interface HandoffResult {
   agentName: string;
@@ -458,47 +502,44 @@ export async function runHandoffChain(
     handoff = result.nextHandoff;
   }
 
-  // --- Review Gate (deterministic) ---
-  // If the final agent is in REVIEW_GATE and the reviewer hasn't participated, auto-inject
+  // --- Post-Chain Gates (deterministic) ---
+  // Each gate for the final agent runs in sequence if it hasn't already participated
+  // AND is in the project's agents list.
   const finalAgent = chainEntries[chainEntries.length - 1]?.agent;
-  const reviewerAgent = finalAgent ? REVIEW_GATE[finalAgent] : undefined;
+  const project = finalAgent ? getProject(channel.id) : null;
+  const gateRequests = buildPostChainGateRequests(chainEntries, project?.agents);
 
-  if (reviewerAgent) {
-    const reviewerAlreadyParticipated = chainEntries.some((e) => e.agent === reviewerAgent);
-    const project = getProject(channel.id);
+  if (gateRequests.length > 0) {
+    for (const gateRequest of gateRequests) {
+      const gatePrompt = gateRequest.prompt;
 
-    if (!reviewerAlreadyParticipated && project && project.agents.includes(reviewerAgent)) {
-      const lastEntry = chainEntries[chainEntries.length - 1];
-      const reviewPrompt = `Review the following ${finalAgent} output for quality, correctness, and potential issues:\n\n${lastEntry.response}`;
+      await channel.send(`*Auto-gate: ${capitalize(gateRequest.fromAgent)} output → ${capitalize(gateRequest.gateAgent)}*`)
+        .catch((err) => console.error(`[HANDOFF] Failed to send gate notice: ${err.message}`));
 
-      await channel.send(`*Auto-review: ${capitalize(finalAgent)} output → ${capitalize(reviewerAgent)}*`)
-        .catch((err) => console.error(`[HANDOFF] Failed to send review-gate notice: ${err.message}`));
-
-      const reviewResult = await executeHandoff(
+      const gateResult = await executeHandoff(
         channel,
-        finalAgent,
-        reviewerAgent,
-        reviewPrompt,
+        gateRequest.fromAgent,
+        gateRequest.gateAgent,
+        gatePrompt,
         "", // no pre-handoff text
         undefined,
         chainWorktreePath,
       );
 
-      if (reviewResult) {
+      if (gateResult) {
         chainEntries.push({
-          agent: reviewResult.agentName,
-          response: reviewResult.response.slice(0, 2000),
+          agent: gateResult.agentName,
+          response: gateResult.response.slice(0, 2000),
           timestamp: Date.now(),
         });
 
-        // Post review output
         try {
           const chunks = monitor.splitForDiscord(
-            `**${capitalize(reviewResult.agentName)}:** ${reviewResult.response}`, 1900, "handoff:review-gate"
+            `**${capitalize(gateResult.agentName)}:** ${gateResult.response}`, 1900, `handoff:gate-${gateRequest.gateAgent}`
           );
           for (const chunk of chunks) await channel.send(chunk);
         } catch (err: any) {
-          console.error(`[HANDOFF] Failed to post review output: ${err.message}`);
+          console.error(`[HANDOFF] Failed to post gate output: ${err.message}`);
         }
       }
     }

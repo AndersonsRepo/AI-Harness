@@ -24,6 +24,7 @@ export interface MonitoredInstance {
   taskId: string;
   channelId: string;
   agent: string;
+  runtime: "claude" | "codex";
   prompt: string;
   startedAt: number;
   pid: number;
@@ -89,6 +90,7 @@ export function registerInstance(config: {
   taskId: string;
   channelId: string;
   agent: string;
+  runtime?: "claude" | "codex";
   prompt: string;
   pid: number;
 }): MonitoredInstance {
@@ -96,6 +98,7 @@ export function registerInstance(config: {
     taskId: config.taskId,
     channelId: config.channelId,
     agent: config.agent,
+    runtime: config.runtime || "claude",
     prompt: config.prompt.slice(0, 500),
     startedAt: Date.now(),
     pid: config.pid,

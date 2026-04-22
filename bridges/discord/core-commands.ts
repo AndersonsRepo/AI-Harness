@@ -85,6 +85,17 @@ export async function executeCommand(ctx: CommandContext): Promise<CommandResult
     return commandModelSet(ctx, modelMatch[1].trim());
   }
 
+  // /runtime clear
+  if (text === "/runtime clear") {
+    return commandRuntimeClear(ctx);
+  }
+
+  // /runtime <claude|codex>
+  const runtimeMatch = text.match(/^\/runtime\s+(claude|codex)$/);
+  if (runtimeMatch) {
+    return commandRuntimeSet(ctx, runtimeMatch[1] as "claude" | "codex");
+  }
+
   // /config
   if (text === "/config") {
     return commandConfig(ctx);
@@ -237,6 +248,20 @@ function commandModelSet(ctx: CommandContext, model: string): CommandResult {
   return { text: `Channel model set to \`${model}\`.` };
 }
 
+function commandRuntimeSet(ctx: CommandContext, runtime: "claude" | "codex"): CommandResult {
+  setChannelConfig(ctx.channelId, { runtime });
+  return { text: `Channel runtime override set to \`${runtime}\`.` };
+}
+
+function commandRuntimeClear(ctx: CommandContext): CommandResult {
+  const cfg = getChannelConfig(ctx.channelId);
+  if (!cfg?.runtime) {
+    return { text: "No runtime override set on this channel." };
+  }
+  setChannelConfig(ctx.channelId, { runtime: undefined });
+  return { text: "Channel runtime override cleared." };
+}
+
 function commandConfig(ctx: CommandContext): CommandResult {
   const cfg = getChannelConfig(ctx.channelId);
   const session = getSession(ctx.channelId);
@@ -244,6 +269,7 @@ function commandConfig(ctx: CommandContext): CommandResult {
 
   const lines: string[] = ["**Channel Config:**"];
   if (cfg?.agent) lines.push(`• Agent: \`${cfg.agent}\``);
+  if (cfg?.runtime) lines.push(`• Runtime override: \`${cfg.runtime}\``);
   if (cfg?.model) lines.push(`• Model: \`${cfg.model}\``);
   if (cfg?.permissionMode) lines.push(`• Permission mode: \`${cfg.permissionMode}\``);
   if (session) lines.push(`• Session: \`${session}\``);

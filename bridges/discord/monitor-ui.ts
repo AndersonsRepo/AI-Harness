@@ -1,5 +1,5 @@
 /**
- * Monitor UI — Discord embeds and buttons for real-time Claude instance monitoring.
+ * Monitor UI — Discord embeds and buttons for real-time runtime instance monitoring.
  *
  * Creates per-instance embed messages in #monitor with:
  * - Agent name, channel, prompt, duration
@@ -69,7 +69,7 @@ export async function ensureMonitorChannel(): Promise<TextChannel | null> {
       monitorChannel = await guild.channels.create({
         name: MONITOR_CHANNEL_NAME,
         type: 0, // GuildText
-        topic: "Real-time monitoring of Claude agent instances — auto-managed by AI Harness",
+        topic: "Real-time monitoring of AI Harness agent instances — auto-managed by AI Harness",
         reason: "AI Harness instance monitor",
       });
       console.log(`[MONITOR-UI] Created #${MONITOR_CHANNEL_NAME} channel`);
@@ -158,7 +158,7 @@ export async function onInstanceCompleted(instance: MonitoredInstance): Promise<
 
     try {
       await channel.send(
-        `${statusIcon} **${agent}** completed in ${durationStr} (${instance.toolCalls.length} tools, ~$${cost}) — <#${instance.channelId}>`
+        `${statusIcon} **${agent}** [${instance.runtime}] completed in ${durationStr} (${instance.toolCalls.length} tools, ~$${cost}) — <#${instance.channelId}>`
       );
     } catch {}
   }
@@ -263,6 +263,11 @@ function buildInstanceEmbed(instance: MonitoredInstance): {
     .setDescription(`<#${instance.channelId}>`)
     .setColor(embedColor)
     .addFields(
+      {
+        name: "Runtime",
+        value: instance.runtime,
+        inline: true,
+      },
       {
         name: "Prompt",
         value: instance.prompt.slice(0, 200) + (instance.prompt.length > 200 ? "..." : ""),

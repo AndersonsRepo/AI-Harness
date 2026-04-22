@@ -211,7 +211,7 @@ export class Gateway {
         // Spawn the task
         const spawnResult = await spawnTask(taskId);
         if (!spawnResult) {
-          await this.adapter.sendMessage(channelId, "Failed to spawn Claude process.", msg.id);
+          await this.adapter.sendMessage(channelId, "Failed to spawn runtime process.", msg.id);
           this.releaseChannel(channelId);
           return;
         }
@@ -221,6 +221,7 @@ export class Gateway {
           taskId,
           channelId,
           agent: agentName || "default",
+          runtime: spawnResult.runtime,
           prompt: userText,
           pid: spawnResult.pid,
         });

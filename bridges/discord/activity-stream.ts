@@ -120,6 +120,7 @@ export async function postError(
 export interface AgentActivity {
   channelId: string;
   agent: string;
+  runtime?: "claude" | "codex";
   prompt: string;
   startedAt: number;
   streamMessageId?: string;
@@ -133,6 +134,7 @@ export async function postAgentStart(activity: AgentActivity): Promise<string | 
       .setDescription(monitor.truncate(activity.prompt, 200, "stream:agent-prompt"))
       .addFields(
         { name: "Agent", value: activity.agent, inline: true },
+        { name: "Runtime", value: activity.runtime || "claude", inline: true },
         { name: "Channel", value: `<#${activity.channelId}>`, inline: true }
       )
       .setColor(0x9b59b6)
@@ -162,6 +164,7 @@ export async function postAgentComplete(
       .setDescription(truncated)
       .addFields(
         { name: "Agent", value: activity.agent, inline: true },
+        { name: "Runtime", value: activity.runtime || "claude", inline: true },
         { name: "Channel", value: `<#${activity.channelId}>`, inline: true },
         { name: "Duration", value: durationStr, inline: true }
       )
@@ -198,6 +201,7 @@ export async function postAgentError(
       .setDescription(monitor.truncate(error, 1800, "stream:agent-error"))
       .addFields(
         { name: "Agent", value: activity.agent, inline: true },
+        { name: "Runtime", value: activity.runtime || "claude", inline: true },
         { name: "Channel", value: `<#${activity.channelId}>`, inline: true },
         { name: "Duration", value: durationStr, inline: true }
       )

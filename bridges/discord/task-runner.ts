@@ -1,13 +1,11 @@
 import { spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync, mkdirSync, readdirSync } from "fs";
+import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { getDb } from "./db.js";
-import { getSession, setSession, validateSession } from "./session-store.js";
+import { setSession, validateSession } from "./session-store.js";
 import { getChannelConfig } from "./channel-config-store.js";
-// project-manager used indirectly via claude-config.ts
-import { getProjectSessionKey } from "./handoff-router.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
-// agent-loader used indirectly via claude-config.ts
+import { getAgentRuntime } from "./agent-loader.js";
 import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance } from "./instance-monitor.js";
 import { proc } from "./platform.js";
 import {
@@ -16,9 +14,16 @@ import {
   extractSessionId as sharedExtractSessionId,
   buildClaudeConfig,
 } from "./claude-config.js";
+import {
+  buildCodexConfig,
+  extractCodexResponse,
+  extractCodexSessionId,
+} from "./codex-config.js";
+import type { AgentRuntime } from "./agent-loader.js";
 
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const STREAM_DIR = join(TEMP_DIR, "streams");
+const PROMPT_DIR = join(TEMP_DIR, "prompts");
 
 // Retry backoff: 5s, 25s, 125s (exponential base-5)
 const RETRY_BACKOFF_BASE = 5;
@@ -113,10 +118,19 @@ function clearLoopHistory(taskId: string): void {
   taskToolHistory.delete(taskId);
 }
 
+let spawnProcess = spawn;
+
+export function setSpawnProcessForTests(
+  impl: typeof spawn | null,
+): void {
+  spawnProcess = impl || spawn;
+}
+
 export interface TaskConfig {
   channelId: string;
   prompt: string;
   agent?: string;
+  runtime?: AgentRuntime;
   sessionKey?: string;
   maxSteps?: number;
   maxAttempts?: number;
@@ -127,6 +141,7 @@ export interface TaskRecord {
   channel_id: string;
   prompt: string;
   agent: string | null;
+  runtime: AgentRuntime | null;
   session_key: string | null;
   status: string;
   step_count: number;
@@ -169,6 +184,7 @@ let deadLetterHandler: TaskDeadLetterHandler | null = null;
 
 // Track stream dirs per task for continuation steps
 const taskStreamDirs = new Map<string, string>();
+const taskPromptFiles = new Map<string, string>();
 
 export function onTaskOutput(handler: TaskOutputHandler): void {
   outputHandler = handler;
@@ -187,6 +203,19 @@ function generateId(): string {
 export const extractResponse = sharedExtractResponse;
 export const extractSessionId = sharedExtractSessionId;
 
+export function resolveTaskRuntime(task: Pick<TaskRecord, "runtime" | "agent" | "channel_id">): AgentRuntime {
+  if (task.runtime === "claude" || task.runtime === "codex") {
+    return task.runtime;
+  }
+
+  const channelRuntime = getChannelConfig(task.channel_id)?.runtime;
+  if (channelRuntime === "claude" || channelRuntime === "codex") {
+    return channelRuntime;
+  }
+
+  return getAgentRuntime(task.agent);
+}
+
 /** Detect if Claude needs another step */
 export function needsContinuation(response: string): boolean {
   if (response.trimEnd().endsWith("[CONTINUE]")) return true;
@@ -204,13 +233,14 @@ export function submitTask(config: TaskConfig): string {
   const now = new Date().toISOString();
 
   db.prepare(`
-    INSERT INTO task_queue (id, channel_id, prompt, agent, session_key, status, max_steps, max_attempts, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+    INSERT INTO task_queue (id, channel_id, prompt, agent, runtime, session_key, status, max_steps, max_attempts, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
   `).run(
     id,
     config.channelId,
     config.prompt,
     config.agent || null,
+    config.runtime || null,
     config.sessionKey || null,
     config.maxSteps ?? 10,
     config.maxAttempts ?? 3,
@@ -270,7 +300,7 @@ function updateTask(id: string, updates: Partial<TaskRecord>): void {
 
 // --- Spawn & execute ---
 
-export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string; worktreePath?: string }): Promise<{ pid: number; outputFile: string; streamDir: string } | null> {
+export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string; worktreePath?: string }): Promise<{ pid: number; outputFile: string; streamDir: string; runtime: AgentRuntime } | null> {
   const task = getTask(taskId);
   if (!task) return null;
 
@@ -283,6 +313,7 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
 
   try { mkdirSync(TEMP_DIR, { recursive: true }); } catch {}
   try { mkdirSync(STREAM_DIR, { recursive: true }); } catch {}
+  try { mkdirSync(PROMPT_DIR, { recursive: true }); } catch {}
 
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const outputFile = join(TEMP_DIR, `response-${requestId}.json`);
@@ -301,28 +332,67 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
   // Build shared config
   const channelConfig = getChannelConfig(task.channel_id);
   const agentName = task.agent || channelConfig?.agent;
-  const config = await buildClaudeConfig({
-    channelId: task.channel_id,
-    prompt: task.prompt,
-    agentName,
-    sessionKey: task.session_key || task.channel_id,
-    taskId: task.id,
-    isContinuation: task.step_count > 0,
-    extraSystemPrompts,
-    worktreePath: opts?.worktreePath,
-  });
+  const runtime = resolveTaskRuntime(task);
+  const isContinuation = runtime === "claude" && task.step_count > 0;
 
-  const pythonArgs = [
-    `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
-    outputFile,
-    "--stream-dir",
-    streamDir,
-    ...config.args,
-  ];
+  let pythonArgs: string[];
+  let childCwd: string;
+  let childEnv: Record<string, string>;
 
-  const childProc = spawn("python3", pythonArgs, {
-    cwd: config.cwd,
-    env: config.env,
+  if (runtime === "codex") {
+    const config = await buildCodexConfig({
+      channelId: task.channel_id,
+      prompt: task.prompt,
+      agentName,
+      sessionKey: task.session_key || task.channel_id,
+      taskId: task.id,
+      extraSystemPrompts,
+      worktreePath: opts?.worktreePath,
+      outputFile,
+      streamDir,
+    });
+
+    const promptFile = join(PROMPT_DIR, `prompt-${requestId}.txt`);
+    writeFileSync(promptFile, config.prompt, "utf-8");
+    taskPromptFiles.set(taskId, promptFile);
+
+    pythonArgs = [
+      `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
+      outputFile,
+      "--stream-dir",
+      streamDir,
+      "--prompt-file",
+      promptFile,
+      ...config.runnerArgs,
+    ];
+    childCwd = config.cwd;
+    childEnv = config.env;
+  } else {
+    const config = await buildClaudeConfig({
+      channelId: task.channel_id,
+      prompt: task.prompt,
+      agentName,
+      sessionKey: task.session_key || task.channel_id,
+      taskId: task.id,
+      isContinuation,
+      extraSystemPrompts,
+      worktreePath: opts?.worktreePath,
+    });
+
+    pythonArgs = [
+      `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
+      outputFile,
+      "--stream-dir",
+      streamDir,
+      ...config.args,
+    ];
+    childCwd = config.cwd;
+    childEnv = config.env;
+  }
+
+  const childProc = spawnProcess("python3", pythonArgs, {
+    cwd: childCwd,
+    env: childEnv,
     detached: true,
     stdio: "ignore",
   });
@@ -332,12 +402,13 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
 
   updateTask(taskId, {
     status: "running",
+    runtime,
     output_file: outputFile,
     pid,
     step_count: task.step_count + 1,
   });
 
-  console.log(`[TASK] Spawned ${taskId} step ${task.step_count + 1}, PID ${pid}, agent: ${agentName || "default"}`);
+  console.log(`[TASK] Spawned ${taskId} step ${task.step_count + 1}, PID ${pid}, agent: ${agentName || "default"}, runtime: ${runtime}`);
 
   // Set up FileWatcher for the output file
   const watcher = new FileWatcher({
@@ -362,27 +433,34 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
   // Track stream dir for continuation steps
   taskStreamDirs.set(taskId, streamDir);
 
-  return { pid, outputFile, streamDir };
+  return { pid, outputFile, streamDir, runtime };
 }
 
 async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
   const task = getTask(taskId);
   if (!task) return;
+  const runtime = resolveTaskRuntime(task);
 
   try {
     // Clean up output file
     if (task.output_file && existsSync(task.output_file)) {
       unlinkSync(task.output_file);
     }
+    const promptFile = taskPromptFiles.get(taskId);
+    if (promptFile && existsSync(promptFile)) {
+      unlinkSync(promptFile);
+      taskPromptFiles.delete(taskId);
+    }
 
     const result = JSON.parse(raw);
     const { stdout, stderr, returncode } = result;
 
-    console.log(`[TASK] ${taskId} returncode: ${returncode}, stdout length: ${(stdout || "").length}`);
+    console.log(`[TASK] ${taskId} runtime: ${runtime}, returncode: ${returncode}, stdout length: ${(stdout || "").length}`);
     if (stderr) console.error(`[TASK STDERR] ${stderr.slice(0, 500)}`);
 
     // Check for stale session error
     if (
+      runtime === "claude" &&
       returncode !== 0 &&
       task.attempt === 0 &&
       stderr?.includes("session") &&
@@ -399,9 +477,10 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     }
 
     if (returncode !== 0) {
-      const errorMsg = stderr?.trim() || `Claude exited with code ${returncode}`;
+      const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
+      const errorMsg = stderr?.trim() || `${runtimeLabel} exited with code ${returncode}`;
       // Track API failures for observability
-      if (isTransientApiError(errorMsg)) {
+      if (runtime === "claude" && isTransientApiError(errorMsg)) {
         recordApiFailure();
       }
       await handleFailure(taskId, errorMsg);
@@ -413,15 +492,21 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     }
 
     // Successful response — reset API failure counter
-    recordApiSuccess();
+    if (runtime === "claude") {
+      recordApiSuccess();
+    }
 
-    const responseText = extractResponse(stdout);
-    const sessionId = extractSessionId(stdout);
+    const responseText = runtime === "codex"
+      ? extractCodexResponse(result)
+      : extractResponse(stdout);
+    const sessionId = runtime === "codex"
+      ? extractCodexSessionId(result)
+      : extractSessionId(stdout);
 
     console.log(`[TASK] ${taskId} extractResponse: ${responseText ? responseText.length + ' chars' : 'NULL'}, sessionId: ${sessionId || 'null'}`);
 
     // Loop detection — check for repeated tool call patterns
-    const loopWarning = checkForLoops(taskId, stdout);
+    const loopWarning = runtime === "claude" ? checkForLoops(taskId, stdout) : null;
     if (loopWarning) {
       console.warn(`[TASK] ${taskId} ${loopWarning}`);
       // Kill the task if looping — don't allow continuation
@@ -440,11 +525,16 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     // Save session
     if (sessionId) {
       const sessionKey = task.session_key || task.channel_id;
-      setSession(sessionKey, sessionId);
+      setSession(sessionKey, sessionId, runtime);
     }
 
     // Check for continuation
-    if (responseText && needsContinuation(responseText) && task.step_count < task.max_steps) {
+    if (
+      runtime === "claude" &&
+      responseText &&
+      needsContinuation(responseText) &&
+      task.step_count < task.max_steps
+    ) {
       console.log(`[TASK] ${taskId} needs continuation (step ${task.step_count}/${task.max_steps})`);
       updateTask(taskId, { status: "waiting_continue" });
 
@@ -476,6 +566,11 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     }
   } catch (err: any) {
     console.error(`[TASK] ${taskId} output processing error: ${err.message}`);
+    const promptFile = taskPromptFiles.get(taskId);
+    if (promptFile && existsSync(promptFile)) {
+      unlinkSync(promptFile);
+      taskPromptFiles.delete(taskId);
+    }
     await handleFailure(taskId, err.message);
     if (outputHandler) {
       await outputHandler(taskId, null, err.message, null, raw);
@@ -494,6 +589,7 @@ async function handleFailure(taskId: string, error: string): Promise<void> {
     console.log(`[TASK] ${taskId} exhausted all ${task.max_attempts} attempts, moving to dead letter`);
     updateTask(taskId, { status: "dead", last_error: error });
     taskStreamDirs.delete(taskId);
+    taskPromptFiles.delete(taskId);
     clearLoopHistory(taskId);
 
     const db = getDb();
@@ -614,6 +710,7 @@ export function recoverCrashedTasks(): number {
             agent: task.agent || "default",
             prompt: task.prompt || "(recovered)",
             pid: task.pid!,
+            runtime: resolveTaskRuntime(task),
           });
 
           console.log(`[TASK] Re-attached watcher for alive task ${task.id} (PID ${task.pid})`);
@@ -645,6 +742,12 @@ export function cancelTask(taskId: string): boolean {
   if (task.pid) {
     proc.terminate(task.pid);
   }
+
+  const promptFile = taskPromptFiles.get(taskId);
+  if (promptFile && existsSync(promptFile)) {
+    try { unlinkSync(promptFile); } catch {}
+  }
+  taskPromptFiles.delete(taskId);
 
   // Atomic update: set failed + prevent retry in a single statement
   getDb().prepare(

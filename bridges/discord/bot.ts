@@ -783,16 +783,19 @@ async function handleClaude(
 
   if (!spawnResult) {
     pendingTaskContexts.delete(taskId);
-    await message.reply("Failed to spawn Claude process.");
+    await message.reply("Failed to spawn runtime process.");
     releaseChannel(channelId);
     return;
   }
+
+  activity.runtime = spawnResult.runtime;
 
   // Register with instance monitor
   registerInstance({
     taskId,
     channelId,
     agent: agentName || "default",
+    runtime: spawnResult.runtime,
     prompt: userText,
     pid: spawnResult.pid,
   });
@@ -1971,7 +1974,7 @@ client.on("clientReady", async () => {
     return null;
   }
 
-  // Mento auto-iteration: DISABLED by user request (2026-04-07) — conserving credits for ITC hackathon
+  // Mento auto-iteration: DISABLED (2026-04-15) — weekly credit limit
   // setInterval(() => {
   //   try {
   //     const ch = resolveProjectChannel("mento");
@@ -2019,7 +2022,7 @@ client.on("clientReady", async () => {
   //   }
   // }, HACKATHON_INTERVAL_MS);
 
-  console.log(`[PROJECT-ITER] Mento iteration DISABLED (user request 2026-04-07 — ITC hackathon focus)`);
+  console.log(`[PROJECT-ITER] Mento iteration DISABLED (2026-04-15 — weekly credit limit)`);
   console.log(`[PROJECT-ITER] Lead-gen iteration DISABLED (user request 2026-03-25)`);
   console.log(`[PROJECT-ITER] Lattice parallel iteration disabled (using heartbeat task instead)`);
   console.log(`[PROJECT-ITER] Hackathon iteration DISABLED (user request 2026-04-06)`);

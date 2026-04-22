@@ -2,6 +2,7 @@ import { getDb } from "./db.js";
 
 export interface ChannelConfig {
   agent?: string;
+  runtime?: "claude" | "codex";
   permissionMode?: string;
   allowedTools?: string[];
   disallowedTools?: string[];
@@ -14,6 +15,7 @@ type ConfigMap = Record<string, ChannelConfig>;
 function rowToConfig(row: any): ChannelConfig {
   return {
     agent: row.agent || undefined,
+    runtime: row.runtime === "codex" ? "codex" : row.runtime === "claude" ? "claude" : undefined,
     permissionMode: row.permission_mode || undefined,
     allowedTools: row.allowed_tools ? JSON.parse(row.allowed_tools) : undefined,
     disallowedTools: row.disallowed_tools ? JSON.parse(row.disallowed_tools) : undefined,
@@ -37,18 +39,20 @@ export function setChannelConfig(
   const existing = getChannelConfig(channelId);
 
   const merged = {
-    agent: config.agent !== undefined ? config.agent : existing?.agent,
-    permissionMode: config.permissionMode !== undefined ? config.permissionMode : existing?.permissionMode,
-    allowedTools: config.allowedTools !== undefined ? config.allowedTools : existing?.allowedTools,
-    disallowedTools: config.disallowedTools !== undefined ? config.disallowedTools : existing?.disallowedTools,
-    model: config.model !== undefined ? config.model : existing?.model,
+    agent: Object.prototype.hasOwnProperty.call(config, "agent") ? config.agent : existing?.agent,
+    runtime: Object.prototype.hasOwnProperty.call(config, "runtime") ? config.runtime : existing?.runtime,
+    permissionMode: Object.prototype.hasOwnProperty.call(config, "permissionMode") ? config.permissionMode : existing?.permissionMode,
+    allowedTools: Object.prototype.hasOwnProperty.call(config, "allowedTools") ? config.allowedTools : existing?.allowedTools,
+    disallowedTools: Object.prototype.hasOwnProperty.call(config, "disallowedTools") ? config.disallowedTools : existing?.disallowedTools,
+    model: Object.prototype.hasOwnProperty.call(config, "model") ? config.model : existing?.model,
   };
 
   db.prepare(`
-    INSERT INTO channel_configs (channel_id, agent, permission_mode, allowed_tools, disallowed_tools, model, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO channel_configs (channel_id, agent, runtime, permission_mode, allowed_tools, disallowed_tools, model, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(channel_id) DO UPDATE SET
       agent = excluded.agent,
+      runtime = excluded.runtime,
       permission_mode = excluded.permission_mode,
       allowed_tools = excluded.allowed_tools,
       disallowed_tools = excluded.disallowed_tools,
@@ -57,6 +61,7 @@ export function setChannelConfig(
   `).run(
     channelId,
     merged.agent || null,
+    merged.runtime || null,
     merged.permissionMode || null,
     merged.allowedTools ? JSON.stringify(merged.allowedTools) : null,
     merged.disallowedTools ? JSON.stringify(merged.disallowedTools) : null,

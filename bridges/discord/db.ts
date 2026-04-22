@@ -131,6 +131,18 @@ function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(11);
     console.log("[DB] Applied schema v11 (work queue evaluation fields)");
   }
+
+  if (version < 12) {
+    applyV12(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(12);
+    console.log("[DB] Applied schema v12 (session runtime column)");
+  }
+
+  if (version < 13) {
+    applyV13(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(13);
+    console.log("[DB] Applied schema v13 (channel/task runtime columns)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -534,6 +546,23 @@ function applyV11(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_work_queue_channel ON work_queue(channel_id);
     CREATE INDEX IF NOT EXISTS idx_work_queue_scheduled ON work_queue(scheduled_at);
     CREATE INDEX IF NOT EXISTS idx_work_queue_parent ON work_queue(parent_id);
+  `);
+}
+
+function applyV12(database: Database.Database): void {
+  // Tag each session row with the runtime that issued the session id.
+  // Claude session ids and Codex thread ids are both UUID-shaped but belong
+  // to different systems — they can't be resumed cross-runtime. Default to
+  // 'claude' for existing rows so pre-migration behavior is unchanged.
+  database.exec(`
+    ALTER TABLE sessions ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude';
+  `);
+}
+
+function applyV13(database: Database.Database): void {
+  database.exec(`
+    ALTER TABLE channel_configs ADD COLUMN runtime TEXT;
+    ALTER TABLE task_queue ADD COLUMN runtime TEXT;
   `);
 }
 
