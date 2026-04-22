@@ -1,0 +1,7 @@
+{
+  "SEMESTER_COURSECODE": {
+    "channel": "discord-channel-name",
+    "display": "Course Display Name",
+    "vault_dir": "vault-subdirectory"
+  }
+}

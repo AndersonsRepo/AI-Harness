@@ -1,0 +1,11 @@
+{
+  "projects": {
+    "example-app": {
+      "path": "$HOME/path/to/your-project",
+      "repo": "your-org/your-repo",
+      "discord_channel": "your-channel",
+      "vercel_project": true,
+      "description": "Example project — replace with your own"
+    }
+  }
+}
