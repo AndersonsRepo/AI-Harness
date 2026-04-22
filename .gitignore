@@ -21,6 +21,7 @@ vault/shared/project-knowledge/*.md
 heartbeat-tasks/*.state.json
 heartbeat-tasks/*.state-files.json
 heartbeat-tasks/*.vercel-state.json
+heartbeat-tasks/*.json
 heartbeat-tasks/pending-notifications.jsonl
 heartbeat-tasks/logs/*.log
 heartbeat-tasks/projects.json
@@ -53,9 +54,24 @@ vault/shared/*digest.md
 .claude/agents/mento.md
 .claude/agents/lightrag.md
 .claude/agents/lattice.md
+.claude/agents/*.md
+!.claude/agents/.gitkeep
 
 # Development planning docs (contain personal project references)
 PLAN.md
 PLAN-*.md
 CONTEXT.md
 vault/daily/
+
+# Discord bridge local runtime state
+bridges/discord/.local/
+bridges/discord/.tmp/
+bridges/discord/__pycache__/
+bridges/discord/.env
+bridges/discord/.bot.pid
+bridges/discord/harness.db
+bridges/discord/harness.db-shm
+bridges/discord/harness.db-wal
+bridges/discord/bot.log
+bridges/discord/bot.log.*
+bridges/discord/projects.json.bak
