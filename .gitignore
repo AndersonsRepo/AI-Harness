@@ -2,11 +2,13 @@ node_modules/
 .env
 .env.local
 *.log
+*.log.*
 .DS_Store
 dist/
 build/
 *.tgz
 .claude/heartbeat-state/
+.claude/worktrees/
 .tmp/
 .bot.pid
 harness.db
