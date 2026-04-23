@@ -3,6 +3,7 @@ import { assembleContext } from "./context-assembler.js";
 import { readAgentPrompt, readAgentMetadata, CodexSandbox, agentAllowsWrite } from "./agent-loader.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { HARNESS_ROOT } from "./claude-config.js";
+import { safetyPatternsJson } from "./safety.js";
 
 export interface CodexRunConfig {
   prompt: string;
@@ -88,6 +89,9 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     HARNESS_ROOT,
+    // codex-runner.py enforces these at the event-stream level, since
+    // `codex exec` has no equivalent of Claude's --disallowedTools flag.
+    CODEX_SAFETY_PATTERNS: safetyPatternsJson(),
     ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
   };
 

@@ -23,10 +23,105 @@ Output file shape (matches claude-runner except for id key name):
 
 import json
 import os
+import re
 import resource
 import subprocess
 import sys
 import threading
+
+
+# Kept in sync with bridges/discord/safety.ts DESTRUCTIVE_BASH_PATTERNS.
+# If CODEX_SAFETY_PATTERNS is set in the environment (normal path — set by
+# codex-config.ts), that JSON wins; this list is a fallback for manual
+# invocations so the runner is never unguarded.
+_DEFAULT_PATTERNS = [
+    {"id": "rm-rf", "regex": r"\brm\s+(-[rRfF]+|--recursive|--force)"},
+    {"id": "git-push-force", "regex": r"\bgit\s+push\s+(--force|-f\b)"},
+    {"id": "git-reset-hard", "regex": r"\bgit\s+reset\s+--hard\b"},
+    {"id": "kill-9", "regex": r"\bkill\s+-9\b"},
+    {"id": "pkill-9", "regex": r"\bpkill\s+-9\b"},
+    {"id": "drop-table", "regex": r"\bDROP\s+TABLE\b", "caseInsensitive": True},
+    {"id": "delete-from", "regex": r"\bDELETE\s+FROM\b", "caseInsensitive": True},
+]
+
+
+def _load_safety_patterns():
+    raw = os.environ.get("CODEX_SAFETY_PATTERNS")
+    patterns = _DEFAULT_PATTERNS
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                patterns = parsed
+        except json.JSONDecodeError:
+            sys.stderr.write(
+                "[codex-runner] CODEX_SAFETY_PATTERNS was set but not valid JSON; using defaults.\n"
+            )
+
+    compiled = []
+    for p in patterns:
+        if not isinstance(p, dict):
+            continue
+        regex = p.get("regex")
+        pid = p.get("id") or regex or "unknown"
+        if not isinstance(regex, str):
+            continue
+        flags = re.IGNORECASE if p.get("caseInsensitive") else 0
+        try:
+            compiled.append((pid, re.compile(regex, flags)))
+        except re.error as e:
+            sys.stderr.write(f"[codex-runner] Skipping invalid pattern {pid!r}: {e}\n")
+    return compiled
+
+
+def _extract_commands(event):
+    """Pull candidate command strings out of a Codex JSONL event.
+
+    Codex emits exec/shell events under a few different shapes depending
+    on its version; we check top-level and nested `msg` for any of the
+    usual keys. Returns a list of strings to pattern-match.
+    """
+    if not isinstance(event, dict):
+        return []
+
+    candidates = []
+    sources = [event]
+    msg = event.get("msg")
+    if isinstance(msg, dict):
+        sources.append(msg)
+
+    for src in sources:
+        for key in ("command", "cmd", "argv", "arguments", "shell_command"):
+            value = src.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+            elif isinstance(value, list):
+                parts = [v for v in value if isinstance(v, str)]
+                if parts:
+                    candidates.append(" ".join(parts))
+    return candidates
+
+
+def scan_for_destructive(line: str, compiled_patterns):
+    """Scan a single JSONL line for destructive command patterns.
+
+    Returns (pattern_id, matched_command) on first hit; None otherwise.
+    Exposed as a module-level function so unit tests can exercise the
+    logic without spawning a real Codex.
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+    for command in _extract_commands(event):
+        for pid, pattern in compiled_patterns:
+            if pattern.search(command):
+                return (pid, command)
+    return None
 
 
 def main():
@@ -210,18 +305,48 @@ def main():
         except BrokenPipeError:
             pass
 
+        safety_patterns = _load_safety_patterns()
+        safety_violation = [None]  # (pattern_id, command) if tripped
+
         stdout_chunks = []
         for line in proc.stdout:
-            stdout_chunks.append(line.decode("utf-8", errors="replace"))
+            decoded = line.decode("utf-8", errors="replace")
+            stdout_chunks.append(decoded)
+            # Each line resets the watchdog — active stream is not stalled.
             timer.cancel()
             timer = threading.Timer(timeout, watchdog)
             timer.start()
 
+            # Inspect for destructive shell commands the Claude path would
+            # have blocked via --disallowedTools. If matched, kill the
+            # subprocess immediately so the command can't complete.
+            hit = scan_for_destructive(decoded, safety_patterns)
+            if hit:
+                safety_violation[0] = hit
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                break
+
         timer.cancel()
-        proc.wait(timeout=30)
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
         stderr_text = (proc.stderr.read() or b"").decode("utf-8", errors="replace")
         stdout_text = "".join(stdout_chunks)
+
+        if safety_violation[0]:
+            pid, cmd = safety_violation[0]
+            stderr_text = (
+                stderr_text
+                + f"\n[codex-runner] SAFETY VIOLATION ({pid}): killed subprocess before executing: {cmd[:300]}"
+            ).strip()
 
         thread_id = extract_thread_id(stdout_text)
         last_message = None
@@ -235,7 +360,16 @@ def main():
         if not last_message:
             last_message = extract_last_message(stdout_text)
 
-        if timed_out[0]:
+        if safety_violation[0]:
+            write_result({
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "returncode": 1,
+                "threadId": thread_id,
+                "lastMessage": last_message,
+                "safetyViolation": {"id": safety_violation[0][0], "command": safety_violation[0][1]},
+            })
+        elif timed_out[0]:
             write_result({
                 "stdout": stdout_text,
                 "stderr": (stderr_text + f"\nCodex timed out after {timeout} seconds").strip(),

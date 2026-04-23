@@ -12,18 +12,14 @@ import { assembleContext } from "./context-assembler.js";
 import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { getSession } from "./session-store.js";
+import { claudeDisallowedToolArgs } from "./safety.js";
 
 export const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 
-// Global safety guardrails — applied to every Claude invocation
-export const GLOBAL_DISALLOWED_TOOLS = [
-  "Bash(rm -rf:*)",
-  "Bash(git push --force:*)",
-  "Bash(git reset --hard:*)",
-  "Bash(DROP:*)",
-  "Bash(DELETE FROM:*)",
-  "Bash(kill -9:*)",
-].join(",");
+// Global safety guardrails — applied to every Claude invocation. Sourced
+// from safety.ts so the Codex runtime enforces the same patterns at the
+// event-stream level (see codex-runner.py).
+export const GLOBAL_DISALLOWED_TOOLS = claudeDisallowedToolArgs().join(",");
 
 // ─── Response Parsing ───────────────────────────────────────────────
 
