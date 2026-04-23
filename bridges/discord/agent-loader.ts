@@ -5,6 +5,8 @@
  * - Loading agent prompts from .claude/agents/
  * - Listing available agent names
  * - Agent tool restriction definitions (enforced at CLI level, not prompt level)
+ * - Per-agent runtime (claude | codex) and codex sandbox, read from optional
+ *   YAML frontmatter at the top of each agent .md file.
  */
 
 import { existsSync, readFileSync, readdirSync } from "fs";
@@ -14,10 +16,53 @@ const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 
 // --- Agent Loading ---
 
+export type AgentRuntime = "claude" | "codex";
+export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
+
+export interface AgentMetadata {
+  runtime: AgentRuntime;
+  sandbox?: CodexSandbox;
+  raw: Record<string, string>;
+}
+
+function parseFrontmatter(text: string): { fields: Record<string, string>; body: string } {
+  if (!text.startsWith("---\n") && !text.startsWith("---\r\n")) {
+    return { fields: {}, body: text };
+  }
+  const afterOpen = text.indexOf("\n") + 1;
+  const closeIdx = text.indexOf("\n---", afterOpen);
+  if (closeIdx === -1) return { fields: {}, body: text };
+  const fmRaw = text.slice(afterOpen, closeIdx);
+  const endLineIdx = text.indexOf("\n", closeIdx + 1);
+  const body = endLineIdx === -1 ? "" : text.slice(endLineIdx + 1);
+  const fields: Record<string, string> = {};
+  for (const line of fmRaw.split(/\r?\n/)) {
+    const m = line.match(/^([A-Za-z0-9_-]+):\s*(.*?)\s*$/);
+    if (m) fields[m[1]] = m[2].replace(/^["']|["']$/g, "");
+  }
+  return { fields, body };
+}
+
+function agentFilePath(name: string): string {
+  return join(HARNESS_ROOT, ".claude", "agents", `${name}.md`);
+}
+
 export function readAgentPrompt(name: string): string | null {
-  const agentFile = join(HARNESS_ROOT, ".claude", "agents", `${name}.md`);
+  const agentFile = agentFilePath(name);
   if (!existsSync(agentFile)) return null;
-  return readFileSync(agentFile, "utf-8");
+  const raw = readFileSync(agentFile, "utf-8");
+  const { body, fields } = parseFrontmatter(raw);
+  return Object.keys(fields).length > 0 ? body : raw;
+}
+
+export function readAgentMetadata(name: string): AgentMetadata | null {
+  const agentFile = agentFilePath(name);
+  if (!existsSync(agentFile)) return null;
+  const raw = readFileSync(agentFile, "utf-8");
+  const { fields } = parseFrontmatter(raw);
+  const runtime: AgentRuntime = fields.runtime === "codex" ? "codex" : "claude";
+  const sandbox = fields.sandbox as CodexSandbox | undefined;
+  return { runtime, sandbox, raw: fields };
 }
 
 export function listAgentNames(): string[] {
@@ -28,10 +73,10 @@ export function listAgentNames(): string[] {
     .map((f) => f.replace(".md", ""));
 }
 
-export type AgentRuntime = "claude" | "codex";
-
 export function getAgentRuntime(agentName?: string | null): AgentRuntime {
   if (!agentName) return "claude";
+  const meta = readAgentMetadata(agentName);
+  if (meta) return meta.runtime;
   return agentName.startsWith("codex-") ? "codex" : "claude";
 }
 
@@ -59,6 +104,8 @@ export const AGENT_TOOL_RESTRICTIONS: Record<string, AgentToolRestrictions> = {
       "NotebookEdit",
       "Bash(npm:*)",
       "Bash(npx:*)",
+      "mcp__codex__codex",
+      "mcp__codex__codex-reply",
     ],
   },
   researcher: {
@@ -95,6 +142,31 @@ export const AGENT_TOOL_RESTRICTIONS: Record<string, AgentToolRestrictions> = {
       "Bash(git diff:*)",
       "Bash(git log:*)",
       "Bash(git show:*)",
+    ],
+  },
+  tester: {
+    allowed: [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(tsx:*)",
+      "Bash(python3:*)",
+      "Bash(pytest:*)",
+      "Bash(curl:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "mcp__vault__vault_search",
+      "mcp__vault__vault_read",
+      "mcp__vault__vault_list",
+      "mcp__vault__vault_write",
     ],
   },
   education: {
@@ -153,6 +225,7 @@ export const AGENT_TOOL_RESTRICTIONS: Record<string, AgentToolRestrictions> = {
 export const AGENT_DEFAULT_MODELS: Record<string, string> = {
   orchestrator: "opus",
   reviewer: "opus",
+  tester: "opus",
   project: "opus",
   // builder, researcher, education, ops, commands: use CLI default (sonnet)
 };

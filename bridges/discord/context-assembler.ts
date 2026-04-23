@@ -75,7 +75,7 @@ function getAgentLimits(agentName: string): { limits: Record<string, number>; ma
   const overrides = AGENT_LIMIT_OVERRIDES[agentName];
   if (!overrides) return { limits: SECTION_LIMITS, maxTotal: MAX_TOTAL_CHARS };
   return {
-    limits: { ...SECTION_LIMITS, ...overrides.limits },
+    limits: { ...SECTION_LIMITS, ...(overrides.limits as Record<string, number>) },
     maxTotal: overrides.maxTotal,
   };
 }
@@ -327,7 +327,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     }
 
     // Priority 0: Live state (always include — the "what's happening now" file)
-    const liveStateSection = buildLiveStateSection(keywords);
+    const liveStateSection = buildLiveStateSection(new Set(keywords));
     if (liveStateSection) {
       const truncated = agentTruncate(liveStateSection, "liveState", "context:live-state");
       sections.push(truncated);
@@ -505,6 +505,37 @@ function buildProjectSection(
   return lines.join("\n");
 }
 
+function resolveProjectAffinityTags(projectName?: string): string[] {
+  if (!projectName) return [];
+  const normalized = projectName.toLowerCase().trim();
+  const tags = new Set<string>();
+  const spaced = normalized.replace(/[_-]+/g, " ");
+  const kebab = spaced.replace(/\s+/g, "-");
+
+  tags.add(kebab);
+  for (const token of spaced.split(/\s+/).filter((token) => token.length >= 3)) {
+    tags.add(token);
+  }
+  return [...tags];
+}
+
+function extractTagsFromFrontmatter(fullPath: string): string[] {
+  try {
+    if (!existsSync(fullPath)) return [];
+    const raw = readFileSync(fullPath, "utf-8");
+    const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+    if (!fmMatch) return [];
+    const tagsMatch = fmMatch[1].match(/^tags:\s*\[(.*?)\]/m);
+    if (!tagsMatch) return [];
+    return tagsMatch[1]
+      .split(",")
+      .map((tag) => tag.trim().replace(/['"]/g, "").toLowerCase())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 async function buildLearningsSection(
   prompt: string,
   keywords: string[],
@@ -525,6 +556,9 @@ async function buildLearningsSection(
     return lines.join("\n");
   }
 
+  const projectTags = resolveProjectAffinityTags(params.projectName);
+  const loweredKeywords = keywords.map((keyword) => keyword.toLowerCase());
+
   // --- P3: Self-RAG relevance filter ---
   // Compute composite relevance score instead of flat threshold
   const relevant = results
@@ -542,11 +576,25 @@ async function buildLearningsSection(
         relevance += 0.1;
       }
 
+      const fullPath = join(VAULT_DIR, r.path);
+      const resultTags = extractTagsFromFrontmatter(fullPath);
+      if (resultTags.length > 0) {
+        const tagKeywordHits = resultTags.filter((tag) =>
+          loweredKeywords.some((keyword) => tag === keyword || tag.includes(keyword) || keyword.includes(tag)),
+        ).length;
+        if (tagKeywordHits > 0) {
+          relevance += Math.min(tagKeywordHits * 0.05, 0.15);
+        }
+
+        if (projectTags.length > 0 && resultTags.some((tag) => projectTags.includes(tag))) {
+          relevance += 0.12;
+        }
+      }
+
       // Recency boost: files modified in last 7 days
       try {
-        const fullPath = join(VAULT_DIR, r.path);
         if (existsSync(fullPath)) {
-          const stat = require("fs").statSync(fullPath);
+          const stat = statSync(fullPath);
           const ageMs = Date.now() - stat.mtimeMs;
           if (ageMs < 7 * 86400_000) relevance += 0.1;
         }

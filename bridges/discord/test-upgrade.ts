@@ -238,7 +238,8 @@ async function testProjectManager() {
   const expectedName = projName.replace(/^proj-/, "");
   assert(project.name === expectedName, "Project name stripped of proj- prefix");
   assert(project.description === "Test project", "Description set");
-  assert(project.agents.length === 5, "Default agents assigned");
+  assert(project.agents.length === 6, "Default agents assigned");
+  assert(project.agents.includes("tester"), "Default agents include tester");
 
   const projChId = `proj-ch-${uniqueSuffix}`;
 

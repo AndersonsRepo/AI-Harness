@@ -6,6 +6,7 @@ unset CLAUDECODE
 unset CLAUDE_CODE_ENTRYPOINT
 
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-
-cd "$HOME/Desktop/AI-Harness/bridges/discord"
+cd "$(dirname "$0")"
+HARNESS_ROOT="${HARNESS_ROOT:-$(cd ../.. && pwd)}"
+export HARNESS_ROOT
 exec /opt/homebrew/bin/npx tsx bot.ts

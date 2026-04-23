@@ -25,7 +25,7 @@ export interface ProjectConfig {
 }
 
 const PROJECTS_CATEGORY_NAME = "Projects";
-const DEFAULT_AGENTS = ["orchestrator", "researcher", "reviewer", "builder", "ops"];
+const DEFAULT_AGENTS = ["orchestrator", "researcher", "reviewer", "tester", "builder", "ops"];
 const DEFAULT_MAX_DEPTH = 5;
 
 function rowToProject(row: any): ProjectConfig {

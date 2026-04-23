@@ -13,7 +13,7 @@ import {
   setSpawnProcessForTests,
   resolveTaskRuntime,
 } from "../task-runner.js";
-import { clearChannelSessions, getSession } from "../session-store.js";
+import { clearChannelSessions, getSession, setSession } from "../session-store.js";
 import { extractCodexResponse, extractCodexSessionId } from "../codex-config.js";
 
 interface SpawnCall {
@@ -41,7 +41,7 @@ function waitForTaskOutput(taskId: string): Promise<{ response: string | null; e
 }
 
 describe("Task Runner — Mixed Runtime Dispatch", () => {
-  const channels = ["runtime-codex-task", "runtime-claude-task", "runtime-override-task"];
+  const channels = ["runtime-codex-task", "runtime-claude-task", "runtime-override-task", "runtime-session-split"];
   const spawnCalls: SpawnCall[] = [];
 
   beforeEach(() => {
@@ -86,12 +86,14 @@ describe("Task Runner — Mixed Runtime Dispatch", () => {
     }
   });
 
-  it("routes a queued codex-builder task through codex-runner and stores a codex session", async () => {
+  it("routes an explicitly codex task through codex-runner and stores a codex session", async () => {
     const channelId = "runtime-codex-task";
+    setSession(channelId, "stale-codex-session", "codex");
     const taskId = submitTask({
       channelId,
       prompt: "Implement the change",
-      agent: "codex-builder",
+      agent: "builder",
+      runtime: "codex",
       sessionKey: channelId,
     });
 
@@ -103,6 +105,7 @@ describe("Task Runner — Mixed Runtime Dispatch", () => {
     assert.equal(spawnResult?.runtime, "codex");
     assert.equal(spawnCalls[0]?.args[0].endsWith("codex-runner.py"), true);
     assert.ok(spawnCalls[0]?.args.includes("--prompt-file"));
+    assert.equal(spawnCalls[0]?.args.includes("--session-id"), false);
     assert.equal(output.response, "Codex built it");
     assert.equal(output.sessionId, "codex-thread-123");
     assert.equal(getSession(channelId, "codex"), "codex-thread-123");
@@ -182,5 +185,27 @@ describe("Codex Result Parsing", () => {
 
     assert.equal(extractCodexResponse(payload), "Final Codex response");
     assert.equal(extractCodexSessionId(payload), "thread-abc");
+  });
+
+  it("falls back to nested content arrays when lastMessage is missing", () => {
+    const payload = {
+      stdout: '{"type":"thread","thread_id":"thread-nested"}\n{"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"Nested Codex response"}]}]}}\n',
+      stderr: "",
+      returncode: 0,
+      threadId: "thread-nested",
+      lastMessage: null,
+    };
+
+    assert.equal(extractCodexResponse(payload), "Nested Codex response");
+    assert.equal(extractCodexSessionId(payload), "thread-nested");
+  });
+
+  it("stores Claude and Codex sessions separately for the same logical key", () => {
+    const channelId = "runtime-session-split";
+    setSession(channelId, "claude-session", "claude");
+    setSession(channelId, "codex-thread", "codex");
+
+    assert.equal(getSession(channelId, "claude"), "claude-session");
+    assert.equal(getSession(channelId, "codex"), "codex-thread");
   });
 });

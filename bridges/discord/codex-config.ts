@@ -1,8 +1,7 @@
 import { getChannelConfig } from "./channel-config-store.js";
 import { assembleContext } from "./context-assembler.js";
-import { readAgentPrompt } from "./agent-loader.js";
+import { readAgentPrompt, readAgentMetadata, CodexSandbox } from "./agent-loader.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
-import { getSession } from "./session-store.js";
 import { HARNESS_ROOT } from "./claude-config.js";
 
 export interface CodexRunConfig {
@@ -25,110 +24,116 @@ export interface BuildCodexConfigOptions {
   skipSessionResume?: boolean;
 }
 
-export function extractCodexResponse(result: unknown): string | null {
-  const payload = result as Record<string, unknown> | null;
-  if (!payload) return null;
+const DEFAULT_SANDBOX: CodexSandbox = "workspace-write";
 
-  if (typeof payload.lastMessage === "string" && payload.lastMessage.trim()) {
-    return payload.lastMessage.trim();
+function composePrompt(parts: {
+  agentPrompt?: string | null;
+  context?: string | null;
+  extras?: string[];
+  userPrompt: string;
+}): string {
+  const sections: string[] = [];
+  if (parts.agentPrompt && parts.agentPrompt.trim()) {
+    sections.push(`# Agent Personality\n\n${parts.agentPrompt.trim()}`);
   }
-
-  const stdout = typeof payload.stdout === "string" ? payload.stdout : "";
-  let fallback: string | null = null;
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-      if (parsed.type === "message" && typeof parsed.content === "string" && parsed.content.trim()) {
-        fallback = parsed.content.trim();
-      }
-      if (parsed.type === "result" && typeof parsed.result === "string" && parsed.result.trim()) {
-        return parsed.result.trim();
-      }
-    } catch {}
+  if (parts.context && parts.context.trim()) {
+    sections.push(`# Harness Context\n\n${parts.context.trim()}`);
   }
-
-  return fallback;
-}
-
-export function extractCodexSessionId(result: unknown): string | null {
-  const payload = result as Record<string, unknown> | null;
-  if (!payload) return null;
-
-  if (typeof payload.threadId === "string" && payload.threadId.trim()) {
-    return payload.threadId;
+  if (parts.extras && parts.extras.length > 0) {
+    sections.push(`# Operator Guidance\n\n${parts.extras.join("\n\n").trim()}`);
   }
-
-  const stdout = typeof payload.stdout === "string" ? payload.stdout : "";
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-      if (parsed.type === "thread" && typeof parsed.thread_id === "string" && parsed.thread_id.trim()) {
-        return parsed.thread_id;
-      }
-    } catch {}
-  }
-
-  return null;
+  sections.push(`# User Request\n\n${parts.userPrompt}`);
+  return sections.join("\n\n---\n\n");
 }
 
 export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<CodexRunConfig> {
   const channelConfig = getChannelConfig(opts.channelId);
-  const agentName = opts.agentName || channelConfig?.agent;
-  const promptSections: string[] = [];
+  const agentName = opts.agentName || channelConfig?.agent || null;
 
-  if (agentName) {
-    const agentPrompt = readAgentPrompt(agentName);
-    if (agentPrompt) {
-      promptSections.push(agentPrompt.trim());
-    }
-  }
+  const agentPrompt = agentName ? readAgentPrompt(agentName) : null;
+  const meta = agentName ? readAgentMetadata(agentName) : null;
+  const sandbox: CodexSandbox = meta?.sandbox || DEFAULT_SANDBOX;
 
   const context = await assembleContext({
     channelId: opts.channelId,
     prompt: opts.prompt,
     agentName: agentName || "default",
     sessionKey: opts.sessionKey || opts.channelId,
-    taskId: opts.taskId || `codex-${Date.now()}`,
+    taskId: opts.taskId || `codex-spawn-${Date.now()}`,
   });
-  if (context) {
-    promptSections.push(context.trim());
-  }
 
-  if (opts.extraSystemPrompts?.length) {
-    promptSections.push(...opts.extraSystemPrompts.map((section) => section.trim()).filter(Boolean));
-  }
-
-  promptSections.push(opts.prompt);
-
-  const runnerArgs: string[] = [];
-  if (!opts.skipSessionResume) {
-    const sessionKey = opts.sessionKey || opts.channelId;
-    const existingSession = getSession(sessionKey, "codex");
-    if (existingSession) {
-      runnerArgs.push("--resume", existingSession);
-    }
-  }
-
-  if (channelConfig?.model) {
-    runnerArgs.push("--model", channelConfig.model);
-  }
+  const promptBody = composePrompt({
+    agentPrompt,
+    context,
+    extras: opts.extraSystemPrompts,
+    userPrompt: opts.prompt,
+  });
 
   const project = getProject(opts.channelId);
   const projectCwd = opts.worktreePath || (project ? resolveProjectWorkdir(project.name) : null);
+  const workingDir = projectCwd || HARNESS_ROOT;
+  const runnerArgs: string[] = [];
+  runnerArgs.push(
+    "--json",
+    "-s", sandbox,
+    "-C", workingDir,
+    "--skip-git-repo-check",
+    "-c", "approval_policy=\"never\"",
+  );
   const env: Record<string, string> = {
-    ...process.env as Record<string, string>,
+    ...(process.env as Record<string, string>),
     HARNESS_ROOT,
     ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
   };
 
   return {
-    prompt: promptSections.filter(Boolean).join("\n\n"),
     runnerArgs,
+    prompt: promptBody,
     env,
-    cwd: HARNESS_ROOT,
+    cwd: workingDir,
   };
+}
+
+export function extractCodexResponse(resultJson: any): string | null {
+  if (!resultJson || typeof resultJson !== "object") return null;
+  if (typeof resultJson.lastMessage === "string" && resultJson.lastMessage.trim()) {
+    return resultJson.lastMessage.trim();
+  }
+
+  const collectText = (value: any): string | null => {
+    if (typeof value === "string") return value.trim() || null;
+    if (Array.isArray(value)) {
+      const parts = value
+        .map((item) => collectText(item))
+        .filter((item): item is string => Boolean(item));
+      return parts.length ? parts.join("\n").trim() : null;
+    }
+    if (!value || typeof value !== "object") return null;
+
+    for (const key of ["text", "result", "message", "content", "last_agent_message", "output", "response", "item"]) {
+      const text = collectText(value[key]);
+      if (text) return text;
+    }
+    return null;
+  };
+
+  const stdout = typeof resultJson.stdout === "string" ? resultJson.stdout : "";
+  let last: string | null = null;
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const ev = JSON.parse(trimmed);
+      const msg = typeof ev?.msg === "object" && ev.msg ? ev.msg : ev;
+      const text = collectText(msg) || collectText(ev);
+      if (typeof text === "string" && text.trim()) last = text.trim();
+    } catch {}
+  }
+  return last;
+}
+
+export function extractCodexSessionId(resultJson: any): string | null {
+  if (!resultJson || typeof resultJson !== "object") return null;
+  if (typeof resultJson.threadId === "string" && resultJson.threadId) return resultJson.threadId;
+  return null;
 }

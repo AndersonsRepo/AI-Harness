@@ -464,7 +464,7 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     ) {
       console.log(`[TASK] ${taskId} stale session detected, clearing and retrying`);
       const sessionKey = task.session_key || task.channel_id;
-      validateSession(sessionKey);
+      validateSession(sessionKey, "claude");
       clearLoopHistory(taskId);
       // Immediate retry (counts as attempt 1)
       updateTask(taskId, { attempt: 1, status: "pending", last_error: "Stale session - retrying" });

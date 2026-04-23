@@ -155,6 +155,12 @@ function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(15);
     console.log("[DB] Applied schema v15 (parallel task runtime column)");
   }
+
+  if (version < 16) {
+    applyV16(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(16);
+    console.log("[DB] Applied schema v16 (runtime-scoped sessions)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -591,6 +597,28 @@ function applyV14(database: Database.Database): void {
 function applyV15(database: Database.Database): void {
   database.exec(`
     ALTER TABLE parallel_tasks ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude';
+  `);
+}
+
+function applyV16(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE sessions_v2 (
+      channel_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      runtime    TEXT NOT NULL DEFAULT 'claude',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used  TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (channel_id, runtime)
+    );
+
+    INSERT INTO sessions_v2 (channel_id, session_id, runtime, created_at, last_used)
+    SELECT channel_id, session_id, COALESCE(runtime, 'claude'), created_at, last_used
+    FROM sessions;
+
+    DROP TABLE sessions;
+    ALTER TABLE sessions_v2 RENAME TO sessions;
+    CREATE INDEX IF NOT EXISTS idx_sessions_channel ON sessions(channel_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_last_used ON sessions(last_used);
   `);
 }
 

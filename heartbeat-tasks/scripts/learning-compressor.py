@@ -167,16 +167,18 @@ def find_qualifying_entries() -> list[dict]:
         if fm is None:
             continue
 
-        # Must have status 'new'
-        if fm.get("status", "") != "new":
+        # Must have a status representing a live entry. `new` was the
+        # original convention; later curated entries use `active`.
+        if fm.get("status", "") not in ("new", "active"):
             continue
 
         # Must not already have a compressed field
         if "compressed" in fm:
             continue
 
-        # Must be older than MIN_AGE_DAYS
-        logged_str = fm.get("logged", "")
+        # Must be older than MIN_AGE_DAYS. Older entries use `logged`;
+        # newer curated entries use `created`.
+        logged_str = fm.get("logged") or fm.get("created") or ""
         try:
             logged = datetime.datetime.fromisoformat(logged_str)
         except (ValueError, TypeError):

@@ -221,7 +221,7 @@ export async function buildClaudeConfig(opts: BuildConfigOptions): Promise<Claud
   // Session resume
   if (!opts.skipSessionResume) {
     const sessionKey = opts.sessionKey || opts.channelId;
-    const existingSession = getSession(sessionKey);
+    const existingSession = getSession(sessionKey, "claude");
     if (existingSession) {
       args.push("--resume", existingSession);
     }
