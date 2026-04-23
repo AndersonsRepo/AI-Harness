@@ -48,7 +48,18 @@ export function closeDb(): void {
   }
 }
 
-function runMigrations(database: Database.Database): void {
+function columnExists(
+  database: Database.Database,
+  table: string,
+  column: string,
+): boolean {
+  const rows = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+    name: string;
+  }>;
+  return rows.some((r) => r.name === column);
+}
+
+export function runMigrations(database: Database.Database): void {
   // Create schema versioning table
   database.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
@@ -588,16 +599,26 @@ function applyV13(database: Database.Database): void {
 }
 
 function applyV14(database: Database.Database): void {
-  database.exec(`
-    ALTER TABLE subagents ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude';
-    ALTER TABLE dead_letter ADD COLUMN runtime TEXT;
-  `);
+  // applyV1 already declares `runtime` on subagents and dead_letter for fresh
+  // installs, so on a new DB these ALTERs would throw "duplicate column name".
+  // Guarded so both fresh and pre-v14 DBs converge on the same schema.
+  if (!columnExists(database, "subagents", "runtime")) {
+    database.exec(
+      `ALTER TABLE subagents ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude';`,
+    );
+  }
+  if (!columnExists(database, "dead_letter", "runtime")) {
+    database.exec(`ALTER TABLE dead_letter ADD COLUMN runtime TEXT;`);
+  }
 }
 
 function applyV15(database: Database.Database): void {
-  database.exec(`
-    ALTER TABLE parallel_tasks ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude';
-  `);
+  // applyV4 already declares `runtime` on parallel_tasks for fresh installs.
+  if (!columnExists(database, "parallel_tasks", "runtime")) {
+    database.exec(
+      `ALTER TABLE parallel_tasks ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude';`,
+    );
+  }
 }
 
 function applyV16(database: Database.Database): void {
