@@ -28,6 +28,48 @@ import resource
 import subprocess
 import sys
 import threading
+import time
+
+
+# Substrings that mark a Codex stderr as transient and worth retrying.
+# Mirrors claude-runner.py's heuristic — Codex shells out to ChatGPT's
+# backend so the same upstream pressure-points (429s, 5xx, network resets)
+# apply. Lowercased; matched against stderr_text.lower().
+_TRANSIENT_STDERR_SIGNALS = (
+    "429",
+    "rate limit",
+    "503",
+    "502",
+    "500",
+    "overloaded",
+    "connection",
+    "econnreset",
+    "socket hang up",
+    "timeout",
+)
+
+
+def _resolve_backoff_delays():
+    """Return the per-retry sleep schedule. CODEX_RETRY_DELAYS (a JSON list of
+    numbers) overrides the default for tests so the suite isn't gated on
+    real-world 5s/15s/45s waits."""
+    default = [5, 15, 45]
+    raw = os.environ.get("CODEX_RETRY_DELAYS")
+    if not raw:
+        return default
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        sys.stderr.write(
+            "[codex-runner] CODEX_RETRY_DELAYS was set but not valid JSON; using defaults.\n"
+        )
+        return default
+    if not isinstance(parsed, list) or not all(isinstance(x, (int, float)) for x in parsed):
+        sys.stderr.write(
+            "[codex-runner] CODEX_RETRY_DELAYS must be a JSON list of numbers; using defaults.\n"
+        )
+        return default
+    return [float(x) for x in parsed]
 
 
 # Kept in sync with bridges/discord/safety.ts DESTRUCTIVE_BASH_PATTERNS.
@@ -271,13 +313,25 @@ def main():
                         break
         return last
 
-    try:
-        if stream_dir:
-            try:
-                os.makedirs(stream_dir, exist_ok=True)
-            except OSError:
-                pass
+    if stream_dir:
+        # Created for compat; Stage 1 does not write chunks here.
+        try:
+            os.makedirs(stream_dir, exist_ok=True)
+        except OSError:
+            pass
 
+    safety_patterns = _load_safety_patterns()
+    backoff_delays = _resolve_backoff_delays()
+    max_retries = len(backoff_delays)
+
+    def run_attempt():
+        """Run codex once. Returns (result_dict, retryable_bool).
+
+        result_dict matches the final write_result shape (stdout, stderr,
+        returncode, threadId, lastMessage, optional safetyViolation).
+        Safety violations are never retryable; transient stderr signals and
+        watchdog timeouts are.
+        """
         proc = subprocess.Popen(
             invocation,
             stdin=subprocess.PIPE,
@@ -305,9 +359,7 @@ def main():
         except BrokenPipeError:
             pass
 
-        safety_patterns = _load_safety_patterns()
         safety_violation = [None]  # (pattern_id, command) if tripped
-
         stdout_chunks = []
         for line in proc.stdout:
             decoded = line.decode("utf-8", errors="replace")
@@ -361,31 +413,81 @@ def main():
             last_message = extract_last_message(stdout_text)
 
         if safety_violation[0]:
-            write_result({
+            return ({
                 "stdout": stdout_text,
                 "stderr": stderr_text,
                 "returncode": 1,
                 "threadId": thread_id,
                 "lastMessage": last_message,
-                "safetyViolation": {"id": safety_violation[0][0], "command": safety_violation[0][1]},
-            })
-        elif timed_out[0]:
-            write_result({
+                "safetyViolation": {
+                    "id": safety_violation[0][0],
+                    "command": safety_violation[0][1],
+                },
+            }, False)
+
+        if timed_out[0]:
+            return ({
                 "stdout": stdout_text,
                 "stderr": (stderr_text + f"\nCodex timed out after {timeout} seconds").strip(),
                 "returncode": 1,
                 "threadId": thread_id,
                 "lastMessage": last_message,
-            })
-        else:
-            write_result({
-                "stdout": stdout_text,
-                "stderr": stderr_text,
-                "returncode": proc.returncode if proc.returncode is not None else 1,
-                "threadId": thread_id,
-                "lastMessage": last_message,
-            })
+            }, True)
 
+        rc = proc.returncode if proc.returncode is not None else 1
+        is_transient = False
+        if rc != 0:
+            stderr_lower = (stderr_text or "").lower()
+            if any(s in stderr_lower for s in _TRANSIENT_STDERR_SIGNALS):
+                is_transient = True
+
+        return ({
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "returncode": rc,
+            "threadId": thread_id,
+            "lastMessage": last_message,
+        }, is_transient)
+
+    try:
+        last_result = None
+        for attempt in range(max_retries + 1):
+            # Strip prior attempt's last_message_file so a transient first try
+            # can't leak its agent text into the retry's lastMessage.
+            try:
+                if os.path.exists(last_message_file):
+                    os.unlink(last_message_file)
+            except OSError:
+                pass
+
+            try:
+                result, retryable = run_attempt()
+            except Exception as e:
+                # Mirrors claude-runner: spawn-level exceptions are treated as
+                # terminal, not transient. Write an error result and stop.
+                last_result = {
+                    "stdout": "",
+                    "stderr": str(e),
+                    "returncode": 1,
+                    "threadId": None,
+                    "lastMessage": None,
+                }
+                break
+
+            last_result = result
+            if retryable and attempt < max_retries:
+                delay = backoff_delays[attempt]
+                preview = (result.get("stderr") or "")[:120].replace("\n", " ")
+                sys.stderr.write(
+                    f"[codex-runner] Transient error (attempt {attempt + 1}/{max_retries + 1}), "
+                    f"retrying in {delay}s: {preview}\n"
+                )
+                time.sleep(delay)
+                continue
+            break
+
+        if last_result is not None:
+            write_result(last_result)
     except Exception as e:
         write_result({
             "stdout": "",
