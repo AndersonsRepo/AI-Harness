@@ -163,11 +163,23 @@ export class Gateway {
   // ─── Command Handling ────────────────────────────────────────────
 
   async onCommand(channelId: string, command: string, args: string[], msg: GatewayMessage): Promise<CommandResult | null> {
+    // Prefer the original message text when it's an actual slash command — that
+    // preserves exact whitespace inside quoted args (e.g. `/agent create X "a  b"`).
+    // Fall back to reconstructing from the parsed command+args when callers
+    // (tests, transports that pre-parse) invoke onCommand with a message body
+    // that doesn't start with `/`.
+    const originalText = msg.text.trim();
+    const rawText = originalText.startsWith("/")
+      ? originalText
+      : args.length
+        ? `/${command} ${args.join(" ")}`
+        : `/${command}`;
+
     const ctx: CommandContext = {
       channelId,
       userId: msg.userId,
       guildId: msg.guildId,
-      rawText: msg.text.trim(),
+      rawText,
       releaseChannel: () => this.releaseChannel(channelId),
     };
 
