@@ -172,6 +172,12 @@ export function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(16);
     console.log("[DB] Applied schema v16 (runtime-scoped sessions)");
   }
+
+  if (version < 17) {
+    applyV17(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(17);
+    console.log("[DB] Applied schema v17 (task_telemetry runtime column)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -618,6 +624,15 @@ function applyV15(database: Database.Database): void {
     database.exec(
       `ALTER TABLE parallel_tasks ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude';`,
     );
+  }
+}
+
+function applyV17(database: Database.Database): void {
+  // task_telemetry predates the Codex runtime; tag rows with the runtime that
+  // produced them so cost/duration/tool-use can be sliced by Claude vs Codex.
+  // Nullable: existing rows have no provenance to backfill.
+  if (!columnExists(database, "task_telemetry", "runtime")) {
+    database.exec(`ALTER TABLE task_telemetry ADD COLUMN runtime TEXT;`);
   }
 }
 

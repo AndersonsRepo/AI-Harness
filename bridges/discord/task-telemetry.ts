@@ -1,3 +1,4 @@
+import type { AgentRuntime } from "./agent-loader.js";
 import { getDb } from "./db.js";
 
 export interface TelemetrySummary {
@@ -14,6 +15,7 @@ export interface PersistTaskTelemetryInput {
   taskId: string;
   channelId: string;
   agent: string;
+  runtime?: AgentRuntime | null;
   prompt: string;
   status: string;
   error?: string | null;
@@ -24,12 +26,13 @@ export function persistTaskTelemetry(input: PersistTaskTelemetryInput): void {
   const db = getDb();
   db.prepare(`
     INSERT OR REPLACE INTO task_telemetry
-    (task_id, channel_id, agent, prompt, started_at, completed_at, status, tool_calls, total_tools, duration_ms, est_input_tokens, est_output_tokens, est_cost_cents, intervention, error)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (task_id, channel_id, agent, runtime, prompt, started_at, completed_at, status, tool_calls, total_tools, duration_ms, est_input_tokens, est_output_tokens, est_cost_cents, intervention, error)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     input.taskId,
     input.channelId,
     input.agent,
+    input.runtime ?? null,
     input.prompt.slice(0, 500),
     new Date(Date.now() - input.telemetry.durationMs).toISOString(),
     new Date().toISOString(),

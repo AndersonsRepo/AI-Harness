@@ -58,11 +58,19 @@ describe("migrations on fresh DB", () => {
     db.close();
   });
 
+  it("results in exactly one runtime column on task_telemetry", () => {
+    const db = freshDb();
+    runMigrations(db);
+    const cols = columns(db, "task_telemetry").filter((c) => c === "runtime");
+    assert.equal(cols.length, 1, "task_telemetry.runtime must be declared exactly once");
+    db.close();
+  });
+
   it("records the current schema version at the end", () => {
     const db = freshDb();
     runMigrations(db);
     const row = db.prepare("SELECT MAX(version) as v FROM schema_version").get() as { v: number };
-    assert.ok(row.v >= 15, `expected schema_version >= 15, got ${row.v}`);
+    assert.ok(row.v >= 17, `expected schema_version >= 17, got ${row.v}`);
     db.close();
   });
 

@@ -373,6 +373,7 @@ export class Gateway {
           taskId,
           channelId: task.channel_id,
           agent: task.agent || "default",
+          runtime: task.runtime,
           prompt: task.prompt || "",
           status: task.status,
           telemetry,
