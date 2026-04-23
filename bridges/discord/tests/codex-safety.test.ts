@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { buildCodexConfig } from "../codex-config.js";
 import { agentAllowsWrite } from "../agent-loader.js";
 import { setChannelConfig, clearChannelConfig } from "../channel-config-store.js";
+import { setSession, clearSession } from "../session-store.js";
 
 const TEST_CHANNEL = "test-codex-safety-000000000";
 
@@ -92,5 +93,67 @@ describe("Codex sandbox selection", () => {
       agentName: "tester",
     });
     assert.equal(sandboxFrom(cfg.runnerArgs), "read-only");
+  });
+});
+
+describe("Codex session resume", () => {
+  const CHAN = "test-codex-resume-000000000";
+
+  before(() => {
+    setChannelConfig(CHAN, { runtime: "codex" });
+  });
+
+  after(() => {
+    clearSession(CHAN, "codex");
+    clearChannelConfig(CHAN);
+  });
+
+  it("omits --session-id when no Codex session is stored (cold start)", async () => {
+    clearSession(CHAN, "codex");
+    const cfg = await buildCodexConfig({
+      channelId: CHAN,
+      prompt: "first message",
+      agentName: "builder",
+    });
+    assert.equal(cfg.runnerArgs.includes("--session-id"), false);
+  });
+
+  it("passes --session-id <thread> when a Codex session exists for sessionKey", async () => {
+    setSession(CHAN, "existing-thread-xyz", "codex");
+    const cfg = await buildCodexConfig({
+      channelId: CHAN,
+      prompt: "continuation",
+      agentName: "builder",
+    });
+    const idx = cfg.runnerArgs.indexOf("--session-id");
+    assert.ok(idx >= 0, "--session-id must be passed when session exists");
+    assert.equal(cfg.runnerArgs[idx + 1], "existing-thread-xyz");
+    // --session-id must appear before the codex CLI args (--json is the first
+    // of those) so codex-runner.py's arg parser consumes it.
+    const jsonIdx = cfg.runnerArgs.indexOf("--json");
+    assert.ok(idx < jsonIdx, "--session-id must appear before --json");
+  });
+
+  it("ignores stored session when skipSessionResume is set", async () => {
+    setSession(CHAN, "existing-thread-xyz", "codex");
+    const cfg = await buildCodexConfig({
+      channelId: CHAN,
+      prompt: "start fresh",
+      agentName: "builder",
+      skipSessionResume: true,
+    });
+    assert.equal(cfg.runnerArgs.includes("--session-id"), false);
+  });
+
+  it("only reads Codex sessions, not Claude sessions under the same key", async () => {
+    clearSession(CHAN, "codex");
+    setSession(CHAN, "some-claude-session-id", "claude");
+    const cfg = await buildCodexConfig({
+      channelId: CHAN,
+      prompt: "noop",
+      agentName: "builder",
+    });
+    assert.equal(cfg.runnerArgs.includes("--session-id"), false);
+    clearSession(CHAN, "claude");
   });
 });

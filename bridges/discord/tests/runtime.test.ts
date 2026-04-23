@@ -105,7 +105,11 @@ describe("Task Runner — Mixed Runtime Dispatch", () => {
     assert.equal(spawnResult?.runtime, "codex");
     assert.equal(spawnCalls[0]?.args[0].endsWith("codex-runner.py"), true);
     assert.ok(spawnCalls[0]?.args.includes("--prompt-file"));
-    assert.equal(spawnCalls[0]?.args.includes("--session-id"), false);
+    // Stored Codex thread id is passed as --session-id so codex-runner.py
+    // calls `codex exec resume <id>` instead of cold-starting.
+    const sessionIdx = spawnCalls[0]?.args.indexOf("--session-id") ?? -1;
+    assert.ok(sessionIdx > 0, "--session-id should be passed when a stored Codex session exists");
+    assert.equal(spawnCalls[0]?.args[sessionIdx + 1], "stale-codex-session");
     assert.equal(output.response, "Codex built it");
     assert.equal(output.sessionId, "codex-thread-123");
     assert.equal(getSession(channelId, "codex"), "codex-thread-123");

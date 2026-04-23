@@ -4,6 +4,7 @@ import { readAgentPrompt, readAgentMetadata, CodexSandbox, agentAllowsWrite } fr
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { HARNESS_ROOT } from "./claude-config.js";
 import { safetyPatternsJson } from "./safety.js";
+import { getSession } from "./session-store.js";
 
 export interface CodexRunConfig {
   prompt: string;
@@ -79,6 +80,20 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
   const projectCwd = opts.worktreePath || (project ? resolveProjectWorkdir(project.name) : null);
   const workingDir = projectCwd || HARNESS_ROOT;
   const runnerArgs: string[] = [];
+
+  // Session resume: if a Codex thread id is already stored for this
+  // sessionKey, pass --session-id so codex-runner.py runs `codex exec resume
+  // <id>` instead of starting a fresh thread. Parity with claude-config's
+  // --resume flag. codex-runner.py consumes --session-id before the codex
+  // CLI args begin, so it must appear before --json below.
+  if (!opts.skipSessionResume) {
+    const sessionKey = opts.sessionKey || opts.channelId;
+    const existingSession = getSession(sessionKey, "codex");
+    if (existingSession) {
+      runnerArgs.push("--session-id", existingSession);
+    }
+  }
+
   runnerArgs.push(
     "--json",
     "-s", sandbox,
