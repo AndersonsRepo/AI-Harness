@@ -84,6 +84,78 @@ export function needsWorktree(agents: string[]): boolean {
   });
 }
 
+// Cap captured diffs so we don't flood gate prompts. ~50KB still leaves ample
+// room inside the Claude/Codex input window; reviewers seeing partial diffs is
+// better than failing the whole gate on oversized input.
+const MAX_DIFF_BYTES = 50_000;
+
+export interface ArtifactBundle {
+  diff?: string;
+  changedFiles?: string[];
+  worktreePath?: string;
+  truncated?: boolean;
+}
+
+/**
+ * Capture git artifacts from a worktree: the unified diff vs HEAD plus a list
+ * of changed (untracked + modified + staged) files. Returns undefined when the
+ * path is missing, not a git repo, or the repo has no changes.
+ *
+ * Used by the handoff chain to carry real implementation evidence across
+ * runtime boundaries (Codex builder → Claude reviewer/tester). Without this,
+ * the review gate only sees a truncated prose summary.
+ */
+export function captureArtifacts(worktreePath: string | null | undefined): ArtifactBundle | undefined {
+  if (!worktreePath || !existsSync(worktreePath)) return undefined;
+  if (!isGitRepo(worktreePath)) return undefined;
+
+  let changedFiles: string[] = [];
+  try {
+    const porcelain = execSync("git status --porcelain", {
+      cwd: worktreePath,
+      stdio: "pipe",
+      timeout: 10000,
+      maxBuffer: 2_000_000,
+    }).toString();
+    changedFiles = porcelain
+      .split("\n")
+      .map((line) => line.slice(3).trim())
+      .filter((path) => path.length > 0);
+  } catch {
+    return undefined;
+  }
+
+  if (changedFiles.length === 0) return undefined;
+
+  let diff = "";
+  let truncated = false;
+  try {
+    // Diff vs HEAD captures both staged and unstaged tracked changes. Untracked
+    // files aren't in the diff — we surface them via changedFiles instead.
+    const raw = execSync("git diff HEAD", {
+      cwd: worktreePath,
+      stdio: "pipe",
+      timeout: 15000,
+      maxBuffer: MAX_DIFF_BYTES * 4,
+    }).toString();
+    if (Buffer.byteLength(raw, "utf8") > MAX_DIFF_BYTES) {
+      diff = raw.slice(0, MAX_DIFF_BYTES);
+      truncated = true;
+    } else {
+      diff = raw;
+    }
+  } catch {
+    // Diff failed (e.g., binary-heavy changes) — still return the file list.
+  }
+
+  return {
+    diff: diff || undefined,
+    changedFiles,
+    worktreePath,
+    truncated: truncated || undefined,
+  };
+}
+
 /**
  * Check if a directory is a git repository.
  */

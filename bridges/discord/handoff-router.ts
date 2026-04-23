@@ -13,7 +13,7 @@ import {
 import { setSession } from "./session-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { monitor } from "./truncation-monitor.js";
-import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, isGitRepo } from "./worktree-manager.js";
+import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, isGitRepo, captureArtifacts, ArtifactBundle } from "./worktree-manager.js";
 import type { AgentRuntime } from "./agent-loader.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
 import {
@@ -164,6 +164,11 @@ export interface ChainEntry {
   agent: string;
   response: string; // truncated to ~2000 chars for debrief context
   timestamp: number;
+  // Real implementation evidence captured from the chain worktree at the moment
+  // this entry was recorded. Only populated for writer agents when a worktree
+  // exists. Enables cross-runtime review gates to see an actual diff instead of
+  // just the truncated prose in `response`.
+  artifacts?: ArtifactBundle;
 }
 
 export interface ChainResult {
@@ -185,20 +190,48 @@ const POST_CHAIN_GATES: Record<string, string[]> = {
   builder: ["reviewer", "tester"],
 };
 
-function gatePromptFor(gateAgent: string, fromAgent: string, previousOutput: string): string {
+function formatArtifactSection(artifacts?: ArtifactBundle): string {
+  if (!artifacts) return "";
+  const sections: string[] = [];
+  if (artifacts.changedFiles?.length) {
+    sections.push(
+      `## Changed Files\n\n${artifacts.changedFiles.map((f) => `- ${f}`).join("\n")}`,
+    );
+  }
+  if (artifacts.diff) {
+    const note = artifacts.truncated ? " (truncated to 50KB)" : "";
+    sections.push(
+      `## Diff${note}\n\n\`\`\`diff\n${artifacts.diff}\n\`\`\``,
+    );
+  }
+  return sections.length ? `\n\n${sections.join("\n\n")}` : "";
+}
+
+function gatePromptFor(
+  gateAgent: string,
+  fromAgent: string,
+  previousOutput: string,
+  artifacts?: ArtifactBundle,
+): string {
+  const evidence = formatArtifactSection(artifacts);
   if (gateAgent === "reviewer") {
-    return `Review the following ${fromAgent} output for quality, correctness, and potential issues:\n\n${previousOutput}`;
+    return `Review the following ${fromAgent} output for quality, correctness, and potential issues:\n\n${previousOutput}${evidence}`;
   }
   if (gateAgent === "tester") {
-    return `Verify that the following ${fromAgent} changes actually run and behave correctly. Pick the minimum viable verification strategy based on the scope of the change, execute it, and report PASS/FAIL with concrete evidence.\n\nChange summary:\n\n${previousOutput}`;
+    return `Verify that the following ${fromAgent} changes actually run and behave correctly. Pick the minimum viable verification strategy based on the scope of the change, execute it, and report PASS/FAIL with concrete evidence.\n\nChange summary:\n\n${previousOutput}${evidence}`;
   }
-  return `Process the following ${fromAgent} output:\n\n${previousOutput}`;
+  return `Process the following ${fromAgent} output:\n\n${previousOutput}${evidence}`;
 }
 
 export interface PostChainGateRequest {
   gateAgent: string;
   fromAgent: string;
-  artifact: string;
+  artifact: {
+    summary: string;
+    diff?: string;
+    changedFiles?: string[];
+    truncated?: boolean;
+  };
   prompt: string;
 }
 
@@ -225,8 +258,18 @@ export function buildPostChainGateRequests(
     .map((gateAgent) => ({
       gateAgent,
       fromAgent: finalEntry.agent,
-      artifact: finalEntry.response,
-      prompt: gatePromptFor(gateAgent, finalEntry.agent, finalEntry.response),
+      artifact: {
+        summary: finalEntry.response,
+        diff: finalEntry.artifacts?.diff,
+        changedFiles: finalEntry.artifacts?.changedFiles,
+        truncated: finalEntry.artifacts?.truncated,
+      },
+      prompt: gatePromptFor(
+        gateAgent,
+        finalEntry.agent,
+        finalEntry.response,
+        finalEntry.artifacts,
+      ),
     }));
 }
 
@@ -522,11 +565,16 @@ export async function runHandoffChain(
 
     if (!result) break; // Chain ended (error, depth limit, or invalid agent)
 
-    // Record this agent's response in the chain log
+    // Record this agent's response in the chain log. If the chain has an active
+    // worktree and this agent could have mutated it, capture a diff + changed-
+    // file list so downstream review/test gates see real evidence — especially
+    // important across runtime boundaries (Codex builder → Claude reviewer).
+    const entryArtifacts = captureArtifacts(chainWorktreePath);
     chainEntries.push({
       agent: result.agentName,
       response: result.response.slice(0, 2000),
       timestamp: Date.now(),
+      artifacts: entryArtifacts,
     });
 
     // Post the responding agent's non-handoff text
@@ -586,6 +634,7 @@ export async function runHandoffChain(
           agent: gateResult.agentName,
           response: gateResult.response.slice(0, 2000),
           timestamp: Date.now(),
+          artifacts: captureArtifacts(chainWorktreePath),
         });
 
         try {
