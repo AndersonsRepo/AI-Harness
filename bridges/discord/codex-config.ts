@@ -1,6 +1,6 @@
 import { getChannelConfig } from "./channel-config-store.js";
 import { assembleContext } from "./context-assembler.js";
-import { readAgentPrompt, readAgentMetadata, CodexSandbox } from "./agent-loader.js";
+import { readAgentPrompt, readAgentMetadata, CodexSandbox, agentAllowsWrite } from "./agent-loader.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { HARNESS_ROOT } from "./claude-config.js";
 
@@ -52,7 +52,12 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
 
   const agentPrompt = agentName ? readAgentPrompt(agentName) : null;
   const meta = agentName ? readAgentMetadata(agentName) : null;
-  const sandbox: CodexSandbox = meta?.sandbox || DEFAULT_SANDBOX;
+  // Role-level safety: agents whose tool restrictions forbid Edit/Write (orchestrator,
+  // researcher, reviewer, tester, education) are downgraded to read-only regardless of
+  // what their agent metadata requests. Stops Codex-backed review/research agents from
+  // mutating the workspace. See ERR-new-runtime-safety-guardrails-not-inherited.
+  const requestedSandbox: CodexSandbox = meta?.sandbox || DEFAULT_SANDBOX;
+  const sandbox: CodexSandbox = agentAllowsWrite(agentName) ? requestedSandbox : "read-only";
 
   const context = await assembleContext({
     channelId: opts.channelId,

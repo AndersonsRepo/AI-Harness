@@ -243,6 +243,36 @@ export function getAgentModel(agentName: string | undefined, channelModel: strin
 }
 
 /**
+ * Does this agent's restriction profile permit filesystem writes?
+ *
+ * Returns false when the agent is whitelisted to tools that don't include
+ * Edit/Write/NotebookEdit, or when those tools are explicitly in the disallowed
+ * list. Returns true for agents with no restrictions (builder, ops, project)
+ * and for agents whose whitelist includes write tools (scheduler).
+ *
+ * Used to pick the Codex sandbox: read-only for non-writers, workspace-write
+ * otherwise. This is the role-level safety guard — see also the command-level
+ * filter in codex-runner.py.
+ */
+export function agentAllowsWrite(agentName: string | null | undefined): boolean {
+  if (!agentName) return true;
+  const restrictions = AGENT_TOOL_RESTRICTIONS[agentName];
+  if (!restrictions) return true;
+
+  const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
+
+  if (restrictions.disallowed?.some((t) => WRITE_TOOLS.includes(t))) {
+    return false;
+  }
+
+  if (restrictions.allowed?.length) {
+    return restrictions.allowed.some((t) => WRITE_TOOLS.includes(t));
+  }
+
+  return true;
+}
+
+/**
  * Build CLI args for tool restrictions for a given agent.
  * Returns args to append to the claude CLI invocation.
  */
