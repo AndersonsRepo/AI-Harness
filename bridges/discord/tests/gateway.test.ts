@@ -243,6 +243,43 @@ describe("Gateway — Queue Management", () => {
     gateway.releaseChannel("chan-1");
     assert.equal(gateway.isChannelActive("chan-1"), false);
   });
+
+  it("does not start multiple queued same-channel tasks from duplicate release calls", async () => {
+    const executions: string[] = [];
+    const enqueueTask = (gateway as any).enqueueTask.bind(gateway) as (channelId: string, task: { execute: () => void; message: GatewayMessage }) => boolean;
+
+    enqueueTask("chan-1", {
+      message: makeMessage({ id: "msg-a" }),
+      execute: () => {
+        executions.push("a");
+      },
+    });
+    assert.deepEqual(executions, ["a"]);
+    assert.equal(gateway.isChannelActive("chan-1"), true);
+
+    enqueueTask("chan-1", {
+      message: makeMessage({ id: "msg-b" }),
+      execute: () => {
+        executions.push("b");
+      },
+    });
+    enqueueTask("chan-1", {
+      message: makeMessage({ id: "msg-c" }),
+      execute: () => {
+        executions.push("c");
+      },
+    });
+
+    gateway.releaseChannel("chan-1");
+    assert.deepEqual(executions, ["a", "b"]);
+    assert.equal(gateway.isChannelActive("chan-1"), true);
+
+    // A second release for the same completed task should only advance one more
+    // queued task, not unlock concurrent execution in the same channel.
+    gateway.releaseChannel("chan-1");
+    assert.deepEqual(executions, ["a", "b", "c"]);
+    assert.equal(gateway.isChannelActive("chan-1"), true);
+  });
 });
 
 // ─── Notification Drain Tests ────────────────────────────────────────

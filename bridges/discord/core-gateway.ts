@@ -50,7 +50,7 @@ import { persistTaskTelemetry } from "./task-telemetry.js";
 // ─── Queue System ────────────────────────────────────────────────────
 
 interface QueuedTask {
-  execute: () => void;
+  execute: () => void | Promise<void>;
   message: GatewayMessage;
 }
 
@@ -364,76 +364,76 @@ export class Gateway {
     const streamMsgId = this.activeStreamMessageIds.get(taskId);
     this.activeStreamMessageIds.delete(taskId);
 
-    // Persist telemetry
-    const telemetry = getCompletedSummary(taskId);
-    finalizeInstance(taskId, task?.status === "dead" ? "failed" : "completed");
-    if (telemetry && task) {
-      try {
-        persistTaskTelemetry({
-          taskId,
-          channelId: task.channel_id,
-          agent: task.agent || "default",
-          runtime: task.runtime,
-          prompt: task.prompt || "",
-          status: task.status,
-          telemetry,
-          error,
-        });
-      } catch (err: any) {
-        console.error(`[GATEWAY] Telemetry persist failed: ${err.message}`);
+    try {
+      // Persist telemetry
+      const telemetry = getCompletedSummary(taskId);
+      finalizeInstance(taskId, task?.status === "dead" ? "failed" : "completed");
+      if (telemetry && task) {
+        try {
+          persistTaskTelemetry({
+            taskId,
+            channelId: task.channel_id,
+            agent: task.agent || "default",
+            runtime: task.runtime,
+            prompt: task.prompt || "",
+            status: task.status,
+            telemetry,
+            error,
+          });
+        } catch (err: any) {
+          console.error(`[GATEWAY] Telemetry persist failed: ${err.message}`);
+        }
       }
-    }
 
-    // Error response
-    if (error && !response) {
-      const errorReply = `Something went wrong:\n\`\`\`\n${error.slice(0, 500)}\n\`\`\``;
-      if (streamMsgId) {
-        await this.adapter.editMessage(entry.channelId, streamMsgId, errorReply);
-      } else {
-        await this.adapter.sendMessage(entry.channelId, errorReply, entry.originMessageId);
+      // Error response
+      if (error && !response) {
+        const errorReply = `Something went wrong:\n\`\`\`\n${error.slice(0, 500)}\n\`\`\``;
+        if (streamMsgId) {
+          await this.adapter.editMessage(entry.channelId, streamMsgId, errorReply);
+        } else {
+          await this.adapter.sendMessage(entry.channelId, errorReply, entry.originMessageId);
+        }
+        return;
       }
-      this.releaseChannel(entry.channelId);
-      return;
-    }
 
-    // Success response
-    if (response) {
-      // Let the transport intercept for handoffs, create-channel, etc.
-      if (this.postOutputHook) {
-        const handled = await this.postOutputHook(
-          entry.channelId, response, entry.agentName, entry.originMessageId
-        );
-        if (handled) {
-          // Delete stream message if transport handled the response
-          if (streamMsgId) {
-            try { await this.adapter.deleteMessage(entry.channelId, streamMsgId); } catch {}
+      // Success response
+      if (response) {
+        // Let the transport intercept for handoffs, create-channel, etc.
+        if (this.postOutputHook) {
+          const handled = await this.postOutputHook(
+            entry.channelId, response, entry.agentName, entry.originMessageId
+          );
+          if (handled) {
+            // Delete stream message if transport handled the response
+            if (streamMsgId) {
+              try { await this.adapter.deleteMessage(entry.channelId, streamMsgId); } catch {}
+            }
+            return;
           }
-          this.releaseChannel(entry.channelId);
-          return;
         }
-      }
 
-      const chunks = this.splitMessage(response).slice(0, 5);
-      if (streamMsgId) {
-        await this.adapter.editMessage(entry.channelId, streamMsgId, chunks[0]);
-        for (let i = 1; i < chunks.length; i++) {
-          await this.adapter.sendMessage(entry.channelId, chunks[i]);
+        const chunks = this.splitMessage(response).slice(0, 5);
+        if (streamMsgId) {
+          await this.adapter.editMessage(entry.channelId, streamMsgId, chunks[0]);
+          for (let i = 1; i < chunks.length; i++) {
+            await this.adapter.sendMessage(entry.channelId, chunks[i]);
+          }
+        } else {
+          for (const chunk of chunks) {
+            await this.adapter.sendMessage(entry.channelId, chunk, entry.originMessageId);
+          }
         }
       } else {
-        for (const chunk of chunks) {
-          await this.adapter.sendMessage(entry.channelId, chunk, entry.originMessageId);
+        const errMsg = "Got a response but couldn't parse it. Check logs.";
+        if (streamMsgId) {
+          await this.adapter.editMessage(entry.channelId, streamMsgId, errMsg);
+        } else {
+          await this.adapter.sendMessage(entry.channelId, errMsg, entry.originMessageId);
         }
       }
-    } else {
-      const errMsg = "Got a response but couldn't parse it. Check logs.";
-      if (streamMsgId) {
-        await this.adapter.editMessage(entry.channelId, streamMsgId, errMsg);
-      } else {
-        await this.adapter.sendMessage(entry.channelId, errMsg, entry.originMessageId);
-      }
+    } finally {
+      this.releaseChannel(entry.channelId);
     }
-
-    this.releaseChannel(entry.channelId);
   }
 
   private async handleDeadLetter(record: DeadLetterRecord): Promise<void> {
@@ -466,7 +466,10 @@ export class Gateway {
     if (!queue || queue.length === 0) return;
     const task = queue.shift()!;
     this.activeChannels.add(channelId);
-    task.execute();
+    Promise.resolve(task.execute()).catch((err: any) => {
+      console.error(`[GATEWAY] task.execute() rejected for ${channelId}:`, err);
+      this.releaseChannel(channelId);
+    });
   }
 
   releaseChannel(channelId: string): void {
