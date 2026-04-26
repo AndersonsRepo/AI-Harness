@@ -164,39 +164,56 @@ def main():
             write_result({"stdout": "", "stderr": str(e), "returncode": 1})
 
     else:
-        # Non-streaming mode: with retry on transient errors (429, 5xx, network)
+        # Non-streaming mode: with retry on transient errors (429, 5xx, network).
+        # Uses Popen + .communicate() rather than subprocess.run() so a
+        # module-level reference to the in-flight process is available
+        # for signal-handler-driven cancellation (see _active_proc below;
+        # phase-B follow-up).
         max_retries = 3
         backoff_delays = [5, 15, 45]  # seconds
 
         for attempt in range(max_retries + 1):
             try:
-                result = subprocess.run(
+                proc = subprocess.Popen(
                     [claude_path] + claude_args,
-                    capture_output=True,
-                    text=True,
                     stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     env=clean_env,
-                    timeout=timeout,
                     cwd=cwd,
+                    text=True,
                 )
+
+                try:
+                    stdout, stderr = proc.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    # Drain pipes after kill so file descriptors close cleanly.
+                    try:
+                        proc.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    raise
+
+                returncode = proc.returncode
 
                 # Check for transient errors worth retrying
                 is_transient = False
-                if result.returncode != 0 and attempt < max_retries:
-                    stderr_lower = (result.stderr or "").lower()
+                if returncode != 0 and attempt < max_retries:
+                    stderr_lower = (stderr or "").lower()
                     if any(s in stderr_lower for s in ["429", "rate limit", "503", "502", "500", "overloaded", "connection", "econnreset", "timeout"]):
                         is_transient = True
 
                 if is_transient:
                     delay = backoff_delays[attempt]
-                    sys.stderr.write(f"[claude-runner] Transient error (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay}s: {result.stderr[:100]}\n")
+                    sys.stderr.write(f"[claude-runner] Transient error (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay}s: {stderr[:100]}\n")
                     time.sleep(delay)
                     continue
 
                 write_result({
-                    "stdout": result.stdout or "",
-                    "stderr": result.stderr or "",
-                    "returncode": result.returncode,
+                    "stdout": stdout or "",
+                    "stderr": stderr or "",
+                    "returncode": returncode,
                 })
                 break
 
