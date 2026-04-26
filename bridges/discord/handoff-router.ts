@@ -177,6 +177,100 @@ export interface ChainResult {
   parallelGroupId?: string; // Set when chain is suspended for parallel execution
 }
 
+// --- ChainSink ---
+// Transport-agnostic interface for delivering chain output. DiscordSink
+// posts to a Discord channel; NullSink swallows everything (used by replay
+// and other headless callers). The chain loop calls only these methods, so
+// it never imports discord.js directly.
+export interface ChainSink {
+  /** Post the pre-handoff portion of an agent's response (text before [HANDOFF:...]). */
+  postPreHandoffText(agent: string, text: string): Promise<void>;
+  /** Post an agent's full response when no further handoff follows. */
+  postAgentResponse(agent: string, text: string): Promise<void>;
+  /** Post the auto-gate notice header (e.g. "Auto-gate: Builder → Reviewer"). */
+  postGateNotice(fromAgent: string, gateAgent: string): Promise<void>;
+  /** Post a post-chain gate agent's response. */
+  postGateResponse(gateAgent: string, text: string): Promise<void>;
+  /** Post a free-text warning/system notice. */
+  postWarning(text: string): Promise<void>;
+  /** Post a delivery-failure warning when an agent's response can't be sent. */
+  postDeliveryFailure(agent: string, errorMessage: string): Promise<void>;
+}
+
+export class DiscordSink implements ChainSink {
+  constructor(private readonly channel: TextChannel) {}
+
+  async postPreHandoffText(agent: string, text: string): Promise<void> {
+    if (!text) return;
+    try {
+      const chunks = monitor.splitForDiscord(
+        `**${capitalize(agent)}:** ${text}`,
+        1900,
+        "handoff:chain-pre-text",
+      );
+      for (const chunk of chunks) await this.channel.send(chunk);
+    } catch (err: any) {
+      console.error(`[HANDOFF] Failed to post pre-handoff text for ${agent}: ${err.message}`);
+    }
+  }
+
+  async postAgentResponse(agent: string, text: string): Promise<void> {
+    try {
+      const chunks = monitor.splitForDiscord(
+        `**${capitalize(agent)}:** ${text}`,
+        1900,
+        "handoff:response",
+      );
+      for (const chunk of chunks) await this.channel.send(chunk);
+    } catch (err: any) {
+      console.error(`[HANDOFF] Failed to post chain response for ${agent}: ${err.message}`);
+      await this.postDeliveryFailure(agent, err.message);
+    }
+  }
+
+  async postGateNotice(fromAgent: string, gateAgent: string): Promise<void> {
+    await this.channel
+      .send(`*Auto-gate: ${capitalize(fromAgent)} output → ${capitalize(gateAgent)}*`)
+      .catch((err) => console.error(`[HANDOFF] Failed to send gate notice: ${err.message}`));
+  }
+
+  async postGateResponse(gateAgent: string, text: string): Promise<void> {
+    try {
+      const chunks = monitor.splitForDiscord(
+        `**${capitalize(gateAgent)}:** ${text}`,
+        1900,
+        `handoff:gate-${gateAgent}`,
+      );
+      for (const chunk of chunks) await this.channel.send(chunk);
+    } catch (err: any) {
+      console.error(`[HANDOFF] Failed to post gate output: ${err.message}`);
+    }
+  }
+
+  async postWarning(text: string): Promise<void> {
+    await this.channel.send(text).catch(() => {});
+  }
+
+  async postDeliveryFailure(agent: string, errorMessage: string): Promise<void> {
+    try {
+      await this.channel
+        .send(
+          `*Failed to deliver ${agent}'s response (${errorMessage}). The agent completed but the message couldn't be posted.*`,
+        )
+        .catch(() => {});
+    } catch {}
+  }
+}
+
+export class NullSink implements ChainSink {
+  async postPreHandoffText(): Promise<void> {}
+  async postAgentResponse(): Promise<void> {}
+  async postGateNotice(): Promise<void> {}
+  async postGateResponse(): Promise<void> {}
+  async postWarning(): Promise<void> {}
+  async postDeliveryFailure(): Promise<void> {}
+}
+
 // --- Post-Chain Gates (deterministic) ---
 // After chain terminates, if the final agent is a key in this map, each gate
 // agent in the list runs in sequence (provided it hasn't already participated
