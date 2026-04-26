@@ -74,24 +74,29 @@ export function classifyClaudeError(
   const haystack = `${resultText}\n${stderr || ""}`.toLowerCase();
   const raw = (resultText || stderr || "").trim();
 
-  // Quota class — permanent until billing cycle resets. Skip retries.
-  if (haystack.includes("monthly usage limit") || haystack.includes("monthly limit")) {
+  // Usage-limit class — permanent until the relevant bucket resets, but
+  // we deliberately don't claim to know *which* bucket. Anthropic's API
+  // returns "monthly usage limit" verbatim even on Claude Max plans
+  // where the real exhausted bucket is extra-usage / weekly / daily —
+  // the wording predates the current plan structure. Surface the raw
+  // string and point at the diagnostics commands instead of guessing.
+  const usageLimitHit =
+    haystack.includes("usage limit") ||
+    haystack.includes("monthly limit") ||
+    haystack.includes("weekly limit") ||
+    haystack.includes("daily limit") ||
+    haystack.includes("subscription limit");
+  if (usageLimitHit) {
+    const apiText = (resultText || "").trim() || "no detail";
     return {
-      message: "🚫 **Anthropic monthly quota exhausted.** Resets at the start of your next billing cycle. Check console.anthropic.com → Settings → Plans & Billing, or upgrade your plan.",
-      retryable: false,
-      raw,
-    };
-  }
-  if (haystack.includes("weekly usage limit") || haystack.includes("weekly limit")) {
-    return {
-      message: "🚫 **Anthropic weekly quota exhausted.** Resets at the start of next week. Check console.anthropic.com or upgrade your plan.",
-      retryable: false,
-      raw,
-    };
-  }
-  if (haystack.includes("daily usage limit") || haystack.includes("daily limit")) {
-    return {
-      message: "⏳ **Anthropic daily quota exhausted.** Resets at midnight UTC. Try again later or upgrade your plan.",
+      message:
+        "🚫 **Anthropic usage limit reached.** Skipping retries.\n" +
+        `> ${apiText}\n` +
+        "Run `claude /usage` or `claude /extra-usage` to see which bucket is empty " +
+        "(weekly base, extra-usage top-up, etc.). On Claude Max plans the API " +
+        "often labels extra-usage exhaustion as \"monthly usage limit\" — the " +
+        "wording is misleading. console.anthropic.com → Plans & Billing has the " +
+        "real state.",
       retryable: false,
       raw,
     };
