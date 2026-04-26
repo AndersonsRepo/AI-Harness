@@ -17,6 +17,7 @@ import type {
   CommandResult,
 } from "./core-types.js";
 import { executeCommand, type CommandContext } from "./core-commands.js";
+import { isClassifiedErrorMessage } from "./claude-config.js";
 
 import {
   submitTask,
@@ -387,7 +388,11 @@ export class Gateway {
 
       // Error response
       if (error && !response) {
-        const errorReply = `Something went wrong:\n\`\`\`\n${error.slice(0, 500)}\n\`\`\``;
+        // Classified errors (quota exhausted, overload, auth, etc.) are
+        // already user-facing — don't wrap them in a generic code block.
+        const errorReply = isClassifiedErrorMessage(error)
+          ? error.slice(0, 1500)
+          : `Something went wrong:\n\`\`\`\n${error.slice(0, 500)}\n\`\`\``;
         if (streamMsgId) {
           await this.adapter.editMessage(entry.channelId, streamMsgId, errorReply);
         } else {
@@ -438,12 +443,17 @@ export class Gateway {
 
   private async handleDeadLetter(record: DeadLetterRecord): Promise<void> {
     try {
-      await this.adapter.sendMessage(
-        record.channel_id,
-        `**Task failed permanently** after ${record.attempts} attempts.\nError: \`${record.error.slice(0, 300)}\`\nTask ID: \`${record.task_id}\``
-      );
+      // Classified errors (quota, overload, auth) are pre-formatted and
+      // describe what to do — drop the "after N attempts" wrapper for
+      // these, since permanent failures may not have retried at all.
+      const body = isClassifiedErrorMessage(record.error)
+        ? `${record.error.slice(0, 1500)}\nTask ID: \`${record.task_id}\``
+        : `**Task failed permanently** after ${record.attempts} attempts.\nError: \`${record.error.slice(0, 300)}\`\nTask ID: \`${record.task_id}\``;
+      await this.adapter.sendMessage(record.channel_id, body);
     } catch (err: any) {
       console.error(`[GATEWAY] Dead letter notification failed: ${err.message}`);
+    } finally {
+      this.releaseChannel(record.channel_id);
     }
   }
 

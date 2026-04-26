@@ -21,6 +21,139 @@ export const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 // event-stream level (see codex-runner.py).
 export const GLOBAL_DISALLOWED_TOOLS = claudeDisallowedToolArgs().join(",");
 
+// ─── Error Classification ───────────────────────────────────────────
+
+export interface ClassifiedError {
+  /** User-facing message. Begins with an emoji marker so core-gateway can
+   *  render it without a generic "Something went wrong" code-block wrapper. */
+  message: string;
+  /** False for permanent quota / auth errors so task-runner can short-circuit
+   *  retries that have no chance of succeeding. True for transient API issues
+   *  worth backing off on. */
+  retryable: boolean;
+  /** Original error text used for the classification, for telemetry/logs. */
+  raw: string;
+}
+
+// Detected via String.startsWith on the message. Exported so other modules
+// (e.g. core-gateway) can decide whether an error is already user-facing.
+export const CLASSIFIED_ERROR_PREFIXES = ["🚫", "⏳", "🌐", "🔑", "💳", "⚠️"];
+
+export function isClassifiedErrorMessage(msg: string): boolean {
+  return CLASSIFIED_ERROR_PREFIXES.some((p) => msg.startsWith(p));
+}
+
+/**
+ * Inspect Claude CLI stdout (JSONL stream) and stderr for known API failure
+ * shapes and produce a structured, user-friendly error message.
+ *
+ * Returns null when no recognizable pattern matches — caller should fall
+ * back to the original generic error text.
+ */
+export function classifyClaudeError(
+  stdout: string,
+  stderr: string,
+  _returncode: number,
+): ClassifiedError | null {
+  // Pull the most recent `type: result` chunk with is_error: true. That is
+  // where Claude CLI surfaces structured API errors (quota, overload, etc.).
+  let resultChunk: any = null;
+  for (const line of stdout.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const parsed = JSON.parse(t);
+      if (parsed?.type === "result" && parsed?.is_error) {
+        resultChunk = parsed;
+      }
+    } catch {}
+  }
+
+  const apiStatus: number | null = resultChunk?.api_error_status ?? null;
+  const resultText: string = (resultChunk?.result ?? "").toString();
+  const haystack = `${resultText}\n${stderr || ""}`.toLowerCase();
+  const raw = (resultText || stderr || "").trim();
+
+  // Quota class — permanent until billing cycle resets. Skip retries.
+  if (haystack.includes("monthly usage limit") || haystack.includes("monthly limit")) {
+    return {
+      message: "🚫 **Anthropic monthly quota exhausted.** Resets at the start of your next billing cycle. Check console.anthropic.com → Settings → Plans & Billing, or upgrade your plan.",
+      retryable: false,
+      raw,
+    };
+  }
+  if (haystack.includes("weekly usage limit") || haystack.includes("weekly limit")) {
+    return {
+      message: "🚫 **Anthropic weekly quota exhausted.** Resets at the start of next week. Check console.anthropic.com or upgrade your plan.",
+      retryable: false,
+      raw,
+    };
+  }
+  if (haystack.includes("daily usage limit") || haystack.includes("daily limit")) {
+    return {
+      message: "⏳ **Anthropic daily quota exhausted.** Resets at midnight UTC. Try again later or upgrade your plan.",
+      retryable: false,
+      raw,
+    };
+  }
+  if (haystack.includes("credit balance") && haystack.includes("low")) {
+    return {
+      message: "💳 **Anthropic credit balance is too low.** Add credits at console.anthropic.com → Settings → Plans & Billing.",
+      retryable: false,
+      raw,
+    };
+  }
+
+  // Auth — caller has to fix.
+  if (apiStatus === 401 || haystack.includes("authentication_error") || haystack.includes("invalid authentication")) {
+    return {
+      message: "🔑 **Anthropic authentication failed.** Re-run `claude /login` or check `ANTHROPIC_API_KEY`.",
+      retryable: false,
+      raw,
+    };
+  }
+
+  // Overload class — transient. Retry will likely succeed.
+  if (apiStatus === 529 || haystack.includes("overloaded")) {
+    return {
+      message: "⏳ Anthropic API is currently overloaded. Backing off and retrying...",
+      retryable: true,
+      raw,
+    };
+  }
+  if (apiStatus === 503 || haystack.includes("service unavailable")) {
+    return {
+      message: "⏳ Anthropic service unavailable. Backing off and retrying...",
+      retryable: true,
+      raw,
+    };
+  }
+  if (apiStatus === 502 || haystack.includes("bad gateway")) {
+    return {
+      message: "⏳ Anthropic gateway error (502). Backing off and retrying...",
+      retryable: true,
+      raw,
+    };
+  }
+  if (haystack.includes("stream idle timeout") || haystack.includes("stream") && haystack.includes("timeout")) {
+    return {
+      message: "🌐 Anthropic streaming connection went idle. Retrying...",
+      retryable: true,
+      raw,
+    };
+  }
+  // 429 *not* matched as a quota above — generic rate limiting.
+  if (apiStatus === 429 || haystack.includes("rate limit")) {
+    return {
+      message: "⏳ Rate limited by Anthropic. Backing off and retrying...",
+      retryable: true,
+      raw,
+    };
+  }
+
+  return null;
+}
+
 // ─── Response Parsing ───────────────────────────────────────────────
 
 /**
