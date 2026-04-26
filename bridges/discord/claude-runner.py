@@ -15,6 +15,7 @@ import subprocess
 import sys
 import os
 import json
+import signal
 import threading
 import time
 
@@ -58,12 +59,70 @@ def main():
     if os.environ.get("CLAUDE_RUNNER_PATH"):
         clean_env["PATH"] = os.environ["CLAUDE_RUNNER_PATH"]
 
+    # State tracked across signal-handler boundary. Closure captures these
+    # nonlocal so the handler can observe whether we've already written a
+    # final result (avoid clobbering a successful run with a cancel envelope)
+    # and which Popen child is in flight (so we can terminate it).
+    state = {
+        "active_proc": None,   # current subprocess.Popen, or None between attempts
+        "completed": False,    # True once write_result has been called with final result
+        "cancelled": False,    # True once a SIGTERM/SIGINT was received
+    }
+
     def write_result(data):
         """Atomic write: write to .tmp then rename to avoid partial reads."""
         tmp = output_file + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f)
         os.rename(tmp, output_file)
+
+    def handle_cancel_signal(signum, _frame):
+        """SIGTERM/SIGINT handler.
+
+        Behavior:
+          - Mark the run as cancelled so retry loops don't fire next attempt.
+          - Terminate the in-flight Popen child if any (best-effort).
+          - If write_result hasn't been called yet, write a cancellation
+            envelope so the Node-side FileWatcher sees a final result and
+            doesn't time out waiting for the .tmp → rename atomic write.
+            If write_result HAS been called with a successful result, do
+            not overwrite it — cancellation can't undo work already done.
+          - Exit 128 + signum (POSIX convention: 143 for SIGTERM).
+        """
+        state["cancelled"] = True
+        proc = state["active_proc"]
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            proc.kill()
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+        if not state["completed"]:
+            try:
+                write_result({
+                    "stdout": "",
+                    "stderr": f"cancelled by signal {signum}",
+                    "returncode": 128 + signum,
+                    "cancelled": True,
+                })
+                state["completed"] = True
+            except Exception:
+                # Last-resort: don't propagate write failures from the handler.
+                pass
+        # os._exit (not sys.exit) so we don't block on pending stdio reads,
+        # background threads, or finally-block cleanup. Signal cancellation
+        # is abnormal shutdown — emergency exit is the right tool.
+        os._exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, handle_cancel_signal)
+    signal.signal(signal.SIGINT, handle_cancel_signal)
 
     if stream_dir:
         # Streaming mode: run with stream-json output, write chunks to files
@@ -91,6 +150,7 @@ def main():
                 env=clean_env,
                 cwd=cwd,
             )
+            state["active_proc"] = proc
 
             chunk_num = 0
             all_stdout = []
@@ -100,6 +160,7 @@ def main():
 
             stderr_container = []
             stderr_thread = threading.Thread(target=read_stderr, args=(proc, stderr_container))
+            stderr_thread.daemon = True  # don't block sys.exit() in signal handler
             stderr_thread.start()
 
             # Enforce timeout on streaming stdout reads via a watchdog thread.
@@ -113,6 +174,7 @@ def main():
                     pass
 
             timer = threading.Timer(timeout, watchdog)
+            timer.daemon = True  # don't block sys.exit() in signal handler
             timer.start()
 
             try:
@@ -125,6 +187,7 @@ def main():
                     # Reset watchdog on each output line (active stream = not stalled)
                     timer.cancel()
                     timer = threading.Timer(timeout, watchdog)
+                    timer.daemon = True
                     timer.start()
 
                     # Write chunk file for the stream poller
@@ -143,12 +206,14 @@ def main():
             stderr_thread.join(timeout=5)
             stderr_text = stderr_container[0].decode("utf-8", errors="replace") if stderr_container else ""
 
+            state["active_proc"] = None
             if timed_out[0]:
                 write_result({
                     "stdout": "\n".join(all_stdout),
                     "stderr": f"Claude timed out after {timeout} seconds (streaming)",
                     "returncode": 1,
                 })
+                state["completed"] = True
             else:
                 # Write final aggregated result (backward compat)
                 write_result({
@@ -156,12 +221,17 @@ def main():
                     "stderr": stderr_text,
                     "returncode": proc.returncode if proc.returncode is not None else 1,
                 })
+                state["completed"] = True
 
         except subprocess.TimeoutExpired:
             proc.kill()
+            state["active_proc"] = None
             write_result({"stdout": "", "stderr": f"Claude timed out after {timeout} seconds", "returncode": 1})
+            state["completed"] = True
         except Exception as e:
+            state["active_proc"] = None
             write_result({"stdout": "", "stderr": str(e), "returncode": 1})
+            state["completed"] = True
 
     else:
         # Non-streaming mode: with retry on transient errors (429, 5xx, network).
@@ -173,6 +243,11 @@ def main():
         backoff_delays = [5, 15, 45]  # seconds
 
         for attempt in range(max_retries + 1):
+            if state["cancelled"]:
+                # Signal handler already wrote a cancellation envelope and
+                # called sys.exit, but defense-in-depth in case we're
+                # somehow re-entered via a non-handler path.
+                break
             try:
                 proc = subprocess.Popen(
                     [claude_path] + claude_args,
@@ -183,6 +258,7 @@ def main():
                     cwd=cwd,
                     text=True,
                 )
+                state["active_proc"] = proc
 
                 try:
                     stdout, stderr = proc.communicate(timeout=timeout)
@@ -193,8 +269,10 @@ def main():
                         proc.communicate(timeout=5)
                     except subprocess.TimeoutExpired:
                         pass
+                    state["active_proc"] = None
                     raise
 
+                state["active_proc"] = None
                 returncode = proc.returncode
 
                 # Check for transient errors worth retrying
@@ -208,6 +286,8 @@ def main():
                     delay = backoff_delays[attempt]
                     sys.stderr.write(f"[claude-runner] Transient error (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay}s: {stderr[:100]}\n")
                     time.sleep(delay)
+                    if state["cancelled"]:
+                        break
                     continue
 
                 write_result({
@@ -215,6 +295,7 @@ def main():
                     "stderr": stderr or "",
                     "returncode": returncode,
                 })
+                state["completed"] = True
                 break
 
             except subprocess.TimeoutExpired:
@@ -222,11 +303,16 @@ def main():
                     delay = backoff_delays[attempt]
                     sys.stderr.write(f"[claude-runner] Timeout (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay}s\n")
                     time.sleep(delay)
+                    if state["cancelled"]:
+                        break
                     continue
                 write_result({"stdout": "", "stderr": f"Claude timed out after {timeout} seconds ({max_retries + 1} attempts)", "returncode": 1})
+                state["completed"] = True
                 break
             except Exception as e:
+                state["active_proc"] = None
                 write_result({"stdout": "", "stderr": str(e), "returncode": 1})
+                state["completed"] = True
                 break
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ import json
 import os
 import re
 import resource
+import signal
 import subprocess
 import sys
 import threading
@@ -246,6 +247,50 @@ def main():
             json.dump(data, f)
         os.rename(tmp, output_file)
 
+    # Signal-handler state. See claude-runner.py for the same pattern.
+    state = {
+        "active_proc": None,
+        "completed": False,
+        "cancelled": False,
+    }
+
+    def handle_cancel_signal(signum, _frame):
+        state["cancelled"] = True
+        proc = state["active_proc"]
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            proc.kill()
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+        if not state["completed"]:
+            try:
+                write_result({
+                    "stdout": "",
+                    "stderr": f"cancelled by signal {signum}",
+                    "returncode": 128 + signum,
+                    "threadId": None,
+                    "lastMessage": None,
+                    "cancelled": True,
+                })
+                state["completed"] = True
+            except Exception:
+                pass
+        # os._exit (not sys.exit) so we don't block on pending stdio reads,
+        # background threads, or finally-block cleanup. Signal cancellation
+        # is abnormal shutdown — emergency exit is the right tool.
+        os._exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, handle_cancel_signal)
+    signal.signal(signal.SIGINT, handle_cancel_signal)
+
     def extract_thread_id(jsonl: str):
         for line in jsonl.split("\n"):
             line = line.strip()
@@ -340,6 +385,7 @@ def main():
             env=clean_env,
             cwd=cwd,
         )
+        state["active_proc"] = proc
 
         timed_out = [False]
 
@@ -351,6 +397,9 @@ def main():
                 pass
 
         timer = threading.Timer(timeout, watchdog)
+        # daemon=True so a SIGTERM-driven sys.exit() in the signal handler
+        # doesn't block waiting for the timer thread to fire.
+        timer.daemon = True
         timer.start()
 
         try:
@@ -390,6 +439,7 @@ def main():
             except OSError:
                 pass
 
+        state["active_proc"] = None
         stderr_text = (proc.stderr.read() or b"").decode("utf-8", errors="replace")
         stdout_text = "".join(stdout_chunks)
 
@@ -452,6 +502,11 @@ def main():
     try:
         last_result = None
         for attempt in range(max_retries + 1):
+            if state["cancelled"]:
+                # Signal handler already wrote the cancellation envelope and
+                # called sys.exit. Defense-in-depth in case we're somehow
+                # re-entered via a non-handler path.
+                break
             # Strip prior attempt's last_message_file so a transient first try
             # can't leak its agent text into the retry's lastMessage.
             try:
@@ -483,19 +538,24 @@ def main():
                     f"retrying in {delay}s: {preview}\n"
                 )
                 time.sleep(delay)
+                if state["cancelled"]:
+                    break
                 continue
             break
 
-        if last_result is not None:
+        if last_result is not None and not state["completed"]:
             write_result(last_result)
+            state["completed"] = True
     except Exception as e:
-        write_result({
-            "stdout": "",
-            "stderr": str(e),
-            "returncode": 1,
-            "threadId": None,
-            "lastMessage": None,
-        })
+        if not state["completed"]:
+            write_result({
+                "stdout": "",
+                "stderr": str(e),
+                "returncode": 1,
+                "threadId": None,
+                "lastMessage": None,
+            })
+            state["completed"] = True
     finally:
         try:
             if os.path.exists(last_message_file):
