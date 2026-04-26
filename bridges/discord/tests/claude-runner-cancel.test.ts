@@ -1,3 +1,12 @@
+// Mirror of codex-runner-cancel.test.ts for claude-runner.py.
+// Verifies SIGTERM/SIGINT during an in-flight non-streaming spawn produces
+// a cancellation envelope on disk and exits 143/130.
+//
+// Streaming-mode (--stream-dir) cancel behavior is not exercised here; the
+// signal handler is registered before mode-branching so streaming mode
+// should behave identically. If we ever want explicit streaming-mode test
+// coverage, mirror this file with a fake claude that emits stream-json.
+
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "child_process";
@@ -6,28 +15,29 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 const HARNESS_ROOT = "/Users/andersonedmond/Desktop/AI-Harness-private-runtime";
-const RUNNER = join(HARNESS_ROOT, "bridges/discord/codex-runner.py");
+const RUNNER = join(HARNESS_ROOT, "bridges/discord/claude-runner.py");
 
-// Fake codex that emits one event then sleeps. Long enough that the test
-// can SIGTERM the runner mid-flight.
-function makeSlowFakeCodex(workDir: string): string {
-  const fakePath = join(workDir, "fake-codex");
+// Fake claude that emits one valid stream-json line then sleeps 60s.
+// Shape mirrors what real claude --output-format json produces enough
+// for the runner's read loop to make at least one iteration before
+// being interrupted.
+function makeSlowFakeClaude(workDir: string): string {
+  const fakePath = join(workDir, "fake-claude");
   const script = `#!/usr/bin/env python3
 import sys, json, time
 
-# Drain stdin so the runner's stdin.write/close doesn't fight us
+# Drain any positional args without acting on them — the test's claude_args
+# mirror what claude-config.ts produces in production.
 try:
     sys.stdin.buffer.read()
 except Exception:
     pass
 
-# Emit one harmless event so the runner's read loop has activity
-sys.stdout.write(json.dumps({"msg": {"type": "agent_message", "text": "starting"}}) + "\\n")
+# Emit something so the runner's pipe has activity, then sleep until
+# we're killed.
+sys.stdout.write(json.dumps({"type": "system", "subtype": "init"}) + "\\n")
 sys.stdout.flush()
-
-# Sleep long enough that the test can SIGTERM the runner before we exit.
 time.sleep(60)
-sys.exit(0)
 `;
   writeFileSync(fakePath, script);
   chmodSync(fakePath, 0o755);
@@ -36,7 +46,10 @@ sys.exit(0)
 
 function waitForExit(proc: ReturnType<typeof spawn>, timeoutMs = 5000): Promise<number | null> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`runner did not exit within ${timeoutMs}ms`)), timeoutMs);
+    const timer = setTimeout(
+      () => reject(new Error(`runner did not exit within ${timeoutMs}ms`)),
+      timeoutMs,
+    );
     proc.on("exit", (code) => {
       clearTimeout(timer);
       resolve(code);
@@ -48,24 +61,22 @@ async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-describe("codex-runner SIGTERM cancellation", () => {
+describe("claude-runner SIGTERM cancellation (non-streaming)", () => {
   let workDir: string;
 
   before(() => {
-    workDir = mkdtempSync(join(tmpdir(), "codex-cancel-"));
+    workDir = mkdtempSync(join(tmpdir(), "claude-cancel-"));
   });
 
   after(() => {
     rmSync(workDir, { recursive: true, force: true });
   });
 
-  // Helper: spawn the runner with detached:true so it gets its own process
-  // group, then kill the whole group via negative PID. This mirrors what
-  // platform.ts terminate() does post-commit-6b9c3e5 (Stage 1 group kill)
-  // — the child fake-codex dies first, the runner's read loop returns,
-  // and only THEN does the signal handler fire and write the envelope.
-  // Direct PID kill alone doesn't work because Python signal handlers
-  // can't interrupt a blocked `for line in proc.stdout` read.
+  // Spawn detached:true (own process group) so we can group-kill via
+  // negative PID, mirroring what platform.ts terminate() does in production
+  // post-commit-6b9c3e5. See codex-runner-cancel.test.ts for the longer
+  // explanation of why direct-pid kill alone doesn't work — Python signal
+  // handlers can't interrupt a blocked stdin/stdout read.
   function spawnRunnerDetached(args: string[], env: NodeJS.ProcessEnv) {
     return spawn("python3", args, {
       env,
@@ -79,30 +90,24 @@ describe("codex-runner SIGTERM cancellation", () => {
   }
 
   it("writes a cancelled envelope when SIGTERM arrives during an in-flight spawn", async () => {
-    const fakePath = makeSlowFakeCodex(workDir);
+    const fakePath = makeSlowFakeClaude(workDir);
     const outFile = join(workDir, "out.json");
 
+    // Non-streaming path: no --stream-dir. Pass `-p` so the fake gets
+    // realistic args; the fake ignores them.
     const proc = spawnRunnerDetached([
       RUNNER,
       outFile,
-      "--prompt-file", "/dev/null",
       "--timeout", "120",
+      "-p",
+      "--output-format", "json",
     ], {
       ...process.env,
       HARNESS_ROOT,
-      CODEX_CLI_PATH: fakePath,
+      CLAUDE_CLI_PATH: fakePath,
     });
 
-    // 2s sleep gives the runner time to: parse args, import platform lib,
-    // read prompt_file, compose invocation, define write_result, register
-    // signal handlers, spawn the fake codex, start its read loop. Under
-    // parallel-test load this can exceed 1s — if SIGTERM arrives before
-    // signal.signal() is called, Python's default handler kills the
-    // runner without our handler firing. In production, /stop on a
-    // freshly-spawned task is unlikely to hit this race because the bot
-    // observes task spawn completion before allowing /stop. If we ever
-    // see "code=null" in production, the fix is to register signal
-    // handlers earlier in main() (before prompt_file read).
+    // 2s startup window — see codex-runner-cancel.test.ts for the rationale.
     await sleep(2000);
     killGroup(proc.pid!, "SIGTERM");
 
@@ -113,29 +118,30 @@ describe("codex-runner SIGTERM cancellation", () => {
     const envelope = JSON.parse(readFileSync(outFile, "utf-8"));
     assert.equal(envelope.cancelled, true, "envelope.cancelled should be true");
     assert.equal(envelope.returncode, 143, "envelope.returncode should be 143");
-    assert.match(envelope.stderr, /cancelled by signal 15/, "stderr should mention signal 15");
+    assert.match(envelope.stderr, /cancelled by signal 15/);
   });
 
   it("writes a cancelled envelope on SIGINT (ctrl-c) too", async () => {
-    const fakePath = makeSlowFakeCodex(workDir);
+    const fakePath = makeSlowFakeClaude(workDir);
     const outFile = join(workDir, "out-sigint.json");
 
     const proc = spawnRunnerDetached([
       RUNNER,
       outFile,
-      "--prompt-file", "/dev/null",
       "--timeout", "120",
+      "-p",
+      "--output-format", "json",
     ], {
       ...process.env,
       HARNESS_ROOT,
-      CODEX_CLI_PATH: fakePath,
+      CLAUDE_CLI_PATH: fakePath,
     });
 
     await sleep(2000);
     killGroup(proc.pid!, "SIGINT");
 
     const exitCode = await waitForExit(proc, 5000);
-    assert.equal(exitCode, 130, "runner should exit 130 (128+SIGINT)");
+    assert.equal(exitCode, 130);
 
     const envelope = JSON.parse(readFileSync(outFile, "utf-8"));
     assert.equal(envelope.cancelled, true);
