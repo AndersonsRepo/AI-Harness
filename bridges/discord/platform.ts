@@ -126,18 +126,43 @@ export const proc = {
     }
   },
 
-  /** Terminate a process gracefully. Returns true if signal was sent. */
+  /**
+   * Terminate a process and its descendants. Returns true if a kill signal
+   * was successfully delivered (not whether anything actually died — kernel
+   * delivery semantics).
+   *
+   * On Unix: tries process-group kill first (negative pid = group). The bot
+   * spawns task runners with `detached: true` so the python child becomes
+   * the group leader; group kill cascades to its `subprocess.Popen`-spawned
+   * `claude` / `codex` CLI grandchild. Without group kill, signaling only
+   * the leader leaves the CLI grandchild orphaned (reparented to init/launchd)
+   * and continuing to spend API credits — which is exactly the bug
+   * /stop hit pre-fix. Falls back to direct-pid kill if the spawn wasn't
+   * detached (e.g., heartbeat scripts spawned without process-group).
+   *
+   * On Windows: `taskkill /F /T` already kills the tree, no change needed.
+   */
   terminate(pid: number): boolean {
     try {
       if (IS_WINDOWS) {
-        execSync(`taskkill /PID ${pid} /F`, {
+        execSync(`taskkill /PID ${pid} /F /T`, {
           timeout: 10000,
           stdio: ["pipe", "pipe", "pipe"],
         });
         return true;
       }
-      process.kill(pid, "SIGTERM");
-      return true;
+      // Try group kill first; the negative-pid form signals the whole
+      // process group whose leader is `pid`.
+      try {
+        process.kill(-pid, "SIGTERM");
+        return true;
+      } catch {
+        // Group kill can fail with ESRCH if `pid` isn't a group leader
+        // (spawn wasn't detached) or with EPERM if we don't own it. Fall
+        // back to direct-pid kill — better than nothing.
+        process.kill(pid, "SIGTERM");
+        return true;
+      }
     } catch {
       return false;
     }
