@@ -358,6 +358,41 @@ export interface HandoffResult {
   nextHandoff: HandoffDirective | null;
 }
 
+// --- AgentExecutor ---
+// Transport-agnostic interface for executing a single handoff step.
+// DiscordAgentExecutor wraps executeHandoff (production); HeadlessAgentExecutor
+// (defined in tools/regression-replay/spawn-helper.ts) wraps runAgent for
+// replay. The chain loop calls only this interface, so executeChainCore
+// never imports discord.js.
+export interface ExecuteAgentArgs {
+  fromAgent: string;
+  toAgent: string;
+  handoffMessage: string;
+  preHandoffText: string;
+  chainContext?: { completedPhases: ChainEntry[]; currentTask: string };
+  worktreePath?: string | null;
+}
+
+export interface AgentExecutor {
+  execute(args: ExecuteAgentArgs): Promise<HandoffResult | null>;
+}
+
+export class DiscordAgentExecutor implements AgentExecutor {
+  constructor(private readonly channel: TextChannel) {}
+
+  async execute(args: ExecuteAgentArgs): Promise<HandoffResult | null> {
+    return executeHandoff(
+      this.channel,
+      args.fromAgent,
+      args.toAgent,
+      args.handoffMessage,
+      args.preHandoffText,
+      args.chainContext,
+      args.worktreePath,
+    );
+  }
+}
+
 /**
  * Build the per-handoff agent prompt.
  *
@@ -669,15 +704,12 @@ export async function executeHandoff(
 }
 
 export interface ExecuteChainCoreParams {
-  /**
-   * Discord channel — still passed through to executeHandoff (which remains
-   * Discord-coupled in this commit). Will be replaced by an AgentExecutor
-   * abstraction in a follow-up commit so executeChainCore stops importing
-   * discord.js entirely.
-   */
-  channel: TextChannel;
+  /** Channel ID — used for project lookup, parallel-group spawn, and worktree owner attribution. */
+  channelId: string;
   /** Sink for delivering chain output (DiscordSink in production, NullSink in replay). */
   sink: ChainSink;
+  /** Executor that performs each handoff step (DiscordAgentExecutor in production, HeadlessAgentExecutor in replay). */
+  executor: AgentExecutor;
   /** The first agent in the chain — its response was already produced upstream. */
   initialAgent: string;
   /** That agent's full response text (may contain a [HANDOFF:...] directive). */
@@ -691,16 +723,14 @@ export interface ExecuteChainCoreParams {
  *
  * Drives the handoff loop, captures per-step artifacts, runs post-chain
  * gates, and manages chain-scoped worktree lifecycle. Output delivery
- * happens through `sink` rather than direct channel.send calls.
- *
- * `channel` is still passed through to executeHandoff because executeHandoff
- * itself remains Discord-coupled at this stage. Once executeHandoff is
- * extracted into an AgentExecutor, channel will no longer be needed here.
+ * happens through `sink`; per-step execution happens through `executor`.
+ * The chain primitive imports zero discord.js — both Discord and replay
+ * paths satisfy the ChainSink + AgentExecutor interfaces.
  */
 export async function executeChainCore(
   params: ExecuteChainCoreParams,
 ): Promise<ChainResult> {
-  const { channel, sink, initialAgent, initialResponse, originAgent } = params;
+  const { channelId, sink, executor, initialAgent, initialResponse, originAgent } = params;
   const chainEntries: ChainEntry[] = [];
 
   // Record the initial agent's response in the chain log
@@ -716,7 +746,7 @@ export async function executeChainCore(
     console.log(`[HANDOFF] Parallel directive detected: ${parallelDirective.agents.join(", ")}`);
     try {
       const groupId = await spawnParallelGroup({
-        channelId: channel.id,
+        channelId,
         directive: parallelDirective,
       });
       // Chain suspends — will resume when parallel tasks complete via [PARALLEL_COMPLETE]
@@ -738,10 +768,10 @@ export async function executeChainCore(
   while (handoff) {
     // Create worktree lazily on first handoff to a writer
     if (!chainWorktreePath && needsWorktree([handoff.targetAgent])) {
-      const project = getProject(channel.id);
+      const project = getProject(channelId);
       const projectCwd = project ? resolveProjectWorkdir(project.name) : null;
       if (projectCwd && isGitRepo(projectCwd)) {
-        const wt = createWorktree(projectCwd, project!.name, chainId, channel.id, { chainId });
+        const wt = createWorktree(projectCwd, project!.name, chainId, channelId, { chainId });
         if (wt) {
           chainWorktreePath = wt.worktree_path;
           chainWorktreeId = wt.id;
@@ -750,15 +780,14 @@ export async function executeChainCore(
       }
     }
 
-    const result = await executeHandoff(
-      channel,
+    const result = await executor.execute({
       fromAgent,
-      handoff.targetAgent,
-      handoff.message,
-      handoff.preHandoffText,
-      { completedPhases: chainEntries, currentTask: handoff.message },
-      chainWorktreePath,
-    );
+      toAgent: handoff.targetAgent,
+      handoffMessage: handoff.message,
+      preHandoffText: handoff.preHandoffText,
+      chainContext: { completedPhases: chainEntries, currentTask: handoff.message },
+      worktreePath: chainWorktreePath,
+    });
 
     if (!result) break; // Chain ended (error, depth limit, or invalid agent)
 
@@ -800,7 +829,7 @@ export async function executeChainCore(
   // Each gate for the final agent runs in sequence if it hasn't already participated
   // AND is in the project's agents list.
   const finalAgent = chainEntries[chainEntries.length - 1]?.agent;
-  const project = finalAgent ? getProject(channel.id) : null;
+  const project = finalAgent ? getProject(channelId) : null;
   const gateRequests = buildPostChainGateRequests(chainEntries, project?.agents);
 
   if (gateRequests.length > 0) {
@@ -809,15 +838,14 @@ export async function executeChainCore(
 
       await sink.postGateNotice(gateRequest.fromAgent, gateRequest.gateAgent);
 
-      const gateResult = await executeHandoff(
-        channel,
-        gateRequest.fromAgent,
-        gateRequest.gateAgent,
-        gatePrompt,
-        "", // no pre-handoff text
-        undefined,
-        chainWorktreePath,
-      );
+      const gateResult = await executor.execute({
+        fromAgent: gateRequest.fromAgent,
+        toAgent: gateRequest.gateAgent,
+        handoffMessage: gatePrompt,
+        preHandoffText: "", // no pre-handoff text
+        chainContext: undefined,
+        worktreePath: chainWorktreePath,
+      });
 
       if (gateResult) {
         chainEntries.push({
@@ -854,9 +882,11 @@ export async function runHandoffChain(
 ): Promise<ChainResult> {
   const originAgent = options?.originAgent || initialAgent;
   const sink = new DiscordSink(channel);
+  const executor = new DiscordAgentExecutor(channel);
   return executeChainCore({
-    channel,
+    channelId: channel.id,
     sink,
+    executor,
     initialAgent,
     initialResponse,
     originAgent,

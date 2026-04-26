@@ -9,8 +9,11 @@ import {
   buildHandoffPrompt,
   DiscordSink,
   NullSink,
+  type AgentExecutor,
   type ChainEntry,
   type ChainSink,
+  type ExecuteAgentArgs,
+  type HandoffResult,
 } from "../handoff-router.js";
 
 function cleanupChannel(channelId: string): void {
@@ -139,15 +142,34 @@ describe("Handoff Router — ChainSink Contract", () => {
   });
 });
 
-describe("Handoff Router — executeChainCore", () => {
+// Programmable executor for chain-loop tests. Each call returns the next
+// queued response (or throws if the queue is exhausted), and records every
+// args object it received for assertion.
+function makeFakeExecutor(responses: Array<HandoffResult | null>) {
+  const calls: ExecuteAgentArgs[] = [];
+  const queue = [...responses];
+  const executor: AgentExecutor = {
+    async execute(args: ExecuteAgentArgs): Promise<HandoffResult | null> {
+      calls.push(args);
+      if (queue.length === 0) {
+        throw new Error("FakeAgentExecutor exhausted — chain made more calls than expected");
+      }
+      return queue.shift()!;
+    },
+  };
+  return { executor, calls };
+}
+
+describe("Handoff Router — executeChainCore (no executor calls)", () => {
   it("records the initial agent's response (truncated to 2000 chars) when no handoff follows", async () => {
-    const { channel, sends } = makeFakeChannel("test-chain-no-handoff");
+    const { executor, calls } = makeFakeExecutor([]);
     const sink = new NullSink();
     const longResponse = "x".repeat(3000);
 
     const result = await executeChainCore({
-      channel,
+      channelId: "test-chain-no-handoff",
       sink,
+      executor,
       initialAgent: "researcher",
       initialResponse: longResponse,
       originAgent: "researcher",
@@ -158,18 +180,18 @@ describe("Handoff Router — executeChainCore", () => {
     assert.equal(result.entries[0].response.length, 2000);
     assert.equal(result.originAgent, "researcher");
     assert.equal(result.parallelGroupId, undefined);
-    // No handoff means the loop never iterates and executeHandoff is never
-    // called, so no Discord posts should happen via the channel.
-    assert.equal(sends.length, 0);
+    // No handoff means the loop never iterates — executor must not have been called.
+    assert.equal(calls.length, 0);
   });
 
   it("preserves the originAgent passed by the caller", async () => {
-    const { channel } = makeFakeChannel("test-chain-origin");
+    const { executor } = makeFakeExecutor([]);
     const sink = new NullSink();
 
     const result = await executeChainCore({
-      channel,
+      channelId: "test-chain-origin",
       sink,
+      executor,
       initialAgent: "researcher",
       initialResponse: "no handoff here",
       originAgent: "orchestrator",
@@ -177,6 +199,171 @@ describe("Handoff Router — executeChainCore", () => {
 
     assert.equal(result.originAgent, "orchestrator");
     assert.equal(result.entries[0].agent, "researcher");
+  });
+});
+
+describe("Handoff Router — executeChainCore chain loop with injected executor", () => {
+  it("walks a researcher → reviewer chain, recording each step", async () => {
+    const { executor, calls } = makeFakeExecutor([
+      { agentName: "reviewer", response: "Looks good. No issues found.", nextHandoff: null },
+    ]);
+    const sink = new NullSink();
+    const initial = "Investigated the issue. Recommend reviewer take a look.\n\n[HANDOFF:reviewer] Please review my findings.";
+
+    const result = await executeChainCore({
+      channelId: "test-chain-two-step",
+      sink,
+      executor,
+      initialAgent: "researcher",
+      initialResponse: initial,
+      originAgent: "researcher",
+    });
+
+    // 1 executor call (reviewer); 2 chain entries (researcher initial + reviewer)
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].fromAgent, "researcher");
+    assert.equal(calls[0].toAgent, "reviewer");
+    assert.equal(calls[0].handoffMessage, "Please review my findings.");
+    assert.equal(result.entries.length, 2);
+    assert.equal(result.entries[0].agent, "researcher");
+    assert.equal(result.entries[1].agent, "reviewer");
+    assert.equal(result.entries[1].response, "Looks good. No issues found.");
+  });
+
+  it("ends the chain immediately when the executor returns null", async () => {
+    const { executor, calls } = makeFakeExecutor([null]);
+    const sink = new NullSink();
+    const initial = "Checking with the reviewer.\n\n[HANDOFF:reviewer] please look at this.";
+
+    const result = await executeChainCore({
+      channelId: "test-chain-executor-null",
+      sink,
+      executor,
+      initialAgent: "researcher",
+      initialResponse: initial,
+      originAgent: "researcher",
+    });
+
+    // Executor was called once and returned null → loop breaks → only initial entry recorded
+    assert.equal(calls.length, 1);
+    assert.equal(result.entries.length, 1);
+    assert.equal(result.entries[0].agent, "researcher");
+  });
+
+  it("threads chain context through each executor call (last entry, current task)", async () => {
+    // Snapshot context at call time — the chainContext.completedPhases array
+    // is passed by reference and accumulates after the call returns, so we
+    // record what the agent would see at the moment it's invoked.
+    const snapshots: Array<{ phaseAgents: string[]; currentTask: string | undefined }> = [];
+    const queue: Array<HandoffResult | null> = [
+      {
+        agentName: "builder",
+        response: "Made the change.\n\n[HANDOFF:reviewer] please verify.",
+        nextHandoff: { targetAgent: "reviewer", message: "please verify.", preHandoffText: "Made the change." },
+      },
+      { agentName: "reviewer", response: "LGTM.", nextHandoff: null },
+    ];
+    const calls: ExecuteAgentArgs[] = [];
+    const executor: AgentExecutor = {
+      async execute(args: ExecuteAgentArgs): Promise<HandoffResult | null> {
+        calls.push(args);
+        snapshots.push({
+          phaseAgents: args.chainContext?.completedPhases.map((e) => e.agent) ?? [],
+          currentTask: args.chainContext?.currentTask,
+        });
+        if (queue.length === 0) {
+          throw new Error("FakeAgentExecutor exhausted");
+        }
+        return queue.shift()!;
+      },
+    };
+    const sink = new NullSink();
+    const initial = "Plan looks good — handing off.\n\n[HANDOFF:builder] implement the change.";
+
+    await executeChainCore({
+      channelId: "test-chain-context",
+      sink,
+      executor,
+      initialAgent: "orchestrator",
+      initialResponse: initial,
+      originAgent: "orchestrator",
+    });
+
+    // First executor call sees orchestrator → builder; chain context has 1 phase (orchestrator)
+    assert.equal(calls[0].fromAgent, "orchestrator");
+    assert.equal(calls[0].toAgent, "builder");
+    assert.deepEqual(snapshots[0].phaseAgents, ["orchestrator"]);
+    assert.equal(snapshots[0].currentTask, "implement the change.");
+
+    // Second call sees builder → reviewer; chain context has 2 phases (orchestrator + builder)
+    assert.equal(calls[1].fromAgent, "builder");
+    assert.equal(calls[1].toAgent, "reviewer");
+    assert.deepEqual(snapshots[1].phaseAgents, ["orchestrator", "builder"]);
+    assert.equal(snapshots[1].currentTask, "please verify.");
+  });
+
+  it("auto-injects post-chain gates after a builder finishes (reviewer + tester)", async () => {
+    // Initial: orchestrator → builder; builder produces a clean result with no further handoff.
+    // Post-chain gates should fire reviewer then tester (POST_CHAIN_GATES["builder"]).
+    const { executor, calls } = makeFakeExecutor([
+      {
+        agentName: "builder",
+        response: "Wrote the patch. Tests pass locally.",
+        nextHandoff: null,
+      },
+      { agentName: "reviewer", response: "Code reads cleanly.", nextHandoff: null },
+      { agentName: "tester", response: "Verified — PASS.", nextHandoff: null },
+    ]);
+    const sink = new NullSink();
+
+    const result = await executeChainCore({
+      channelId: "test-chain-gates",
+      sink,
+      executor,
+      initialAgent: "orchestrator",
+      initialResponse: "Plan agreed.\n\n[HANDOFF:builder] implement it.",
+      originAgent: "orchestrator",
+    });
+
+    // 3 executor calls: builder (chain), reviewer (gate), tester (gate)
+    assert.equal(calls.length, 3);
+    assert.equal(calls[0].toAgent, "builder");
+    assert.equal(calls[1].toAgent, "reviewer");
+    assert.equal(calls[2].toAgent, "tester");
+
+    // 4 chain entries: orchestrator, builder, reviewer, tester
+    assert.equal(result.entries.length, 4);
+    assert.deepEqual(
+      result.entries.map((e) => e.agent),
+      ["orchestrator", "builder", "reviewer", "tester"],
+    );
+
+    // Gate fromAgent should be 'builder' (the canonical artifact source) for both gates
+    assert.equal(calls[1].fromAgent, "builder");
+    assert.equal(calls[2].fromAgent, "builder");
+    // Gate prompts should include builder's output
+    assert.ok(calls[1].handoffMessage.includes("Wrote the patch"));
+    assert.ok(calls[2].handoffMessage.includes("Wrote the patch"));
+  });
+
+  it("does not run post-chain gates when the final agent has no gate config", async () => {
+    // Researcher → Reviewer chain; reviewer has no POST_CHAIN_GATES entry, so no auto-injection.
+    const { executor, calls } = makeFakeExecutor([
+      { agentName: "reviewer", response: "All good.", nextHandoff: null },
+    ]);
+    const sink = new NullSink();
+
+    const result = await executeChainCore({
+      channelId: "test-chain-no-gate",
+      sink,
+      executor,
+      initialAgent: "researcher",
+      initialResponse: "Done.\n\n[HANDOFF:reviewer] LGTM check.",
+      originAgent: "researcher",
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(result.entries.length, 2);
   });
 });
 

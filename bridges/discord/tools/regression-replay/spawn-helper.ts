@@ -20,6 +20,15 @@ import {
   buildCodexConfig,
   extractCodexResponse,
 } from "../../codex-config.js";
+import {
+  parseHandoff,
+  buildHandoffPrompt,
+  resolveHandoffRuntime,
+  type AgentExecutor,
+  type ChainEntry,
+  type ExecuteAgentArgs,
+  type HandoffResult,
+} from "../../handoff-router.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT ?? process.cwd();
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -270,4 +279,56 @@ export function cleanupRawOutput(path: string | undefined): void {
   try {
     unlinkSync(path);
   } catch {}
+}
+
+/**
+ * AgentExecutor implementation for headless replay.
+ *
+ * Builds the per-step prompt via buildHandoffPrompt (the same helper the
+ * production path uses), spawns the agent via runAgent, and returns a
+ * HandoffResult shaped like executeHandoff's return value.
+ *
+ * `contextBuilder` is injected by the caller because in production the
+ * per-step context comes from buildProjectContext (which fetches Discord
+ * message history). Replay tooling supplies its own context source —
+ * pinned fixtures, replay timeline, or a static stub.
+ *
+ * worktreePath is currently ignored — runAgent doesn't propagate it to
+ * the runner. Replay runs are read-only and shouldn't mutate state.
+ */
+export class HeadlessAgentExecutor implements AgentExecutor {
+  constructor(
+    private readonly opts: {
+      channelId: string;
+      contextBuilder: (
+        toAgent: string,
+        chainContext?: { completedPhases: ChainEntry[]; currentTask: string },
+      ) => Promise<string>;
+      timeoutMs?: number;
+    },
+  ) {}
+
+  async execute(args: ExecuteAgentArgs): Promise<HandoffResult | null> {
+    const context = await this.opts.contextBuilder(args.toAgent, args.chainContext);
+    const prompt = buildHandoffPrompt(context, args.fromAgent, args.handoffMessage);
+    const runtime = resolveHandoffRuntime(this.opts.channelId, args.toAgent);
+
+    const result = await runAgent({
+      runtime,
+      agentName: args.toAgent,
+      prompt,
+      channelId: this.opts.channelId,
+      timeoutMs: this.opts.timeoutMs,
+    });
+
+    if (!result.ok || !result.responseText) {
+      return null;
+    }
+
+    return {
+      agentName: args.toAgent,
+      response: result.responseText,
+      nextHandoff: parseHandoff(result.responseText),
+    };
+  }
 }
