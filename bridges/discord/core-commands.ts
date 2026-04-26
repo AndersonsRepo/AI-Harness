@@ -185,7 +185,13 @@ function commandStop(ctx: CommandContext): CommandResult {
   const pid = getTaskPidForChannel(ctx.channelId);
   if (!pid) return { text: "Nothing running in this channel." };
   proc.terminate(pid);
-  cancelChannelTasks(ctx.channelId);
+  // Wrap cancelChannelTasks: it touches SQLite + may throw on bind/SQL
+  // errors, and an uncaught throw here used to crash the entire bot.
+  try {
+    cancelChannelTasks(ctx.channelId);
+  } catch (err) {
+    console.error(`[STOP] cancelChannelTasks failed for ${ctx.channelId}:`, err);
+  }
   ctx.releaseChannel?.();
   return { text: "Stopped the active request." };
 }

@@ -13,6 +13,7 @@ import {
   extractResponse as sharedExtractResponse,
   extractSessionId as sharedExtractSessionId,
   buildClaudeConfig,
+  classifyClaudeError,
 } from "./claude-config.js";
 import {
   buildCodexConfig,
@@ -474,12 +475,23 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
 
     if (returncode !== 0) {
       const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
-      const errorMsg = stderr?.trim() || `${runtimeLabel} exited with code ${returncode}`;
+      let errorMsg = stderr?.trim() || `${runtimeLabel} exited with code ${returncode}`;
+      let permanent = false;
+
+      if (runtime === "claude") {
+        const classified = classifyClaudeError(stdout || "", stderr || "", returncode);
+        if (classified) {
+          errorMsg = classified.message;
+          permanent = !classified.retryable;
+          console.log(`[TASK] ${taskId} classified: retryable=${classified.retryable} raw=${classified.raw.slice(0, 120)}`);
+        }
+      }
+
       // Track API failures for observability
       if (runtime === "claude" && isTransientApiError(errorMsg)) {
         recordApiFailure();
       }
-      await handleFailure(taskId, errorMsg);
+      await handleFailure(taskId, errorMsg, permanent);
       // Notify handler of the error
       if (outputHandler) {
         await outputHandler(taskId, null, errorMsg, null, raw);
@@ -574,15 +586,18 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
   }
 }
 
-async function handleFailure(taskId: string, error: string): Promise<void> {
+async function handleFailure(taskId: string, error: string, permanent: boolean = false): Promise<void> {
   const task = getTask(taskId);
   if (!task) return;
 
   const nextAttempt = task.attempt + 1;
 
-  if (nextAttempt >= task.max_attempts) {
-    // Move to dead letter
-    console.log(`[TASK] ${taskId} exhausted all ${task.max_attempts} attempts, moving to dead letter`);
+  if (permanent || nextAttempt >= task.max_attempts) {
+    if (permanent) {
+      console.log(`[TASK] ${taskId} permanent failure, skipping retries: ${error.slice(0, 80)}`);
+    } else {
+      console.log(`[TASK] ${taskId} exhausted all ${task.max_attempts} attempts, moving to dead letter`);
+    }
     updateTask(taskId, { status: "dead", last_error: error });
     taskStreamDirs.delete(taskId);
     taskPromptFiles.delete(taskId);
@@ -756,9 +771,15 @@ export function cancelTask(taskId: string): boolean {
 
 export function cancelChannelTasks(channelId: string): number {
   const db = getDb();
+  // The `?` placeholder must be bound — passing channelId here. Missing
+  // this arg threw `RangeError: Too few parameter values were provided`
+  // and crashed the bot on every /stop, which is why /stop appeared to
+  // "produce" Claude-exited-with-code-1 messages: the crash → launchd
+  // restart → crash-recovery code retried the stale running task, and
+  // the retry's transient failure was what the user saw.
   const tasks = db.prepare(
     "SELECT * FROM task_queue WHERE channel_id = ? AND status IN ('running', 'pending', 'waiting_continue')"
-  ).all() as TaskRecord[];
+  ).all(channelId) as TaskRecord[];
 
   let cancelled = 0;
   for (const task of tasks) {

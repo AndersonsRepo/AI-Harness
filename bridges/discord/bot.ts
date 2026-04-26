@@ -847,7 +847,16 @@ async function handleCommand(message: Message, content: string): Promise<boolean
       return true;
     }
     proc.terminate(pid);
-    cancelChannelTasks(channelId);
+    // Defense-in-depth: cancelChannelTasks touches SQLite. An uncaught
+    // throw here previously crashed the bot, which launchd then
+    // restarted, which triggered crash-recovery to RETRY the task —
+    // the opposite of what /stop should do. See vault learning
+    // ERR-cancel-channel-tasks-sql-bind-bot-crash.
+    try {
+      cancelChannelTasks(channelId);
+    } catch (err) {
+      console.error(`[STOP] cancelChannelTasks failed for ${channelId}:`, err);
+    }
     releaseChannel(channelId);
     await message.reply("Stopped the active request.");
     return true;
