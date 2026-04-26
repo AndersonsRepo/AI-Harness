@@ -6,6 +6,7 @@ import {
   buildPostChainGateRequests,
   resolveHandoffRuntime,
   executeChainCore,
+  buildHandoffPrompt,
   DiscordSink,
   NullSink,
   type ChainEntry,
@@ -176,6 +177,64 @@ describe("Handoff Router — executeChainCore", () => {
 
     assert.equal(result.originAgent, "orchestrator");
     assert.equal(result.entries[0].agent, "researcher");
+  });
+});
+
+// ─── buildHandoffPrompt byte-equivalence guard ────────────────────────
+//
+// Net 2 of the Option B refactor verification (per
+// vault/shared/regression-replay/refactor-snapshots/option-b-pre-refactor/README.md):
+// the post-refactor `buildHandoffPrompt` helper must produce byte-identical
+// output to the pre-refactor inline expression at handoff-router.ts:340 of
+// the snapshot (sha 42dcee21450993a2e9762f438aaee728d02e0409). The inline
+// expression is reproduced verbatim in `snapshotInlinePrompt` below.
+//
+// If this test ever drifts, the prompt-shape contract has been broken and
+// downstream agents will receive different inputs than they did before
+// the refactor.
+
+function snapshotInlinePrompt(context: string, fromAgent: string, handoffMessage: string): string {
+  // Verbatim from snapshot/handoff-router.ts:340 — the only change is that
+  // `capitalize` is referenced via the same module so we get the same impl.
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  return `${context}\n\n${cap(fromAgent)} has handed off to you with this request:\n${handoffMessage}`;
+}
+
+describe("Handoff Router — buildHandoffPrompt byte-equivalence (Option B Net 2)", () => {
+  it("matches the pre-refactor inline prompt construction for a typical fixture", () => {
+    const context = "[Project: lattice]\nDescription: Self-evolving generative art\nParticipating agents: orchestrator, builder, reviewer\nYou are the builder agent.\n\n--- Recent conversation ---\nuser: add a snapshot flag\n--- End of conversation ---";
+    const fromAgent = "orchestrator";
+    const handoffMessage = "Add a `--snapshot` flag to lattice that writes the current population to disk.";
+
+    const expected = snapshotInlinePrompt(context, fromAgent, handoffMessage);
+    const actual = buildHandoffPrompt(context, fromAgent, handoffMessage);
+
+    assert.equal(actual, expected);
+  });
+
+  it("matches when handoffMessage spans multiple lines and contains markdown", () => {
+    const context = "[Project: hey-lexxi]\nYou are the reviewer agent.";
+    const fromAgent = "builder";
+    const handoffMessage = "Review:\n\n- changed file: `src/extract.py`\n- lines added: 47\n\nFocus on the OCR fallback path.";
+
+    const expected = snapshotInlinePrompt(context, fromAgent, handoffMessage);
+    const actual = buildHandoffPrompt(context, fromAgent, handoffMessage);
+
+    assert.equal(actual, expected);
+  });
+
+  it("matches when context is empty (degenerate but valid)", () => {
+    const expected = snapshotInlinePrompt("", "researcher", "go");
+    const actual = buildHandoffPrompt("", "researcher", "go");
+    assert.equal(actual, expected);
+  });
+
+  it("preserves capitalize behavior exactly (lowercase agent names get capitalized; mixed-case stays as-is)", () => {
+    const lower = buildHandoffPrompt("ctx", "builder", "msg");
+    assert.ok(lower.includes("Builder has handed off to you"));
+
+    const mixed = buildHandoffPrompt("ctx", "Codex-Builder", "msg");
+    assert.ok(mixed.includes("Codex-Builder has handed off to you"));
   });
 });
 

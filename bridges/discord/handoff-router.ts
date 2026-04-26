@@ -358,6 +358,202 @@ export interface HandoffResult {
   nextHandoff: HandoffDirective | null;
 }
 
+/**
+ * Build the per-handoff agent prompt.
+ *
+ * Pure helper extracted from executeHandoff so production and replay
+ * paths produce byte-identical prompt strings on the same input. The
+ * format is `${context}\n\n${Capitalized fromAgent} has handed off to
+ * you with this request:\n${handoffMessage}`.
+ */
+export function buildHandoffPrompt(
+  context: string,
+  fromAgent: string,
+  handoffMessage: string,
+): string {
+  return `${context}\n\n${capitalize(fromAgent)} has handed off to you with this request:\n${handoffMessage}`;
+}
+
+export interface ExecuteHandoffCoreParams {
+  channelId: string;
+  toAgent: string;
+  prompt: string;
+  sessionKey: string;
+  runtime: AgentRuntime;
+  worktreePath?: string | null;
+  /** Wall-clock cap; default matches the original 180_000ms. */
+  timeoutMs?: number;
+}
+
+export type ExecuteHandoffCoreResult =
+  | {
+      ok: true;
+      agentName: string;
+      response: string;
+      nextHandoff: HandoffDirective | null;
+      sessionId: string | null;
+    }
+  | { ok: false; reason: "exit-nonzero"; errorMessage: string }
+  | { ok: false; reason: "no-response" }
+  | { ok: false; reason: "timeout" }
+  | { ok: false; reason: "parse-error"; errorMessage: string };
+
+/**
+ * Discord-decoupled spawn + parse for a single handoff step.
+ *
+ * Builds the runner config (codex or claude), spawns python3 detached,
+ * watches for output via FileWatcher, parses the response, persists the
+ * session ID, and returns a result variant. Does not touch Discord —
+ * the caller is responsible for translating error variants into user-
+ * facing notices.
+ */
+export async function executeHandoffCore(
+  params: ExecuteHandoffCoreParams,
+): Promise<ExecuteHandoffCoreResult> {
+  const {
+    channelId,
+    toAgent,
+    prompt,
+    sessionKey,
+    runtime,
+    worktreePath,
+    timeoutMs = 180_000,
+  } = params;
+
+  const outputFile = join(
+    TEMP_DIR,
+    `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+  );
+  let promptFile: string | null = null;
+
+  let pythonArgs: string[];
+  let childCwd: string;
+  let childEnv: Record<string, string>;
+
+  if (runtime === "codex") {
+    const config = await buildCodexConfig({
+      channelId,
+      prompt,
+      agentName: toAgent,
+      sessionKey,
+      taskId: "handoff",
+      worktreePath,
+    });
+
+    promptFile = join(
+      TEMP_DIR,
+      `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.prompt.txt`,
+    );
+    writeFileSync(promptFile, config.prompt, "utf-8");
+
+    pythonArgs = [
+      `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
+      outputFile,
+      "--timeout",
+      "180",
+      "--prompt-file",
+      promptFile,
+      ...config.runnerArgs,
+    ];
+    childCwd = config.cwd;
+    childEnv = config.env;
+  } else {
+    const config = await buildClaudeConfig({
+      channelId,
+      prompt,
+      agentName: toAgent,
+      sessionKey,
+      taskId: "handoff",
+      worktreePath,
+    });
+
+    pythonArgs = [
+      `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
+      outputFile,
+      "--timeout",
+      "180",
+      ...config.args,
+    ];
+    childCwd = config.cwd;
+    childEnv = config.env;
+  }
+
+  return new Promise<ExecuteHandoffCoreResult>((resolve) => {
+    const childProc = spawn("python3", pythonArgs, {
+      cwd: childCwd,
+      env: childEnv,
+      detached: true,
+      stdio: "ignore",
+    });
+    childProc.unref();
+
+    const watcher = new FileWatcher({
+      filePath: outputFile,
+      onFile: async (content: string) => {
+        untrackWatcher(watcher);
+
+        try {
+          if (promptFile && existsSync(promptFile)) {
+            unlinkSync(promptFile);
+          }
+          if (existsSync(outputFile)) {
+            unlinkSync(outputFile);
+          }
+
+          const result = JSON.parse(content);
+          const { stdout, stderr, returncode } = result;
+
+          if (returncode !== 0) {
+            const errorMsg = stderr?.trim() || `Agent exited with code ${returncode}`;
+            resolve({ ok: false, reason: "exit-nonzero", errorMessage: errorMsg });
+            return;
+          }
+
+          const responseText = runtime === "codex"
+            ? extractCodexResponse(result)
+            : extractResponse(stdout);
+          const sessionId = runtime === "codex"
+            ? extractCodexSessionId(result)
+            : extractSessionId(stdout);
+
+          if (sessionId) {
+            setSession(sessionKey, sessionId, runtime);
+          }
+
+          if (!responseText) {
+            resolve({ ok: false, reason: "no-response" });
+            return;
+          }
+
+          const nextHandoff = parseHandoff(responseText);
+          resolve({
+            ok: true,
+            agentName: toAgent,
+            response: responseText,
+            nextHandoff,
+            sessionId: sessionId ?? null,
+          });
+        } catch (err: any) {
+          console.error(`[HANDOFF] Error reading output: ${err.message}`);
+          resolve({ ok: false, reason: "parse-error", errorMessage: err.message });
+        }
+      },
+      onTimeout: async () => {
+        untrackWatcher(watcher);
+        if (promptFile && existsSync(promptFile)) {
+          unlinkSync(promptFile);
+        }
+        resolve({ ok: false, reason: "timeout" });
+      },
+      timeoutMs,
+      fallbackPollMs: 2000,
+      retryReadMs: 100,
+    });
+    trackWatcher(watcher);
+    watcher.start();
+  });
+}
+
 export async function executeHandoff(
   channel: TextChannel,
   fromAgent: string,
@@ -414,166 +610,62 @@ export async function executeHandoff(
   // Update active agent
   updateProject(channel.id, { activeAgent: toAgent });
 
-  // Build context and spawn target agent
+  // Build context (still Discord-coupled — fetches msg history) and final prompt.
   const context = await buildProjectContext(channel, toAgent, project, chainContext);
-  const prompt = `${context}\n\n${capitalize(fromAgent)} has handed off to you with this request:\n${handoffMessage}`;
+  const prompt = buildHandoffPrompt(context, fromAgent, handoffMessage);
 
-  // Build shared config
   const sessionKey = getProjectSessionKey(channel.id, toAgent);
   const runtime = resolveHandoffRuntime(channel.id, toAgent);
 
-  const outputFile = join(
-    TEMP_DIR,
-    `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
-  );
-  let promptFile: string | null = null;
+  // Show typing while the core runs.
+  channel.sendTyping().catch(() => {});
+  let coreDone = false;
+  const typingInterval = setInterval(() => {
+    if (coreDone) {
+      clearInterval(typingInterval);
+      return;
+    }
+    channel.sendTyping().catch(() => {});
+  }, 8000);
 
-  let pythonArgs: string[];
-  let childCwd: string;
-  let childEnv: Record<string, string>;
-
-  if (runtime === "codex") {
-    const config = await buildCodexConfig({
+  let result: ExecuteHandoffCoreResult;
+  try {
+    result = await executeHandoffCore({
       channelId: channel.id,
+      toAgent,
       prompt,
-      agentName: toAgent,
       sessionKey,
-      taskId: "handoff",
+      runtime,
       worktreePath,
     });
-
-    promptFile = join(TEMP_DIR, `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.prompt.txt`);
-    writeFileSync(promptFile, config.prompt, "utf-8");
-
-    pythonArgs = [
-      `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
-      outputFile,
-      "--timeout",
-      "180",
-      "--prompt-file",
-      promptFile,
-      ...config.runnerArgs,
-    ];
-    childCwd = config.cwd;
-    childEnv = config.env;
-  } else {
-    const config = await buildClaudeConfig({
-      channelId: channel.id,
-      prompt,
-      agentName: toAgent,
-      sessionKey,
-      taskId: "handoff",
-      worktreePath,
-    });
-
-    pythonArgs = [
-      `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
-      outputFile,
-      "--timeout",
-      "180",
-      ...config.args,
-    ];
-    childCwd = config.cwd;
-    childEnv = config.env;
+  } finally {
+    coreDone = true;
+    clearInterval(typingInterval);
   }
 
-  return new Promise((resolve) => {
-    const childProc = spawn("python3", pythonArgs, {
-      cwd: childCwd,
-      env: childEnv,
-      detached: true,
-      stdio: "ignore",
-    });
-    childProc.unref();
+  if (!result.ok) {
+    if (result.reason === "exit-nonzero") {
+      await channel.send(
+        `**${capitalize(toAgent)}:** Something went wrong:\n\`\`\`\n${result.errorMessage.slice(0, 500)}\n\`\`\``,
+      ).catch((err) => console.error(`[HANDOFF] Failed to send error notice: ${err.message}`));
+    } else if (result.reason === "no-response") {
+      await channel.send(
+        `**${capitalize(toAgent)}:** Got a response but couldn't parse it.`,
+      ).catch((err) => console.error(`[HANDOFF] Failed to send parse-error notice: ${err.message}`));
+    } else if (result.reason === "timeout") {
+      await channel.send(
+        `**${capitalize(toAgent)}:** Timed out after 3 minutes.`,
+      ).catch((err) => console.error(`[HANDOFF] Failed to send timeout notice: ${err.message}`));
+    }
+    // parse-error: console-logged inside core; no Discord notice (matches original).
+    return null;
+  }
 
-    // Show typing
-    channel.sendTyping().catch(() => {});
-
-    // Use FileWatcher instead of polling
-    const watcher = new FileWatcher({
-      filePath: outputFile,
-      onFile: async (content: string) => {
-        untrackWatcher(watcher);
-
-        try {
-          // Clean up
-          if (promptFile && existsSync(promptFile)) {
-            unlinkSync(promptFile);
-          }
-          if (existsSync(outputFile)) {
-            unlinkSync(outputFile);
-          }
-
-          const result = JSON.parse(content);
-          const { stdout, stderr, returncode } = result;
-
-          if (returncode !== 0) {
-            const errorMsg = stderr?.trim() || `Agent exited with code ${returncode}`;
-            await channel.send(
-              `**${capitalize(toAgent)}:** Something went wrong:\n\`\`\`\n${errorMsg.slice(0, 500)}\n\`\`\``
-            ).catch((err) => console.error(`[HANDOFF] Failed to send error notice: ${err.message}`));
-            resolve(null);
-            return;
-          }
-
-          const responseText = runtime === "codex"
-            ? extractCodexResponse(result)
-            : extractResponse(stdout);
-          const sessionId = runtime === "codex"
-            ? extractCodexSessionId(result)
-            : extractSessionId(stdout);
-
-          if (sessionId) {
-            setSession(sessionKey, sessionId, runtime);
-          }
-
-          if (!responseText) {
-            await channel.send(
-              `**${capitalize(toAgent)}:** Got a response but couldn't parse it.`
-            ).catch((err) => console.error(`[HANDOFF] Failed to send parse-error notice: ${err.message}`));
-            resolve(null);
-            return;
-          }
-
-          // Check if this agent's output contains another handoff
-          const nextHandoff = parseHandoff(responseText);
-
-          resolve({
-            agentName: toAgent,
-            response: responseText,
-            nextHandoff,
-          });
-        } catch (err: any) {
-          console.error(`[HANDOFF] Error reading output: ${err.message}`);
-          resolve(null);
-        }
-      },
-      onTimeout: async () => {
-        untrackWatcher(watcher);
-        if (promptFile && existsSync(promptFile)) {
-          unlinkSync(promptFile);
-        }
-        await channel.send(
-          `**${capitalize(toAgent)}:** Timed out after 3 minutes.`
-        ).catch((err) => console.error(`[HANDOFF] Failed to send timeout notice: ${err.message}`));
-        resolve(null);
-      },
-      timeoutMs: 180_000,
-      fallbackPollMs: 2000,
-      retryReadMs: 100,
-    });
-    trackWatcher(watcher);
-    watcher.start();
-
-    // Keep typing indicator alive
-    const typingInterval = setInterval(() => {
-      if (watcher.isStopped()) {
-        clearInterval(typingInterval);
-        return;
-      }
-      channel.sendTyping().catch(() => {});
-    }, 8000);
-  });
+  return {
+    agentName: result.agentName,
+    response: result.response,
+    nextHandoff: result.nextHandoff,
+  };
 }
 
 export interface ExecuteChainCoreParams {
