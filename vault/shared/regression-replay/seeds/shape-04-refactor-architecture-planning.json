@@ -1,0 +1,19 @@
+{
+  "id": "shape-04",
+  "shape": "refactor-architecture-planning",
+  "category": "planning",
+  "difficulty": "medium",
+  "released_at": "2026-04-25",
+  "source": null,
+  "expected_agents": ["orchestrator", "researcher"],
+  "runtime": "claude",
+  "parameter_slots": {
+    "component": "<system or module to refactor>",
+    "goal": "<intended improvement, e.g. 'unify dispatch behind adapter interface'>"
+  },
+  "prompt_template": "Propose a plan to refactor {component} to {goal}. Output: (a) target shape, (b) which files change at what line ranges, (c) migration steps in order, (d) tests that need updating. PLAN ONLY — do not modify any files.",
+  "tests": ["orchestrator delegation", "multi-file reasoning", "migration sequencing"],
+  "current_pin": null,
+  "rotation_policy": "quarterly_or_on_project_change",
+  "notes": "Tests planning rigor. Pin should target a refactor that's already been planned/executed so baseline can be compared against the actual outcome."
+}

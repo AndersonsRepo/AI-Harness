@@ -1,0 +1,11 @@
+{
+  "id": "pair-NNN",
+  "captured_at": "YYYY-MM-DD",
+  "agent_role": "researcher",
+  "shape": "shape-XX-<slug>",
+  "context": "<original prompt + relevant channel context>",
+  "candidate_output": "<the agent output that was wrong (truncate to ~2000 chars)>",
+  "your_critique": "<what was wrong, in your own words>",
+  "verdict": "regress",
+  "rationale": "<why this verdict; what should have happened>"
+}

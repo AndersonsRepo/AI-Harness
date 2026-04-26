@@ -1,0 +1,19 @@
+{
+  "id": "shape-10",
+  "shape": "codex-builder-small-change",
+  "category": "builder",
+  "difficulty": "medium",
+  "released_at": "2026-04-25",
+  "source": null,
+  "expected_agents": ["codex-builder"],
+  "runtime": "codex",
+  "parameter_slots": {
+    "file": "<target file for the change>",
+    "change_description": "<small, well-scoped modification>"
+  },
+  "prompt_template": "In a discardable git worktree, modify {file} to {change_description}. Return the diff. Do not commit.",
+  "tests": ["Codex spawn + sandbox", "worktree discipline", "diff quality", "runtime=codex routing"],
+  "current_pin": null,
+  "rotation_policy": "quarterly_or_on_project_change",
+  "notes": "Only write-path seed. Runs in a worktree to keep replay safe. Tests Codex builder end-to-end including the prompt-file pattern, runner-internal retry, and sandbox enforcement (workspace-write for builder vs read-only for non-mutating roles)."
+}

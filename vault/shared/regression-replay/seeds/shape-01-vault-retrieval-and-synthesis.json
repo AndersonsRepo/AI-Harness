@@ -1,0 +1,18 @@
+{
+  "id": "shape-01",
+  "shape": "vault-retrieval-and-synthesis",
+  "category": "retrieval",
+  "difficulty": "easy",
+  "released_at": "2026-04-25",
+  "source": null,
+  "expected_agents": ["researcher"],
+  "runtime": "claude",
+  "parameter_slots": {
+    "topic": "<subject for vault retrieval, e.g. 'distributed systems' or 'authentication design'>"
+  },
+  "prompt_template": "Find vault learnings related to {topic}. Summarize the top themes that emerge with supporting entry IDs. Do not modify any files.",
+  "tests": ["vault retrieval", "semantic synthesis", "tag-filtered search"],
+  "current_pin": null,
+  "rotation_policy": "quarterly_or_on_project_change",
+  "notes": "Stable shape. Capture pin from any real `find vault entries about X` task. Retrieval Jaccard is the primary structural signal."
+}

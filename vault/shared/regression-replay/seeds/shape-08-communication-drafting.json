@@ -1,0 +1,20 @@
+{
+  "id": "shape-08",
+  "shape": "communication-drafting",
+  "category": "creative",
+  "difficulty": "easy",
+  "released_at": "2026-04-25",
+  "source": null,
+  "expected_agents": ["researcher"],
+  "runtime": "claude",
+  "parameter_slots": {
+    "medium": "<LinkedIn post | email | tweet thread | etc.>",
+    "subject": "<topic of the communication>",
+    "voice_anchor": "<reference vault entries or prior posts that establish voice>"
+  },
+  "prompt_template": "Draft a {medium} about {subject}. Match the voice in {voice_anchor}. Output the draft only. Do not modify any files.",
+  "tests": ["voice matching", "creative writing", "length appropriateness"],
+  "current_pin": null,
+  "rotation_policy": "quarterly_or_on_project_change",
+  "notes": "Tests creative writing with a calibrated voice anchor. Hardest to judge automatically — leans heavily on calibration anchors. Voice drift is a real regression mode worth tracking."
+}

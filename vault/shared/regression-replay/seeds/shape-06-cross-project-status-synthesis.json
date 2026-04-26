@@ -1,0 +1,19 @@
+{
+  "id": "shape-06",
+  "shape": "cross-project-status-synthesis",
+  "category": "synthesis",
+  "difficulty": "medium",
+  "released_at": "2026-04-25",
+  "source": null,
+  "expected_agents": ["orchestrator", "researcher"],
+  "runtime": "claude",
+  "parameter_slots": {
+    "project": "<project to status-summarize>",
+    "time_window": "<period, e.g. 'last 2 weeks' or 'since 2026-04-01'>"
+  },
+  "prompt_template": "Summarize the current status of {project} based on activity in {time_window}. Pull from task_telemetry, recent vault learnings, and project-knowledge files. Output: (a) what shipped, (b) what's blocked, (c) what's next. Do not modify any files.",
+  "tests": ["telemetry retrieval", "vault synthesis", "multi-source aggregation"],
+  "current_pin": null,
+  "rotation_policy": "quarterly_or_on_project_change",
+  "notes": "Tests cross-source synthesis. Baseline output should include the actual answer the user accepted at pin time."
+}

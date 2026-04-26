@@ -1,0 +1,19 @@
+{
+  "id": "shape-02",
+  "shape": "code-reading-walkthrough",
+  "category": "code-reading",
+  "difficulty": "medium",
+  "released_at": "2026-04-25",
+  "source": null,
+  "expected_agents": ["researcher"],
+  "runtime": "claude",
+  "parameter_slots": {
+    "module": "<file or directory to trace through>",
+    "subsystem": "<behavior or path to explain>"
+  },
+  "prompt_template": "Trace through {module} and explain how {subsystem} works. Reference specific files and line numbers. Do not modify any files.",
+  "tests": ["multi-file Read/Grep navigation", "structural understanding", "explanation quality"],
+  "current_pin": null,
+  "rotation_policy": "quarterly_or_on_project_change",
+  "notes": "Tests Read/Grep/Glob usage and ability to construct a multi-file trace. Pin should target a non-trivial subsystem (>3 files involved)."
+}

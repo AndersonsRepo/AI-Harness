@@ -67,6 +67,11 @@ vault/agents/*
 !vault/agents/.gitkeep
 vault/shared/*digest.md
 
+# Regression-replay private artifacts (templates and code ship; captured data does not)
+vault/shared/regression-replay/baselines/
+vault/shared/regression-replay/runs/
+vault/shared/regression-replay/calibration/pair-[0-9]*.json
+
 # Local/private Claude agent definitions
 .claude/agents/client-project.md
 .claude/agents/mento.md

@@ -1,0 +1,19 @@
+{
+  "id": "shape-03",
+  "shape": "production-debugging-investigation",
+  "category": "debugging",
+  "difficulty": "hard",
+  "released_at": "2026-04-25",
+  "source": null,
+  "expected_agents": ["orchestrator", "researcher"],
+  "runtime": "claude",
+  "parameter_slots": {
+    "project": "<project name, e.g. 'web-app' or 'data-pipeline'>",
+    "error_or_symptom": "<observable failure, e.g. 'slow query on dashboard' or 'workers stuck in pending'>"
+  },
+  "prompt_template": "Investigate this issue in {project}: {error_or_symptom}. Find root cause. Output: (a) analysis, (b) candidate fix locations, (c) any vault precedents. PLAN/ANALYSIS ONLY — do not modify any files.",
+  "tests": ["debugging trace", "vault precedent retrieval", "orchestrator delegation", "cross-runtime reasoning"],
+  "current_pin": null,
+  "rotation_policy": "quarterly_or_on_project_change",
+  "notes": "Hardest shape. Pin should be a real bug under investigation at the time of capture; baseline output should include the actual conclusions reached. Replay tests if the agent re-derives similar conclusions."
+}

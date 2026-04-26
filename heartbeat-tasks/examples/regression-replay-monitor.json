@@ -1,0 +1,11 @@
+{
+  "_comment": "Tier-1 regression-replay monitor. Copy to heartbeat-tasks/regression-replay-monitor.json to activate. Generates a plist via heartbeat-tasks/scripts/generate-plist.py.",
+  "type": "script",
+  "script": "regression-replay-monitor.py",
+  "schedule": "1h",
+  "timeout": 300,
+  "enabled": true,
+  "notify": null,
+  "discord_channel": null,
+  "description": "Watches commits for changes to files that affect retrieval, dispatch, or context. When detected, runs tier-1 structural-metrics check across all pinned regression-replay seeds. Deterministic — no LLM calls. Cold-start: first run records current HEAD; subsequent runs detect commits since."
+}

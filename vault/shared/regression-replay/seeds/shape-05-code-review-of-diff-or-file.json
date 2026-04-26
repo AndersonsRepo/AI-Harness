@@ -1,0 +1,18 @@
+{
+  "id": "shape-05",
+  "shape": "code-review-of-diff-or-file",
+  "category": "review",
+  "difficulty": "medium",
+  "released_at": "2026-04-25",
+  "source": null,
+  "expected_agents": ["reviewer"],
+  "runtime": "claude",
+  "parameter_slots": {
+    "target_path_or_diff": "<file path or pinned diff to review>"
+  },
+  "prompt_template": "Review {target_path_or_diff} and identify potential issues — missing error handling, unsafe defaults, drift between docs and behavior, or correctness concerns. For each: cite the line, describe the issue, suggest a fix direction. Do NOT modify any files.",
+  "tests": ["close code reading", "issue identification", "structured review output"],
+  "current_pin": null,
+  "rotation_policy": "quarterly_or_on_project_change",
+  "notes": "Pin should be a real diff or file under recent review; baseline captures the actual review issued. Stability concern: as the file evolves, issues found will shift — that's expected. Judge focuses on whether issues identified are real, not whether they match prior runs verbatim."
+}

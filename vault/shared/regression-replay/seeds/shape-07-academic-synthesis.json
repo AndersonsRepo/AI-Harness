@@ -1,0 +1,20 @@
+{
+  "id": "shape-07",
+  "shape": "academic-synthesis",
+  "category": "synthesis",
+  "difficulty": "medium",
+  "released_at": "2026-04-25",
+  "source": null,
+  "expected_agents": ["education"],
+  "runtime": "claude",
+  "parameter_slots": {
+    "course": "<course name, e.g. 'CS 401' or 'Philosophy 101'>",
+    "topic": "<specific topic being synthesized>",
+    "output_type": "<study guide | exam practice | concept summary | paper section>"
+  },
+  "prompt_template": "From the {course} vault notes, synthesize a {output_type} on {topic}. Reference specific notes by file. Do not modify any files.",
+  "tests": ["course-notes retrieval", "education-agent restrictions", "synthesis quality"],
+  "current_pin": null,
+  "rotation_policy": "quarterly_or_on_project_change",
+  "notes": "Tests the education agent (read-only, course-channel-scoped). Pin should be a real study session output the user found useful."
+}

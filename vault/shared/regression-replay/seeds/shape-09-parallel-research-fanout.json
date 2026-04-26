@@ -1,0 +1,19 @@
+{
+  "id": "shape-09",
+  "shape": "parallel-research-fanout",
+  "category": "parallel",
+  "difficulty": "hard",
+  "released_at": "2026-04-25",
+  "source": null,
+  "expected_agents": ["orchestrator", "researcher", "researcher"],
+  "runtime": "claude",
+  "parameter_slots": {
+    "question_a": "<first investigation question>",
+    "question_b": "<second investigation question, related to question_a>"
+  },
+  "prompt_template": "Investigate two questions in parallel — emit a [PARALLEL:researcher,researcher] directive with one task per researcher: (a) {question_a}, (b) {question_b}. Then synthesize the answers. Output the synthesis. Do not modify any files.",
+  "tests": ["[PARALLEL:] directive emission", "tmux fan-out", "result synthesis", "max-4 parallel cap respect"],
+  "current_pin": null,
+  "rotation_policy": "quarterly_or_on_project_change",
+  "notes": "Specifically tests the parallel orchestration path. If parallel breaks, this seed should regress noisily. Capture parallel_group_count to confirm fan-out actually happened."
+}
