@@ -3,9 +3,9 @@
   "type": "script",
   "script": "regression-replay-weekly.py",
   "cron": "0 2 * * 0",
-  "timeout": 1800,
+  "timeout": 5400,
   "enabled": true,
   "notify": null,
   "discord_channel": null,
-  "description": "Runs each pinned seed N=3 times at T=0, judges each candidate vs baseline using PoLL (Sonnet + Codex), aggregates Pass^3. Writes a weekly scorecard and appends a tier-2 row to timeline.md. Cost: ~$10-18 per run with default 10-seed × 3-run × 2-judge matrix."
+  "description": "Runs each pinned seed N=3 times at T=0, judges each candidate vs baseline using PoLL (Sonnet + Codex), aggregates Pass^3. Writes a weekly scorecard with cost breakdown + candidate output paths, appends a tier-2 row to timeline.md. Cost validated 2026-04-25: $2.34/seed at N=3 → ~$23/week at full 10-seed coverage. Wall time ~4.6 min/seed → ~45-60 min for 10 seeds (90 min timeout)."
 }

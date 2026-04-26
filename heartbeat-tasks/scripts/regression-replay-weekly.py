@@ -68,37 +68,68 @@ def save_state(state: dict) -> None:
     os.replace(tmp, STATE_FILE)
 
 
-def run_ts_monitor() -> dict:
+def run_ts_monitor(extra_args: list[str] | None = None) -> dict:
+    """Invoke tier2-monitor.ts and return its JSON report.
+
+    On a clean run, the report's `partial` field is False. On a crash mid-run,
+    the TS monitor still leaves an incremental checkpoint at REPLAY_REPORT_FILE
+    (written after each completed seed) — we read that and surface it with the
+    `partial: true` flag preserved, so the scorecard can show "X of Y seeds
+    completed before crash" rather than throwing the partial signal away.
+    """
     fd, report_path = tempfile.mkstemp(prefix="replay-tier2-", suffix=".json")
     os.close(fd)
     try:
         cmd = ["npx", "tsx", str(TS_ENTRY)]
+        if extra_args:
+            cmd.extend(extra_args)
         env = {
             **os.environ,
             "HARNESS_ROOT": str(HARNESS_ROOT),
             "REPLAY_REPORT_FILE": report_path,
         }
-        # Tier 2 is heavy — allow up to 30 min total wall time for 10 seeds × 3 runs × judging.
+        # Tier 2 is heavy. Cost-validation run on shape-01 at N=3 took ~4.6 min;
+        # 10-seed × 3-run × 2-judge full matrix extrapolates to ~45-60 min.
+        # Allow 90 min so a real Sunday run can complete; partial-checkpoint
+        # behavior salvages anything that runs before the timer fires.
         result = subprocess.run(
             cmd,
             cwd=HARNESS_ROOT,
             capture_output=True,
             text=True,
             env=env,
-            timeout=1800,
+            timeout=5400,
             check=False,
         )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"tier2-monitor exit {result.returncode}: {result.stderr[-1000:]}"
-            )
+
+        # Try to read the report file regardless of exit code — on crash we
+        # may still have a partial checkpoint with completed-seed signal.
+        report = None
         try:
-            with open(report_path) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError) as e:
+            if os.path.exists(report_path) and os.path.getsize(report_path) > 0:
+                with open(report_path) as f:
+                    report = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            report = None
+
+        if result.returncode != 0:
+            if report is None:
+                raise RuntimeError(
+                    f"tier2-monitor exit {result.returncode} and no parseable "
+                    f"report on disk; stderr: {result.stderr[-1000:]}"
+                )
+            # Partial run survived to disk — flag it as partial regardless of
+            # whatever the TS process said before crashing.
+            report["partial"] = True
+            report["crash_stderr_tail"] = result.stderr[-500:]
+            return report
+
+        if report is None:
             raise RuntimeError(
-                f"tier2-monitor did not produce a parseable report: {e}; stderr: {result.stderr[-500:]}"
+                f"tier2-monitor exited 0 but produced no parseable report; "
+                f"stderr: {result.stderr[-500:]}"
             )
+        return report
     finally:
         try:
             os.remove(report_path)
@@ -112,16 +143,42 @@ def write_scorecard(report: dict) -> Path:
     fname = f"{now.strftime('%Y-%m-%d')}-weekly.md"
     path = RUNS_DIR / fname
 
+    partial = bool(report.get("partial"))
     lines: list[str] = []
-    lines.append(f"# Tier 2 Weekly Run — {now.isoformat(timespec='seconds')}")
+    title = "Tier 2 Weekly Run"
+    if partial:
+        title += " (PARTIAL — process did not complete)"
+    lines.append(f"# {title} — {now.isoformat(timespec='seconds')}")
     lines.append("")
+
+    if partial:
+        lines.append(
+            "> ⚠ **Partial run.** The TS monitor crashed or timed out before all selected "
+            "seeds completed. Results below are an incremental checkpoint and may not include "
+            "every seed in the filter."
+        )
+        if report.get("crash_stderr_tail"):
+            lines.append("")
+            lines.append("```")
+            lines.append("crash stderr tail:")
+            lines.append(report["crash_stderr_tail"])
+            lines.append("```")
+        lines.append("")
+
     lines.append(f"- **Outcome**: `{report.get('outcome', 'unknown')}`")
+    selected = report.get("selected_seed_count") or report.get("evaluated_seeds", 0)
     lines.append(
-        f"- **Evaluated**: {report.get('evaluated_seeds', 0)} of {report.get('total_seeds', 0)} seeds"
+        f"- **Evaluated**: {report.get('evaluated_seeds', 0)} of {selected} selected "
+        f"({report.get('total_seeds', 0)} total seeds in fixture)"
     )
+    if report.get("seed_filter"):
+        lines.append(f"- **Seed filter**: `{','.join(report['seed_filter'])}`")
     lines.append(f"- **Runs per seed**: Pass^{report.get('num_runs_per_seed', 3)}")
     lines.append(f"- **Harness version**: {report.get('harness_version', '?')}")
     lines.append(f"- **Rubric version**: {report.get('rubric_version', '?')}")
+    cost = report.get("total_cost_usd")
+    if cost is not None:
+        lines.append(f"- **Total cost (reported)**: ${cost:.4f}")
     lines.append("")
     lines.append("## Per-seed results")
     lines.append("")
@@ -154,6 +211,19 @@ def write_scorecard(report: dict) -> Path:
                 lines.append(
                     f"  - run {i + 1}: `{p.get('final')}` ({judge_summary}){disagree}"
                 )
+
+        if s.get("candidate_paths"):
+            lines.append("- candidate outputs (forensic inspection):")
+            for cp in s["candidate_paths"]:
+                lines.append(f"  - `{cp}`")
+
+        cost_obj = s.get("cost") or {}
+        if cost_obj:
+            lines.append(
+                f"- cost: agent ${cost_obj.get('agent_cost_usd', 0):.4f}, "
+                f"judges ${cost_obj.get('judge_cost_usd', 0):.4f}, "
+                f"total ${cost_obj.get('total_usd', 0):.4f}"
+            )
 
         if s.get("errors"):
             lines.append("- errors:")
@@ -192,6 +262,9 @@ def append_timeline_row(report: dict) -> None:
                 disagreement_count += 1
 
     now = datetime.datetime.now()
+    cost = report.get("total_cost_usd")
+    cost_str = f"  cost=${cost:.2f}" if cost is not None else ""
+    partial_str = "  [PARTIAL]" if report.get("partial") else ""
     row = (
         f"\n{now.strftime('%Y-%m-%d %H:%M')}  "
         f"weekly   "
@@ -200,19 +273,42 @@ def append_timeline_row(report: dict) -> None:
         f"regress={regress_count}  "
         f"flaky={flaky_count}  "
         f"disagreement={disagreement_count}  "
-        f"outcome={report.get('outcome', '?')}  "
-        f"({len(evaluated)}/{len(seeds)} evaluated)\n"
+        f"outcome={report.get('outcome', '?')}{cost_str}  "
+        f"({len(evaluated)}/{len(seeds)} evaluated){partial_str}\n"
     )
     with open(TIMELINE_FILE, "a", encoding="utf-8") as f:
         f.write(row)
 
 
+def parse_cli_args() -> dict:
+    """Parse CLI flags so the wrapper can be invoked manually for testing.
+
+    Recognized:
+      --seed shape-01[,shape-02]   Restrict run to listed seeds.
+    """
+    args: dict = {}
+    argv = sys.argv[1:]
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--seed" and i + 1 < len(argv):
+            args["seed"] = argv[i + 1]
+            i += 2
+        else:
+            i += 1
+    return args
+
+
 def main() -> int:
-    log("Starting tier-2 weekly run")
+    cli = parse_cli_args()
+    log("Starting tier-2 weekly run" + (f" (--seed {cli['seed']})" if "seed" in cli else ""))
     state = load_state()
 
+    extra_args: list[str] = []
+    if cli.get("seed"):
+        extra_args = ["--seed", cli["seed"]]
+
     try:
-        report = run_ts_monitor()
+        report = run_ts_monitor(extra_args)
     except Exception as e:
         log(f"tier2-monitor failed: {e}")
         return 1

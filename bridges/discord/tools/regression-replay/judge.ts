@@ -46,6 +46,9 @@ export interface JudgeVerdict {
   ok: boolean;
   error?: string;
   durationMs: number;
+  // Cost in USD if the runner surfaced it (sonnet via claude-runner;
+  // codex-runner does not currently emit cost). Undefined when not available.
+  costUsd?: number;
 }
 
 export interface JudgeOptions {
@@ -178,12 +181,28 @@ function uniqueRequestId(): string {
   return `judge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+interface JudgeProcessResult {
+  ok: boolean;
+  raw: string;
+  error?: string;
+  costUsd?: number;
+}
+
+function extractJudgeCostFromInner(inner: string): number | undefined {
+  try {
+    const parsed = JSON.parse(inner);
+    if (typeof parsed?.total_cost_usd === "number") return parsed.total_cost_usd;
+  } catch {}
+  const m = inner.match(/"total_cost_usd"\s*:\s*([0-9.eE+\-]+)/);
+  return m ? parseFloat(m[1]) : undefined;
+}
+
 async function spawnJudgeProcess(
   judge: JudgeName,
   prompt: string,
   outputFile: string,
   timeoutMs: number,
-): Promise<{ ok: boolean; raw: string; error?: string }> {
+): Promise<JudgeProcessResult> {
   return new Promise((resolve) => {
     const harnessRoot = HARNESS_ROOT;
     let cmd: string;
@@ -256,26 +275,25 @@ async function spawnJudgeProcess(
       if (code === 0 && existsSync(outputFile)) {
         try {
           const fileRaw = readFileSync(outputFile, "utf-8");
-          // Both runners produce {"stdout": "...", "stderr": "...", "returncode": N, ...}.
-          // codex-runner adds {"threadId": ..., "lastMessage": <final text>} which is
-          // exactly the response we want. claude-runner's stdout is a single-JSON
-          // result object whose .result field has the response text.
           try {
             const envelope = JSON.parse(fileRaw);
+            const innerStdout =
+              typeof envelope?.stdout === "string" ? envelope.stdout : "";
+            const costUsd = innerStdout
+              ? extractJudgeCostFromInner(innerStdout)
+              : undefined;
             if (judge === "codex") {
               if (typeof envelope?.lastMessage === "string") {
-                resolve({ ok: true, raw: envelope.lastMessage });
+                resolve({ ok: true, raw: envelope.lastMessage, costUsd });
                 return;
               }
-              // Fall back to inner stdout (JSONL) if lastMessage missing.
-              if (typeof envelope?.stdout === "string") {
-                resolve({ ok: true, raw: envelope.stdout });
+              if (innerStdout) {
+                resolve({ ok: true, raw: innerStdout, costUsd });
                 return;
               }
             }
-            // sonnet path: pass inner stdout to extractTextFromJudgeRaw.
-            if (typeof envelope?.stdout === "string") {
-              resolve({ ok: true, raw: envelope.stdout });
+            if (innerStdout) {
+              resolve({ ok: true, raw: innerStdout, costUsd });
               return;
             }
           } catch {
@@ -352,6 +370,7 @@ export async function runJudge(opts: JudgeOptions): Promise<JudgeVerdict> {
         ok: false,
         error: result.error,
         durationMs: Date.now() - startedAt,
+        costUsd: result.costUsd,
       };
     }
 
@@ -367,6 +386,7 @@ export async function runJudge(opts: JudgeOptions): Promise<JudgeVerdict> {
         ok: false,
         error: "verdict-parse-failure",
         durationMs: Date.now() - startedAt,
+        costUsd: result.costUsd,
       };
     }
 
@@ -378,6 +398,7 @@ export async function runJudge(opts: JudgeOptions): Promise<JudgeVerdict> {
       raw: text,
       ok: true,
       durationMs: Date.now() - startedAt,
+      costUsd: result.costUsd,
     };
   } finally {
     try {

@@ -10,7 +10,8 @@
 // Invoked by heartbeat-tasks/scripts/regression-replay-weekly.py.
 // IPC: writes JSON to REPLAY_REPORT_FILE (env var), same pattern as tier 1.
 
-import { writeFileSync, renameSync } from "fs";
+import { writeFileSync, renameSync, mkdirSync, existsSync } from "fs";
+import { join } from "path";
 import { runAgent } from "./spawn-helper.js";
 import { runJudge } from "./judge.js";
 import { aggregatePoll, type PollResult } from "./poll-aggregator.js";
@@ -22,6 +23,10 @@ import {
   type Seed,
   type Baseline,
 } from "./seed-loader.js";
+
+const HARNESS_ROOT = process.env.HARNESS_ROOT ?? process.cwd();
+const REPLAY_ROOT = join(HARNESS_ROOT, "vault", "shared", "regression-replay");
+const CANDIDATES_DIR = join(REPLAY_ROOT, "runs", "candidates");
 
 const TIER2_CHANNEL_ID = "regression-replay-tier2";
 const NUM_RUNS_PER_SEED = parseInt(
@@ -46,6 +51,15 @@ interface SeedResult {
   per_run_polls?: PollResult[];
   errors?: string[];
   total_duration_ms?: number;
+  // Paths to candidate output files relative to REPLAY_ROOT (one per run, in order).
+  // Allows forensic inspection of what the agent actually said vs the baseline.
+  candidate_paths?: string[];
+  // Cost breakdown for this seed across all runs and judges.
+  cost?: {
+    agent_cost_usd: number;
+    judge_cost_usd: number;
+    total_usd: number;
+  };
 }
 
 interface RunReport {
@@ -63,6 +77,28 @@ interface RunReport {
     | "no_pins"
     | "judge_failure";
   seeds: SeedResult[];
+  seed_filter: string[] | null;
+  // True when the report was emitted before the run completed (incremental
+  // checkpoint). Python wrapper renders with a "partial run" warning.
+  partial: boolean;
+  selected_seed_count: number;
+  total_cost_usd: number;
+}
+
+function persistCandidate(
+  seedId: string,
+  runIndex: number,
+  text: string,
+): string {
+  if (!existsSync(CANDIDATES_DIR)) {
+    mkdirSync(CANDIDATES_DIR, { recursive: true });
+  }
+  const date = new Date().toISOString().slice(0, 10);
+  const filename = `${date}-${seedId}-run-${runIndex + 1}.txt`;
+  const fullPath = join(CANDIDATES_DIR, filename);
+  writeFileSync(fullPath, text, "utf-8");
+  // Return path relative to REPLAY_ROOT for the scorecard.
+  return `runs/candidates/${filename}`;
 }
 
 async function evaluateSeed(seed: Seed): Promise<SeedResult> {
@@ -85,6 +121,9 @@ async function evaluateSeed(seed: Seed): Promise<SeedResult> {
   const runtime = (seed.runtime as "claude" | "codex") || "claude";
   const errors: string[] = [];
   const perRunPolls: PollResult[] = [];
+  const candidatePaths: string[] = [];
+  let agentCostUsd = 0;
+  let judgeCostUsd = 0;
 
   for (let i = 0; i < NUM_RUNS_PER_SEED; i++) {
     const agentResult = await runAgent({
@@ -93,6 +132,9 @@ async function evaluateSeed(seed: Seed): Promise<SeedResult> {
       prompt,
       channelId: TIER2_CHANNEL_ID,
     });
+    if (typeof agentResult.costUsd === "number") {
+      agentCostUsd += agentResult.costUsd;
+    }
 
     if (!agentResult.ok || !agentResult.responseText) {
       errors.push(
@@ -106,6 +148,22 @@ async function evaluateSeed(seed: Seed): Promise<SeedResult> {
         evidence_summary: `agent run failed: ${agentResult.error ?? "no response"}`,
       });
       continue;
+    }
+
+    // Persist candidate text for forensic inspection. Even pass-verdict runs
+    // are kept — useful for tracking output drift over time. A separate
+    // retention job can rotate these later.
+    try {
+      const candidatePath = persistCandidate(
+        seed.id,
+        i,
+        agentResult.responseText,
+      );
+      candidatePaths.push(candidatePath);
+    } catch (e) {
+      errors.push(
+        `run ${i + 1}: failed to persist candidate (${(e as Error).message})`,
+      );
     }
 
     // PoLL judging — Sonnet + Codex, in parallel.
@@ -127,6 +185,12 @@ async function evaluateSeed(seed: Seed): Promise<SeedResult> {
         prompt,
       }),
     ]);
+    if (typeof sonnetVerdict.costUsd === "number") {
+      judgeCostUsd += sonnetVerdict.costUsd;
+    }
+    if (typeof codexVerdict.costUsd === "number") {
+      judgeCostUsd += codexVerdict.costUsd;
+    }
 
     const poll = aggregatePoll([sonnetVerdict, codexVerdict]);
     perRunPolls.push(poll);
@@ -143,11 +207,49 @@ async function evaluateSeed(seed: Seed): Promise<SeedResult> {
     per_run_polls: perRunPolls,
     errors: errors.length > 0 ? errors : undefined,
     total_duration_ms: Date.now() - startedAt,
+    candidate_paths: candidatePaths.length > 0 ? candidatePaths : undefined,
+    cost: {
+      agent_cost_usd: round4(agentCostUsd),
+      judge_cost_usd: round4(judgeCostUsd),
+      total_usd: round4(agentCostUsd + judgeCostUsd),
+    },
   };
 }
 
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000;
+}
+
+function parseSeedFilter(argv: string[]): string[] | null {
+  // --seed shape-01,shape-03  → restrict run to those seeds
+  // --seed shape-01           → single seed
+  // (none)                    → all seeds
+  for (let i = 2; i < argv.length; i++) {
+    if (argv[i] === "--seed" && i + 1 < argv.length) {
+      return argv[i + 1].split(",").map((s) => s.trim()).filter(Boolean);
+    }
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
-  const seeds = loadSeeds();
+  const allSeeds = loadSeeds();
+  const filter = parseSeedFilter(process.argv);
+  const seeds = filter
+    ? allSeeds.filter((s) => filter.includes(s.id))
+    : allSeeds;
+
+  if (filter && seeds.length === 0) {
+    process.stderr.write(
+      `[tier2-monitor] --seed filter '${filter.join(",")}' matched no seeds\n`,
+    );
+  }
+  if (filter) {
+    process.stderr.write(
+      `[tier2-monitor] running ${seeds.length} of ${allSeeds.length} seeds (filter: ${filter.join(",")})\n`,
+    );
+  }
+
   const results: SeedResult[] = [];
 
   for (const seed of seeds) {
@@ -161,8 +263,24 @@ async function main(): Promise<void> {
         "\n",
     );
     results.push(result);
+    // Incremental checkpoint: write the report after each seed so a crash
+    // mid-run still leaves usable signal on disk. The partial flag tells the
+    // Python wrapper that not every seed has completed yet.
+    emitReport(
+      buildReport(allSeeds, seeds, results, /*partial=*/ true, filter),
+    );
   }
 
+  emitReport(buildReport(allSeeds, seeds, results, /*partial=*/ false, filter));
+}
+
+function buildReport(
+  allSeeds: Seed[],
+  selected: Seed[],
+  results: SeedResult[],
+  partial: boolean,
+  filter: string[] | null,
+): RunReport {
   const evaluated = results.filter(
     (r) =>
       r.status !== "no_pin" &&
@@ -189,18 +307,25 @@ async function main(): Promise<void> {
     else outcome = "ok";
   }
 
-  const report: RunReport = {
+  const totalCost = evaluated.reduce(
+    (acc, r) => acc + (r.cost?.total_usd ?? 0),
+    0,
+  );
+
+  return {
     run_at: new Date().toISOString(),
     rubric_version: 2,
     harness_version: 1,
-    total_seeds: seeds.length,
+    total_seeds: allSeeds.length,
     evaluated_seeds: evaluated.length,
     num_runs_per_seed: NUM_RUNS_PER_SEED,
     outcome,
     seeds: results,
+    seed_filter: filter,
+    partial,
+    selected_seed_count: selected.length,
+    total_cost_usd: round4(totalCost),
   };
-
-  emitReport(report);
 }
 
 function emitReport(report: unknown): void {

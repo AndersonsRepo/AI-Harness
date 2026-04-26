@@ -42,6 +42,21 @@ export interface SpawnAgentResult {
   durationMs: number;
   rawOutputPath?: string;
   error?: string;
+  // Cost in USD if the runner reported it. claude-runner output has
+  // `total_cost_usd` in the inner result; codex-runner does not currently
+  // surface cost directly so this stays undefined for codex.
+  costUsd?: number;
+}
+
+function extractClaudeCostFromInner(inner: string): number | undefined {
+  // The inner stdout is typically a single JSON line for `--output-format json`.
+  // Look for total_cost_usd in the parsed structure first, then regex fallback.
+  try {
+    const parsed = JSON.parse(inner);
+    if (typeof parsed?.total_cost_usd === "number") return parsed.total_cost_usd;
+  } catch {}
+  const m = inner.match(/"total_cost_usd"\s*:\s*([0-9.eE+\-]+)/);
+  return m ? parseFloat(m[1]) : undefined;
 }
 
 function uniqueRequestId(label: string): string {
@@ -155,12 +170,14 @@ export async function runAgent(
         // Not wrapped — pass through.
       }
       const responseText = extractResponse(inner);
+      const costUsd = extractClaudeCostFromInner(inner);
       return {
         ok: responseText != null,
         responseText,
         durationMs: Date.now() - startedAt,
         rawOutputPath: outputFile,
         error: responseText == null ? "extractResponse returned null" : undefined,
+        costUsd,
       };
     }
 
