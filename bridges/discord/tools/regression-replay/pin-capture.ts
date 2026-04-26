@@ -2,10 +2,14 @@
 // harness with the user-supplied parameters, records the result as the
 // new baseline, and updates the seed's current_pin reference.
 //
+// By default, also runs the agent end-to-end and captures its response
+// as part of the baseline (required for tier 2). Pass --no-agent-run to
+// capture only the context block (tier 1 only; not recommended).
+//
 // Usage:
 //   HARNESS_ROOT=$(pwd) npx tsx \
 //     bridges/discord/tools/regression-replay/pin-capture.ts \
-//     <seed-id> [--param key=value ...]
+//     <seed-id> [--param key=value ...] [--no-agent-run]
 //
 // Example:
 //   ... pin-capture.ts shape-01 --param topic="distributed systems"
@@ -19,6 +23,7 @@ import {
   updateSeedPin,
   type Baseline,
 } from "./seed-loader.js";
+import { runAgent, type Runtime } from "./spawn-helper.js";
 
 const TIER1_CHANNEL_ID = "regression-replay-tier1";
 const HARNESS_VERSION = 1;
@@ -27,16 +32,18 @@ const RUBRIC_VERSION = 2;
 function parseArgs(argv: string[]): {
   seedId: string;
   parameters: Record<string, string>;
+  runAgentToo: boolean;
 } {
   const args = argv.slice(2);
   if (args.length < 1) {
     console.error(
-      "Usage: pin-capture <seed-id> [--param key=value ...]",
+      "Usage: pin-capture <seed-id> [--param key=value ...] [--no-agent-run]",
     );
     process.exit(2);
   }
   const seedId = args[0];
   const parameters: Record<string, string> = {};
+  let runAgentToo = true;
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--param") {
       const kv = args[++i];
@@ -46,16 +53,18 @@ function parseArgs(argv: string[]): {
         process.exit(2);
       }
       parameters[kv.slice(0, eq)] = kv.slice(eq + 1);
+    } else if (args[i] === "--no-agent-run") {
+      runAgentToo = false;
     } else {
       console.error(`Unknown argument: ${args[i]}`);
       process.exit(2);
     }
   }
-  return { seedId, parameters };
+  return { seedId, parameters, runAgentToo };
 }
 
 async function main(): Promise<void> {
-  const { seedId, parameters } = parseArgs(process.argv);
+  const { seedId, parameters, runAgentToo } = parseArgs(process.argv);
   const seed = loadSeed(seedId);
   if (!seed) {
     console.error(`Seed not found: ${seedId}`);
@@ -74,9 +83,10 @@ async function main(): Promise<void> {
 
   const prompt = resolvePrompt(seed.prompt_template, parameters);
   const agentName = seed.expected_agents[0] ?? "researcher";
+  const runtime = (seed.runtime as Runtime) || "claude";
 
   console.error(`[pin-capture] Seed: ${seedId} (${seed.shape})`);
-  console.error(`[pin-capture] Agent: ${agentName}`);
+  console.error(`[pin-capture] Agent: ${agentName} (${runtime})`);
   console.error(`[pin-capture] Resolved prompt: ${prompt.slice(0, 120)}...`);
 
   const contextBlock = await assembleContext({
@@ -90,6 +100,32 @@ async function main(): Promise<void> {
   const metrics = extractMetrics(contextBlock);
   const capturedAt = new Date().toISOString().slice(0, 10);
 
+  let agentResponse: Baseline["agent_response"] = null;
+  if (runAgentToo) {
+    console.error(`[pin-capture] Running ${runtime}/${agentName} for baseline output...`);
+    const result = await runAgent({
+      runtime,
+      agentName,
+      prompt,
+      channelId: TIER1_CHANNEL_ID,
+    });
+    if (result.ok && result.responseText) {
+      agentResponse = {
+        text: result.responseText,
+        duration_ms: result.durationMs,
+      };
+      console.error(
+        `[pin-capture] Agent response captured: ${result.responseText.length} chars, ${result.durationMs}ms`,
+      );
+    } else {
+      console.error(
+        `[pin-capture] WARN: agent run failed (${result.error}); proceeding with context-only baseline`,
+      );
+    }
+  } else {
+    console.error("[pin-capture] --no-agent-run set; skipping agent run (tier 2 will not work for this pin)");
+  }
+
   const baseline: Baseline = {
     seed_id: seedId,
     captured_at: capturedAt,
@@ -99,8 +135,10 @@ async function main(): Promise<void> {
     resolved_prompt: prompt,
     channel_id: TIER1_CHANNEL_ID,
     agent_name: agentName,
+    runtime,
     context_block: contextBlock,
     metrics,
+    agent_response: agentResponse,
   };
 
   const baselinePath = saveBaseline(baseline);

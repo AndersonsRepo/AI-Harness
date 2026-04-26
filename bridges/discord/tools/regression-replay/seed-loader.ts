@@ -46,12 +46,20 @@ export interface Baseline {
   resolved_prompt: string;
   channel_id: string;
   agent_name: string;
+  runtime: string;
   context_block: string;
   metrics: {
     retrievedIds: string[];
     contextSize: number;
     sectionCount: number;
   };
+  // The agent's actual response, captured at pin time. Required for tier 2
+  // comparison; tier 1 ignores this field. Older baselines from before tier 2
+  // existed may have this as null — tier 2 must skip those seeds and warn.
+  agent_response: {
+    text: string;
+    duration_ms: number;
+  } | null;
 }
 
 export function loadSeeds(): Seed[] {

@@ -1,0 +1,11 @@
+{
+  "_comment": "Tier-2 regression-replay weekly heartbeat. Copy to heartbeat-tasks/regression-replay-weekly.json to activate. Schedule with launchd via heartbeat-tasks/scripts/generate-plist.py (uses StartCalendarInterval cron). Sunday 02:00 default.",
+  "type": "script",
+  "script": "regression-replay-weekly.py",
+  "cron": "0 2 * * 0",
+  "timeout": 1800,
+  "enabled": true,
+  "notify": null,
+  "discord_channel": null,
+  "description": "Runs each pinned seed N=3 times at T=0, judges each candidate vs baseline using PoLL (Sonnet + Codex), aggregates Pass^3. Writes a weekly scorecard and appends a tier-2 row to timeline.md. Cost: ~$10-18 per run with default 10-seed × 3-run × 2-judge matrix."
+}
