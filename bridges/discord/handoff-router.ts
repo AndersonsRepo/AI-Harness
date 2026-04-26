@@ -202,30 +202,21 @@ export class DiscordSink implements ChainSink {
 
   async postPreHandoffText(agent: string, text: string): Promise<void> {
     if (!text) return;
-    try {
-      const chunks = monitor.splitForDiscord(
-        `**${capitalize(agent)}:** ${text}`,
-        1900,
-        "handoff:chain-pre-text",
-      );
-      for (const chunk of chunks) await this.channel.send(chunk);
-    } catch (err: any) {
-      console.error(`[HANDOFF] Failed to post pre-handoff text for ${agent}: ${err.message}`);
-    }
+    const chunks = monitor.splitForDiscord(
+      `**${capitalize(agent)}:** ${text}`,
+      1900,
+      "handoff:chain-pre-text",
+    );
+    for (const chunk of chunks) await this.channel.send(chunk);
   }
 
   async postAgentResponse(agent: string, text: string): Promise<void> {
-    try {
-      const chunks = monitor.splitForDiscord(
-        `**${capitalize(agent)}:** ${text}`,
-        1900,
-        "handoff:response",
-      );
-      for (const chunk of chunks) await this.channel.send(chunk);
-    } catch (err: any) {
-      console.error(`[HANDOFF] Failed to post chain response for ${agent}: ${err.message}`);
-      await this.postDeliveryFailure(agent, err.message);
-    }
+    const chunks = monitor.splitForDiscord(
+      `**${capitalize(agent)}:** ${text}`,
+      1900,
+      "handoff:response",
+    );
+    for (const chunk of chunks) await this.channel.send(chunk);
   }
 
   async postGateNotice(fromAgent: string, gateAgent: string): Promise<void> {
@@ -235,16 +226,12 @@ export class DiscordSink implements ChainSink {
   }
 
   async postGateResponse(gateAgent: string, text: string): Promise<void> {
-    try {
-      const chunks = monitor.splitForDiscord(
-        `**${capitalize(gateAgent)}:** ${text}`,
-        1900,
-        `handoff:gate-${gateAgent}`,
-      );
-      for (const chunk of chunks) await this.channel.send(chunk);
-    } catch (err: any) {
-      console.error(`[HANDOFF] Failed to post gate output: ${err.message}`);
-    }
+    const chunks = monitor.splitForDiscord(
+      `**${capitalize(gateAgent)}:** ${text}`,
+      1900,
+      `handoff:gate-${gateAgent}`,
+    );
+    for (const chunk of chunks) await this.channel.send(chunk);
   }
 
   async postWarning(text: string): Promise<void> {
@@ -252,13 +239,11 @@ export class DiscordSink implements ChainSink {
   }
 
   async postDeliveryFailure(agent: string, errorMessage: string): Promise<void> {
-    try {
-      await this.channel
-        .send(
-          `*Failed to deliver ${agent}'s response (${errorMessage}). The agent completed but the message couldn't be posted.*`,
-        )
-        .catch(() => {});
-    } catch {}
+    await this.channel
+      .send(
+        `*Failed to deliver ${agent}'s response (${errorMessage}). The agent completed but the message couldn't be posted.*`,
+      )
+      .catch(() => {});
   }
 }
 
@@ -591,14 +576,40 @@ export async function executeHandoff(
   });
 }
 
-export async function runHandoffChain(
-  channel: TextChannel,
-  initialAgent: string,
-  initialResponse: string,
-  options?: { originAgent?: string }
+export interface ExecuteChainCoreParams {
+  /**
+   * Discord channel — still passed through to executeHandoff (which remains
+   * Discord-coupled in this commit). Will be replaced by an AgentExecutor
+   * abstraction in a follow-up commit so executeChainCore stops importing
+   * discord.js entirely.
+   */
+  channel: TextChannel;
+  /** Sink for delivering chain output (DiscordSink in production, NullSink in replay). */
+  sink: ChainSink;
+  /** The first agent in the chain — its response was already produced upstream. */
+  initialAgent: string;
+  /** That agent's full response text (may contain a [HANDOFF:...] directive). */
+  initialResponse: string;
+  /** Conventionally the agent that originated the chain. */
+  originAgent: string;
+}
+
+/**
+ * Transport-agnostic chain-execution primitive.
+ *
+ * Drives the handoff loop, captures per-step artifacts, runs post-chain
+ * gates, and manages chain-scoped worktree lifecycle. Output delivery
+ * happens through `sink` rather than direct channel.send calls.
+ *
+ * `channel` is still passed through to executeHandoff because executeHandoff
+ * itself remains Discord-coupled at this stage. Once executeHandoff is
+ * extracted into an AgentExecutor, channel will no longer be needed here.
+ */
+export async function executeChainCore(
+  params: ExecuteChainCoreParams,
 ): Promise<ChainResult> {
+  const { channel, sink, initialAgent, initialResponse, originAgent } = params;
   const chainEntries: ChainEntry[] = [];
-  const originAgent = options?.originAgent || initialAgent;
 
   // Record the initial agent's response in the chain log
   chainEntries.push({
@@ -620,7 +631,7 @@ export async function runHandoffChain(
       return { entries: chainEntries, originAgent, parallelGroupId: groupId };
     } catch (err: any) {
       console.error(`[HANDOFF] Failed to spawn parallel group: ${err.message}`);
-      await channel.send(`*Failed to start parallel tasks: ${err.message}*`).catch(() => {});
+      await sink.postWarning(`*Failed to start parallel tasks: ${err.message}*`);
     }
   }
 
@@ -675,23 +686,17 @@ export async function runHandoffChain(
     try {
       if (result.nextHandoff) {
         if (result.nextHandoff.preHandoffText) {
-          const chunks = monitor.splitForDiscord(
-            `**${capitalize(result.agentName)}:** ${result.nextHandoff.preHandoffText}`, 1900, "handoff:chain-pre-text"
-          );
-          for (const chunk of chunks) await channel.send(chunk);
+          await sink.postPreHandoffText(result.agentName, result.nextHandoff.preHandoffText);
         }
       } else {
         // No further handoff — post full response
-        const chunks = monitor.splitForDiscord(
-          `**${capitalize(result.agentName)}:** ${result.response}`, 1900, "handoff:response"
-        );
-        for (const chunk of chunks) await channel.send(chunk);
+        await sink.postAgentResponse(result.agentName, result.response);
       }
     } catch (err: any) {
       console.error(`[HANDOFF] Failed to post chain response for ${result.agentName}: ${err.message}`);
       // Try to notify the user that delivery failed
       try {
-        await channel.send(`*Failed to deliver ${result.agentName}'s response (${err.message}). The agent completed but the message couldn't be posted.*`).catch(() => {});
+        await sink.postDeliveryFailure(result.agentName, err.message);
       } catch {}
     }
 
@@ -710,8 +715,7 @@ export async function runHandoffChain(
     for (const gateRequest of gateRequests) {
       const gatePrompt = gateRequest.prompt;
 
-      await channel.send(`*Auto-gate: ${capitalize(gateRequest.fromAgent)} output → ${capitalize(gateRequest.gateAgent)}*`)
-        .catch((err) => console.error(`[HANDOFF] Failed to send gate notice: ${err.message}`));
+      await sink.postGateNotice(gateRequest.fromAgent, gateRequest.gateAgent);
 
       const gateResult = await executeHandoff(
         channel,
@@ -732,10 +736,7 @@ export async function runHandoffChain(
         });
 
         try {
-          const chunks = monitor.splitForDiscord(
-            `**${capitalize(gateResult.agentName)}:** ${gateResult.response}`, 1900, `handoff:gate-${gateRequest.gateAgent}`
-          );
-          for (const chunk of chunks) await channel.send(chunk);
+          await sink.postGateResponse(gateResult.agentName, gateResult.response);
         } catch (err: any) {
           console.error(`[HANDOFF] Failed to post gate output: ${err.message}`);
         }
@@ -751,6 +752,23 @@ export async function runHandoffChain(
   }
 
   return { entries: chainEntries, originAgent };
+}
+
+export async function runHandoffChain(
+  channel: TextChannel,
+  initialAgent: string,
+  initialResponse: string,
+  options?: { originAgent?: string }
+): Promise<ChainResult> {
+  const originAgent = options?.originAgent || initialAgent;
+  const sink = new DiscordSink(channel);
+  return executeChainCore({
+    channel,
+    sink,
+    initialAgent,
+    initialResponse,
+    originAgent,
+  });
 }
 
 function capitalize(s: string): string {
