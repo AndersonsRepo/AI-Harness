@@ -178,6 +178,12 @@ export function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(17);
     console.log("[DB] Applied schema v17 (task_telemetry runtime column)");
   }
+
+  if (version < 18) {
+    applyV18(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(18);
+    console.log("[DB] Applied schema v18 (handoff_queue for tool-based delegation)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -634,6 +640,37 @@ function applyV17(database: Database.Database): void {
   if (!columnExists(database, "task_telemetry", "runtime")) {
     database.exec(`ALTER TABLE task_telemetry ADD COLUMN runtime TEXT;`);
   }
+}
+
+function applyV18(database: Database.Database): void {
+  // handoff_queue lets MCP tools (running in separate processes from the bot)
+  // request a chain handoff. The agent calls harness_handoff(...), the MCP tool
+  // writes a row here, and the bot drains the queue when the agent's task
+  // completes — same downstream path as the [HANDOFF:] text directive.
+  //
+  // session_key is the same compound key used by sessions/handoff-router
+  // (channel_id for plain channels, channel_id:agentName for project channels).
+  // Drained rows are kept (status='consumed') for replay/audit; an expired
+  // status is reserved for future TTL handling.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS handoff_queue (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_key       TEXT NOT NULL,
+      channel_id        TEXT NOT NULL,
+      from_agent        TEXT NOT NULL,
+      target_agent      TEXT NOT NULL,
+      task_description  TEXT NOT NULL,
+      pre_handoff_text  TEXT NOT NULL DEFAULT '',
+      status            TEXT NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending', 'consumed', 'expired')),
+      created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      consumed_at       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_handoff_queue_session
+      ON handoff_queue(session_key, status);
+    CREATE INDEX IF NOT EXISTS idx_handoff_queue_created
+      ON handoff_queue(created_at);
+  `);
 }
 
 function applyV16(database: Database.Database): void {
