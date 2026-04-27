@@ -49,6 +49,7 @@ import {
   parseCreateChannel,
   runHandoffChain,
   getProjectSessionKey,
+  dequeueHandoff,
   type ChainResult,
 } from "./handoff-router.js";
 import { listAgentNames, readAgentPrompt as loadAgentPrompt } from "./agent-loader.js";
@@ -510,8 +511,13 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
       }
     }
 
-    // Check for handoff in project channels
-    const handoff = parseHandoff(response);
+    // Check for handoff in project channels.
+    // Prefer the harness_handoff tool's queue over text-based [HANDOFF:]
+    // parsing — the tool is a more reliable signal than regex on free text.
+    // Fall back to parseHandoff so existing text directives still work.
+    const handoffSessionKey = project && agentName ? getProjectSessionKey(channelId, agentName) : null;
+    const queuedHandoff = handoffSessionKey ? dequeueHandoff(handoffSessionKey) : null;
+    const handoff = queuedHandoff ?? parseHandoff(response);
     if (project && agentName && handoff) {
       try {
         if (handoff.preHandoffText) {

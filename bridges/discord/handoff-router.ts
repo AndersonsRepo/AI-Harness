@@ -11,6 +11,7 @@ import {
   resolveProjectWorkdir,
 } from "./project-manager.js";
 import { setSession } from "./session-store.js";
+import { getDb } from "./db.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { monitor } from "./truncation-monitor.js";
 import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, isGitRepo, captureArtifacts, ArtifactBundle } from "./worktree-manager.js";
@@ -67,6 +68,60 @@ export function parseHandoff(output: string): HandoffDirective | null {
   const preHandoffText = output.slice(0, match.index).trim();
 
   return { targetAgent, message, preHandoffText };
+}
+
+/**
+ * Drain pending handoff_queue rows for a session_key, returning the first
+ * one as a HandoffDirective. Tool-based handoff entry point: agents that
+ * call mcp-harness/harness_handoff write a row to the queue; the bot calls
+ * this after the agent's task completes to extract the requested handoff.
+ *
+ * If multiple pending rows exist (rare — agent emitted multiple handoff
+ * tool calls in one response), returns the FIRST and marks the rest as
+ * 'expired'. Parallel handoffs are not supported via this path; use
+ * [PARALLEL:] for that.
+ *
+ * Returns null when the queue has no pending rows for this session.
+ */
+export function dequeueHandoff(sessionKey: string): HandoffDirective | null {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT id, from_agent, target_agent, task_description, pre_handoff_text
+         FROM handoff_queue
+        WHERE session_key = ? AND status = 'pending'
+        ORDER BY id ASC`,
+    )
+    .all(sessionKey) as Array<{
+      id: number;
+      from_agent: string;
+      target_agent: string;
+      task_description: string;
+      pre_handoff_text: string;
+    }>;
+
+  if (rows.length === 0) return null;
+
+  const first = rows[0];
+  const consumeStmt = db.prepare(
+    `UPDATE handoff_queue SET status = 'consumed', consumed_at = datetime('now') WHERE id = ?`,
+  );
+  const expireStmt = db.prepare(
+    `UPDATE handoff_queue SET status = 'expired', consumed_at = datetime('now') WHERE id = ?`,
+  );
+  consumeStmt.run(first.id);
+  for (const row of rows.slice(1)) {
+    expireStmt.run(row.id);
+    console.warn(
+      `[HANDOFF] Expired duplicate queue row id=${row.id} (session ${sessionKey} had ${rows.length} pending handoffs; only first is honored). Use [PARALLEL:] for multi-target delegation.`,
+    );
+  }
+
+  return {
+    targetAgent: first.target_agent.toLowerCase(),
+    message: first.task_description,
+    preHandoffText: first.pre_handoff_text || "",
+  };
 }
 
 export async function buildProjectContext(
@@ -803,11 +858,18 @@ export async function executeChainCore(
       artifacts: entryArtifacts,
     });
 
+    // Determine next handoff: prefer the harness_handoff tool's queue
+    // entry (more reliable than regex on free text), fall back to the
+    // text-parsed [HANDOFF:] directive embedded in the response.
+    const stepSessionKey = getProjectSessionKey(channelId, result.agentName);
+    const queuedNext = dequeueHandoff(stepSessionKey);
+    const nextHandoff = queuedNext ?? result.nextHandoff;
+
     // Post the responding agent's non-handoff text
     try {
-      if (result.nextHandoff) {
-        if (result.nextHandoff.preHandoffText) {
-          await sink.postPreHandoffText(result.agentName, result.nextHandoff.preHandoffText);
+      if (nextHandoff) {
+        if (nextHandoff.preHandoffText) {
+          await sink.postPreHandoffText(result.agentName, nextHandoff.preHandoffText);
         }
       } else {
         // No further handoff — post full response
@@ -822,7 +884,7 @@ export async function executeChainCore(
     }
 
     fromAgent = result.agentName;
-    handoff = result.nextHandoff;
+    handoff = nextHandoff;
   }
 
   // --- Post-Chain Gates (deterministic) ---

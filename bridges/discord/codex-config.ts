@@ -86,8 +86,14 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
   // <id>` instead of starting a fresh thread. Parity with claude-config's
   // --resume flag. codex-runner.py consumes --session-id before the codex
   // CLI args begin, so it must appear before --json below.
+  // Chain-context identity. Used both for session resume (below) and for
+  // env-var propagation to MCP tools (e.g. mcp-harness/harness_handoff)
+  // that need to know which session to attribute writes to. Mirrors
+  // claude-config.ts wiring so both runtimes carry the same chain identity.
+  const sessionKey = opts.sessionKey || opts.channelId;
+  const fromAgent = agentName || "default";
+
   if (!opts.skipSessionResume) {
-    const sessionKey = opts.sessionKey || opts.channelId;
     const existingSession = getSession(sessionKey, "codex");
     if (existingSession) {
       runnerArgs.push("--session-id", existingSession);
@@ -104,6 +110,9 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     HARNESS_ROOT,
+    HARNESS_CHANNEL_ID: opts.channelId,
+    HARNESS_SESSION_KEY: sessionKey,
+    HARNESS_FROM_AGENT: fromAgent,
     // codex-runner.py enforces these at the event-stream level, since
     // `codex exec` has no equivalent of Claude's --disallowedTools flag.
     CODEX_SAFETY_PATTERNS: safetyPatternsJson(),

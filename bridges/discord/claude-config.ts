@@ -372,9 +372,17 @@ export async function buildClaudeConfig(opts: BuildConfigOptions): Promise<Claud
   const project = getProject(opts.channelId);
   const projectCwd = opts.worktreePath || (project ? resolveProjectWorkdir(project.name) : null);
 
+  // Chain-context env vars for MCP tools (e.g. mcp-harness/harness_handoff)
+  // that need to know which session to attribute writes to.
+  const sessionKey = opts.sessionKey || opts.channelId;
+  const fromAgent = agentName || "default";
+
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
     HARNESS_ROOT,
+    HARNESS_CHANNEL_ID: opts.channelId,
+    HARNESS_SESSION_KEY: sessionKey,
+    HARNESS_FROM_AGENT: fromAgent,
     ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
   };
 

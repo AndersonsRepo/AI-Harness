@@ -7,6 +7,7 @@ import {
   resolveHandoffRuntime,
   executeChainCore,
   buildHandoffPrompt,
+  dequeueHandoff,
   DiscordSink,
   NullSink,
   type AgentExecutor,
@@ -19,6 +20,35 @@ import {
 function cleanupChannel(channelId: string): void {
   const db = getDb();
   db.prepare("DELETE FROM channel_configs WHERE channel_id = ?").run(channelId);
+}
+
+function cleanupHandoffQueue(sessionKey: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM handoff_queue WHERE session_key = ?").run(sessionKey);
+}
+
+function insertHandoffQueueRow(args: {
+  sessionKey: string;
+  channelId: string;
+  fromAgent: string;
+  targetAgent: string;
+  taskDescription: string;
+  preHandoffText?: string;
+}): number {
+  const db = getDb();
+  const stmt = db.prepare(
+    `INSERT INTO handoff_queue (session_key, channel_id, from_agent, target_agent, task_description, pre_handoff_text, status)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+  );
+  const result = stmt.run(
+    args.sessionKey,
+    args.channelId,
+    args.fromAgent,
+    args.targetAgent,
+    args.taskDescription,
+    args.preHandoffText ?? "",
+  );
+  return Number(result.lastInsertRowid);
 }
 
 describe("Handoff Router — Post-chain Gates", () => {
@@ -422,6 +452,122 @@ describe("Handoff Router — buildHandoffPrompt byte-equivalence (Option B Net 2
 
     const mixed = buildHandoffPrompt("ctx", "Codex-Builder", "msg");
     assert.ok(mixed.includes("Codex-Builder has handed off to you"));
+  });
+});
+
+describe("Handoff Router — dequeueHandoff (tool-based handoff queue)", () => {
+  it("returns null when no pending rows exist for the session", () => {
+    const sessionKey = "test-dequeue-empty";
+    cleanupHandoffQueue(sessionKey);
+    assert.equal(dequeueHandoff(sessionKey), null);
+  });
+
+  it("returns the queued handoff and marks the row as consumed", () => {
+    const sessionKey = "test-dequeue-single";
+    cleanupHandoffQueue(sessionKey);
+    const id = insertHandoffQueueRow({
+      sessionKey,
+      channelId: "test-channel-1",
+      fromAgent: "orchestrator",
+      targetAgent: "Builder", // intentionally mixed-case to verify lowercasing
+      taskDescription: "implement the feature",
+      preHandoffText: "I planned it out, builder takes it from here.",
+    });
+
+    const result = dequeueHandoff(sessionKey);
+    assert.ok(result);
+    assert.equal(result.targetAgent, "builder");
+    assert.equal(result.message, "implement the feature");
+    assert.equal(result.preHandoffText, "I planned it out, builder takes it from here.");
+
+    // Row state transitioned pending → consumed
+    const db = getDb();
+    const row = db
+      .prepare("SELECT status, consumed_at FROM handoff_queue WHERE id = ?")
+      .get(id) as { status: string; consumed_at: string | null };
+    assert.equal(row.status, "consumed");
+    assert.ok(row.consumed_at);
+
+    // Calling again returns null (idempotent — no longer pending)
+    assert.equal(dequeueHandoff(sessionKey), null);
+
+    cleanupHandoffQueue(sessionKey);
+  });
+
+  it("with multiple pending rows: returns FIRST, marks others as expired", () => {
+    const sessionKey = "test-dequeue-multi";
+    cleanupHandoffQueue(sessionKey);
+    const id1 = insertHandoffQueueRow({
+      sessionKey,
+      channelId: "test-channel-2",
+      fromAgent: "orchestrator",
+      targetAgent: "researcher",
+      taskDescription: "first",
+    });
+    const id2 = insertHandoffQueueRow({
+      sessionKey,
+      channelId: "test-channel-2",
+      fromAgent: "orchestrator",
+      targetAgent: "builder",
+      taskDescription: "second",
+    });
+    const id3 = insertHandoffQueueRow({
+      sessionKey,
+      channelId: "test-channel-2",
+      fromAgent: "orchestrator",
+      targetAgent: "reviewer",
+      taskDescription: "third",
+    });
+
+    const result = dequeueHandoff(sessionKey);
+    assert.ok(result);
+    assert.equal(result.targetAgent, "researcher");
+    assert.equal(result.message, "first");
+
+    const db = getDb();
+    const rows = db
+      .prepare("SELECT id, status FROM handoff_queue WHERE id IN (?, ?, ?) ORDER BY id ASC")
+      .all(id1, id2, id3) as Array<{ id: number; status: string }>;
+    assert.equal(rows.length, 3);
+    assert.equal(rows[0].status, "consumed");
+    assert.equal(rows[1].status, "expired");
+    assert.equal(rows[2].status, "expired");
+
+    cleanupHandoffQueue(sessionKey);
+  });
+
+  it("scopes by session_key (other sessions' rows are untouched)", () => {
+    const sessionA = "test-dequeue-scope-a";
+    const sessionB = "test-dequeue-scope-b";
+    cleanupHandoffQueue(sessionA);
+    cleanupHandoffQueue(sessionB);
+
+    const idA = insertHandoffQueueRow({
+      sessionKey: sessionA,
+      channelId: "ch-a",
+      fromAgent: "orchestrator",
+      targetAgent: "builder",
+      taskDescription: "for A",
+    });
+    const idB = insertHandoffQueueRow({
+      sessionKey: sessionB,
+      channelId: "ch-b",
+      fromAgent: "orchestrator",
+      targetAgent: "reviewer",
+      taskDescription: "for B",
+    });
+
+    const resultA = dequeueHandoff(sessionA);
+    assert.ok(resultA);
+    assert.equal(resultA.targetAgent, "builder");
+
+    // B is still pending
+    const db = getDb();
+    const rowB = db.prepare("SELECT status FROM handoff_queue WHERE id = ?").get(idB) as { status: string };
+    assert.equal(rowB.status, "pending");
+
+    cleanupHandoffQueue(sessionA);
+    cleanupHandoffQueue(sessionB);
   });
 });
 
