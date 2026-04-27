@@ -426,6 +426,14 @@ export interface ExecuteAgentArgs {
   preHandoffText: string;
   chainContext?: { completedPhases: ChainEntry[]; currentTask: string };
   worktreePath?: string | null;
+  /**
+   * If true, the spawn config skips `--resume <session-id>`, forcing the
+   * receiving agent to start with a fresh conversation. Use for stateless
+   * verification agents (post-chain reviewer/tester) — their session IDs
+   * accumulate across runs and can fail to resume with "No conversation
+   * found" if claude-cli no longer has them. See ERR-20260426-036.
+   */
+  skipSessionResume?: boolean;
 }
 
 export interface AgentExecutor {
@@ -444,6 +452,7 @@ export class DiscordAgentExecutor implements AgentExecutor {
       args.preHandoffText,
       args.chainContext,
       args.worktreePath,
+      args.skipSessionResume,
     );
   }
 }
@@ -478,6 +487,14 @@ export interface ExecuteHandoffCoreParams {
    * reason (e.g. larger context-rich edits, slower Codex thread).
    */
   timeoutMs?: number;
+  /**
+   * If true, the spawn skips `--resume <session-id>` even when a stored
+   * session exists for this sessionKey. Used for stateless verification
+   * agents (post-chain reviewer/tester) — see ERR-20260426-036 for why
+   * accumulated session IDs cause "No conversation found" failures on
+   * second-run gates.
+   */
+  skipSessionResume?: boolean;
 }
 
 export type ExecuteHandoffCoreResult =
@@ -518,6 +535,7 @@ export async function executeHandoffCore(
     // typical builder/tester steps; reviewer/researcher usually finish
     // well under. Raise via param if you have a specific reason.
     timeoutMs = 600_000,
+    skipSessionResume = false,
   } = params;
 
   // Runner-level timeout (seconds) matches the watcher-level timeout (ms)
@@ -545,6 +563,7 @@ export async function executeHandoffCore(
       sessionKey,
       taskId: "handoff",
       worktreePath,
+      skipSessionResume,
     });
 
     promptFile = join(
@@ -572,6 +591,7 @@ export async function executeHandoffCore(
       sessionKey,
       taskId: "handoff",
       worktreePath,
+      skipSessionResume,
     });
 
     pythonArgs = [
@@ -669,6 +689,7 @@ export async function executeHandoff(
   preHandoffText: string,
   chainContext?: { completedPhases: ChainEntry[]; currentTask: string },
   worktreePath?: string | null,
+  skipSessionResume?: boolean,
 ): Promise<HandoffResult | null> {
   const project = getProject(channel.id);
   if (!project) return null;
@@ -744,6 +765,7 @@ export async function executeHandoff(
       sessionKey,
       runtime,
       worktreePath,
+      skipSessionResume,
     });
   } finally {
     coreDone = true;
@@ -924,6 +946,10 @@ export async function executeChainCore(
         preHandoffText: "", // no pre-handoff text
         chainContext: undefined,
         worktreePath: chainWorktreePath,
+        // Gate agents (reviewer, tester) are stateless verifiers — skip
+        // session resume so accumulated session IDs from prior chain runs
+        // can't trigger "No conversation found" failures. See ERR-20260426-036.
+        skipSessionResume: true,
       });
 
       if (gateResult) {

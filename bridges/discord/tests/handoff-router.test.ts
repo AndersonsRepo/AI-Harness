@@ -374,6 +374,14 @@ describe("Handoff Router — executeChainCore chain loop with injected executor"
     // Gate prompts should include builder's output
     assert.ok(calls[1].handoffMessage.includes("Wrote the patch"));
     assert.ok(calls[2].handoffMessage.includes("Wrote the patch"));
+
+    // Gate spawns must skip session resume — reviewer/tester are stateless
+    // verifiers, accumulated session IDs cause "No conversation found"
+    // errors on second-run gates (ERR-20260426-036). Chain steps stay with
+    // default resume behavior.
+    assert.equal(calls[0].skipSessionResume, undefined, "chain step (builder) should NOT skip session resume");
+    assert.equal(calls[1].skipSessionResume, true, "reviewer gate must skip session resume");
+    assert.equal(calls[2].skipSessionResume, true, "tester gate must skip session resume");
   });
 
   it("does not run post-chain gates when the final agent has no gate config", async () => {
