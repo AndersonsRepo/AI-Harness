@@ -1274,6 +1274,110 @@ server.tool(
   }
 );
 
+// ─── Tool: harness_handoff ──────────────────────────────────────────
+
+function sqlEscape(s: string): string {
+  // SQLite uses single-quote string literals; doubled single quote is the escape.
+  return s.replace(/'/g, "''");
+}
+
+server.tool(
+  "harness_handoff",
+  [
+    "Hand off the current task to another specialist agent in the project. Use this when the task needs role-specialized context, deterministic review/test gates, cross-runtime cost optimization (e.g. builder→Codex), Discord visibility per step, or auditable replay.",
+    "",
+    "Use the native Agent tool instead for quick read-only investigation (codebase exploration, doc fetching, plan synthesis) where in-process speed matters.",
+    "",
+    "After this tool call returns, finish your response normally — the handoff fires when your task completes. The receiving agent gets fresh role-tuned context, runs in its own process, and may chain further (e.g. builder → reviewer → tester via auto-injected post-chain gates).",
+    "",
+    "Restrictions: target_agent must be a member of the current project's agent list. Self-handoff is rejected. Depth limit applies (default 20).",
+  ].join("\n"),
+  {
+    target_agent: z.string().describe("Name of the agent to hand off to (e.g. 'builder', 'reviewer', 'researcher')."),
+    task_description: z.string().describe("What you want the receiving agent to do. Be specific — include scope, expected output, and any constraints they need to know about. Vague delegation degrades chain quality."),
+    pre_handoff_text: z.string().optional().describe("Optional message to post to Discord under your name before the handoff transition (e.g. summary of what you've done so far). Leave empty if not needed."),
+  },
+  async ({ target_agent, task_description, pre_handoff_text }) => {
+    const channelId = process.env.HARNESS_CHANNEL_ID;
+    const sessionKey = process.env.HARNESS_SESSION_KEY;
+    const fromAgent = process.env.HARNESS_FROM_AGENT;
+
+    if (!channelId || !sessionKey || !fromAgent) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: "Handoff unavailable: harness env vars (HARNESS_CHANNEL_ID, HARNESS_SESSION_KEY, HARNESS_FROM_AGENT) are not set. This tool requires the bot's spawn-time env to identify the chain context.",
+        }],
+        isError: true,
+      };
+    }
+
+    if (!existsSync(DB_PATH)) {
+      return {
+        content: [{ type: "text" as const, text: `Database not found at ${DB_PATH}` }],
+        isError: true,
+      };
+    }
+
+    if (target_agent === fromAgent) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Self-handoff rejected: ${fromAgent} cannot hand off to itself.`,
+        }],
+        isError: true,
+      };
+    }
+
+    const sql = `
+INSERT INTO handoff_queue (
+  session_key, channel_id, from_agent, target_agent,
+  task_description, pre_handoff_text, status
+) VALUES (
+  '${sqlEscape(sessionKey)}',
+  '${sqlEscape(channelId)}',
+  '${sqlEscape(fromAgent)}',
+  '${sqlEscape(target_agent)}',
+  '${sqlEscape(task_description)}',
+  '${sqlEscape(pre_handoff_text ?? "")}',
+  'pending'
+);
+SELECT last_insert_rowid();
+`;
+
+    let queuedId: string;
+    try {
+      const out = execSync(`sqlite3 "${DB_PATH}"`, {
+        input: sql,
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      queuedId = out.trim().split("\n").pop() || "?";
+    } catch (err: any) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Failed to queue handoff: ${err.message}`,
+        }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: [
+          `Handoff queued (id=${queuedId}): ${fromAgent} → ${target_agent}`,
+          ``,
+          `Task: ${task_description.slice(0, 200)}${task_description.length > 200 ? "..." : ""}`,
+          ``,
+          `The handoff will execute when your current response completes. ${target_agent} will run in a fresh process with role-tuned context. Continue with whatever you need to communicate to the user (or leave it terse — your "pre_handoff_text" already covers what gets posted).`,
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
 // ─── Start Server ────────────────────────────────────────────────────
 
 async function main() {
