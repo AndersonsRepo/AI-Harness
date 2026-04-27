@@ -272,6 +272,124 @@ export function createWorktree(
   }
 }
 
+export interface AutoCommitResult {
+  /** True if the helper actually created a commit. False if tree was already clean OR if commit failed. */
+  committed: boolean;
+  /** New HEAD SHA after the commit (when committed === true). */
+  sha?: string;
+  /** Commit message used. */
+  message?: string;
+  /** Error description when committed === false AND an error occurred (vs. clean-tree case). */
+  error?: string;
+}
+
+/**
+ * Auto-commit any uncommitted changes in a chain worktree.
+ *
+ * Why: Codex's `workspace-write` sandbox protects `<writable_root>/.git`
+ * as read-only (recursive, regardless of writable_roots). Chain agents
+ * spawned under that sandbox can edit files in the worktree but cannot
+ * run `git commit` — `git commit` writes to the parent repo's
+ * `.git/worktrees/<name>/index.lock`, which is inside `.git` and thus
+ * blocked. Without committing, the validated code never lands because
+ * `mergeWorktree` only merges commits.
+ *
+ * The chain process (running in the bot's full-permission Node process,
+ * NOT inside any sandbox) runs this helper after the chain finishes and
+ * before `mergeWorktree`. If the worktree has uncommitted changes, this
+ * stages everything and commits with a generated message. If the worktree
+ * is clean (e.g., agent committed itself when sandbox cooperated), this
+ * is a no-op.
+ *
+ * See LRN-20260426-054 + ERR-20260426-037 for the full mechanism.
+ */
+export function commitWorktreeIfDirty(
+  worktreeId: string,
+  options: {
+    /** Commit message; default: `chain: auto-commit from <worktree-id>` */
+    message?: string;
+    /** Author display; default: "AI Harness Chain" */
+    authorName?: string;
+    /** Author email; default: "chain@ai-harness.local" */
+    authorEmail?: string;
+  } = {},
+): AutoCommitResult {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM worktrees WHERE id = ?").get(worktreeId) as WorktreeInfo | undefined;
+  if (!row) return { committed: false, error: "worktree not found in database" };
+
+  const wtPath = row.worktree_path;
+  if (!existsSync(wtPath)) {
+    return { committed: false, error: `worktree path does not exist: ${wtPath}` };
+  }
+
+  // Detect uncommitted changes
+  let status: string;
+  try {
+    status = execSync("git status --porcelain", {
+      cwd: wtPath,
+      stdio: "pipe",
+      timeout: 10000,
+    }).toString().trim();
+  } catch (err: any) {
+    return { committed: false, error: `git status failed: ${err.message}` };
+  }
+
+  if (!status) {
+    // Clean tree — nothing to do, NOT an error
+    return { committed: false };
+  }
+
+  // Stage everything (new files + modifications + deletions)
+  try {
+    execSync("git add -A", {
+      cwd: wtPath,
+      stdio: "pipe",
+      timeout: 10000,
+    });
+  } catch (err: any) {
+    return { committed: false, error: `git add failed: ${err.message}` };
+  }
+
+  const message = options.message || `chain: auto-commit from ${worktreeId}`;
+  const authorName = options.authorName || "AI Harness Chain";
+  const authorEmail = options.authorEmail || "chain@ai-harness.local";
+
+  // Spawn git commit with explicit author env so the bot's user identity
+  // doesn't accidentally end up on every chain commit.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: authorName,
+    GIT_AUTHOR_EMAIL: authorEmail,
+    GIT_COMMITTER_NAME: authorName,
+    GIT_COMMITTER_EMAIL: authorEmail,
+  };
+
+  try {
+    execSync("git commit -F -", {
+      cwd: wtPath,
+      stdio: ["pipe", "pipe", "pipe"],
+      input: message,
+      env,
+      timeout: 15000,
+    });
+  } catch (err: any) {
+    return { committed: false, error: `git commit failed: ${err.message}` };
+  }
+
+  // Capture the new SHA for logging / debugging
+  let sha: string | undefined;
+  try {
+    sha = execSync("git rev-parse HEAD", {
+      cwd: wtPath,
+      stdio: "pipe",
+      timeout: 5000,
+    }).toString().trim();
+  } catch { /* SHA capture is best-effort */ }
+
+  return { committed: true, sha, message };
+}
+
 /**
  * Merge a worktree's branch back into the project's main branch.
  */

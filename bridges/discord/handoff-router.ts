@@ -14,7 +14,7 @@ import { setSession } from "./session-store.js";
 import { getDb } from "./db.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { monitor } from "./truncation-monitor.js";
-import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, isGitRepo, captureArtifacts, ArtifactBundle } from "./worktree-manager.js";
+import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, isGitRepo, captureArtifacts, commitWorktreeIfDirty, ArtifactBundle } from "./worktree-manager.js";
 import type { AgentRuntime } from "./agent-loader.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
 import {
@@ -969,8 +969,22 @@ export async function executeChainCore(
     }
   }
 
-  // Merge and clean up worktree if one was created
+  // Merge and clean up worktree if one was created.
+  // Auto-commit any uncommitted edits first — Codex `workspace-write` sandbox
+  // protects `.git` as read-only, so chain agents (especially Codex builders)
+  // typically can't run `git commit` themselves. The chain process here has
+  // full filesystem permissions. See LRN-20260426-054 + ERR-20260426-037.
   if (chainWorktreeId) {
+    const finalAgent = chainEntries[chainEntries.length - 1]?.agent || "chain-agent";
+    const commitResult = commitWorktreeIfDirty(chainWorktreeId, {
+      message: `chain: ${finalAgent} changes from ${chainId}`,
+    });
+    if (commitResult.committed) {
+      console.log(`[HANDOFF] Auto-committed worktree changes for chain ${chainId}: ${commitResult.sha?.slice(0, 8) ?? "(no sha)"}`);
+    } else if (commitResult.error) {
+      console.warn(`[HANDOFF] Auto-commit skipped for chain ${chainId}: ${commitResult.error}`);
+    }
+
     const mergeResult = mergeWorktree(chainWorktreeId);
     console.log(`[HANDOFF] Worktree merge for chain ${chainId}: ${mergeResult.status} — ${mergeResult.details}`);
     removeWorktree(chainWorktreeId);
