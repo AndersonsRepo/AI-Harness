@@ -471,7 +471,12 @@ export interface ExecuteHandoffCoreParams {
   sessionKey: string;
   runtime: AgentRuntime;
   worktreePath?: string | null;
-  /** Wall-clock cap; default matches the original 180_000ms. */
+  /**
+   * Wall-clock cap in ms. Default 600_000 (10 min) — sized for chain
+   * builders doing real work; readonly agents (reviewer/researcher)
+   * usually finish well under. Override per-call if you have a specific
+   * reason (e.g. larger context-rich edits, slower Codex thread).
+   */
   timeoutMs?: number;
 }
 
@@ -507,8 +512,20 @@ export async function executeHandoffCore(
     sessionKey,
     runtime,
     worktreePath,
-    timeoutMs = 180_000,
+    // 10 min default. The previous 3 min ceiling was too tight for chain
+    // builders doing real work (read repo + write code + run validation,
+    // possibly via Codex which has its own startup overhead). 10 min covers
+    // typical builder/tester steps; reviewer/researcher usually finish
+    // well under. Raise via param if you have a specific reason.
+    timeoutMs = 600_000,
   } = params;
+
+  // Runner-level timeout (seconds) matches the watcher-level timeout (ms)
+  // so claude-runner.py / codex-runner.py kill their child agent BEFORE the
+  // FileWatcher gives up — the runner's timeout writes a structured error
+  // envelope which the watcher then reads, vs. the watcher firing first and
+  // leaving an orphan agent process.
+  const runnerTimeoutSecs = String(Math.max(1, Math.floor(timeoutMs / 1000)));
 
   const outputFile = join(
     TEMP_DIR,
@@ -540,7 +557,7 @@ export async function executeHandoffCore(
       `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
       outputFile,
       "--timeout",
-      "180",
+      runnerTimeoutSecs,
       "--prompt-file",
       promptFile,
       ...config.runnerArgs,
@@ -561,7 +578,7 @@ export async function executeHandoffCore(
       `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
       outputFile,
       "--timeout",
-      "180",
+      runnerTimeoutSecs,
       ...config.args,
     ];
     childCwd = config.cwd;
@@ -744,7 +761,7 @@ export async function executeHandoff(
       ).catch((err) => console.error(`[HANDOFF] Failed to send parse-error notice: ${err.message}`));
     } else if (result.reason === "timeout") {
       await channel.send(
-        `**${capitalize(toAgent)}:** Timed out after 3 minutes.`,
+        `**${capitalize(toAgent)}:** Timed out before producing a response.`,
       ).catch((err) => console.error(`[HANDOFF] Failed to send timeout notice: ${err.message}`));
     }
     // parse-error: console-logged inside core; no Discord notice (matches original).
