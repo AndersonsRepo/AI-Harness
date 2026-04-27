@@ -228,6 +228,13 @@ class _Env:
 
         Strips CLAUDE* vars (nested session prevention), sets sensible defaults.
         Optional passthrough list for integration-specific vars.
+
+        HARNESS_CHANNEL_ID/SESSION_KEY/FROM_AGENT are forwarded by default so
+        chain-aware MCP tools (e.g. mcp-harness/harness_handoff) can identify
+        the calling chain context. The bot sets these per-spawn in
+        claude-config.ts / codex-config.ts; the MCP server reads them from
+        process.env. Without forwarding here, they're stripped at this
+        intermediary even though both endpoints expect them.
         """
         home = paths.home()
         result = {
@@ -239,6 +246,9 @@ class _Env:
             "LANG": os.environ.get("LANG", "en_US.UTF-8"),
             "TERM": "dumb",
             "HARNESS_ROOT": os.environ.get("HARNESS_ROOT", ""),
+            "HARNESS_CHANNEL_ID": os.environ.get("HARNESS_CHANNEL_ID", ""),
+            "HARNESS_SESSION_KEY": os.environ.get("HARNESS_SESSION_KEY", ""),
+            "HARNESS_FROM_AGENT": os.environ.get("HARNESS_FROM_AGENT", ""),
         }
 
         if IS_WINDOWS:
