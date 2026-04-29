@@ -982,9 +982,8 @@ export async function executeChainCore(
   // typically can't run `git commit` themselves. The chain process here has
   // full filesystem permissions. See LRN-20260426-054 + ERR-20260426-037.
   if (chainWorktreeId) {
-    const finalAgent = chainEntries[chainEntries.length - 1]?.agent || "chain-agent";
     const commitResult = commitWorktreeIfDirty(chainWorktreeId, {
-      message: `chain: ${finalAgent} changes from ${chainId}`,
+      message: `chain: changes from ${chainId}`,
     });
     if (commitResult.committed) {
       console.log(`[HANDOFF] Auto-committed worktree changes for chain ${chainId}: ${commitResult.sha?.slice(0, 8) ?? "(no sha)"}`);

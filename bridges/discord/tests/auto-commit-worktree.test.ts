@@ -83,16 +83,16 @@ describe("commitWorktreeIfDirty", () => {
     writeFileSync(join(worktree, "new-file.txt"), "auto-committed by chain\n");
 
     const result = commitWorktreeIfDirty(worktreeId, {
-      message: "chain: builder changes from chain-test-001",
+      message: "chain: changes from chain-test-001",
     });
 
     assert.equal(result.committed, true, result.error);
-    assert.equal(result.message, "chain: builder changes from chain-test-001");
+    assert.equal(result.message, "chain: changes from chain-test-001");
     assert.ok(result.sha && /^[0-9a-f]{40}$/.test(result.sha), "expected 40-char SHA");
 
     // Verify the file is actually in the new commit
     const log = git(worktree, "log -1 --format=%s");
-    assert.match(log, /chain: builder changes from chain-test-001/);
+    assert.match(log, /chain: changes from chain-test-001/);
     const files = git(worktree, "show --name-only --format= HEAD").trim();
     assert.ok(files.includes("new-file.txt"));
   });
