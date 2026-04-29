@@ -810,6 +810,13 @@ export interface ExecuteChainCoreParams {
   initialResponse: string;
   /** Conventionally the agent that originated the chain. */
   originAgent: string;
+  /**
+   * Pre-resolved seed handoff (from the harness_handoff tool's queue).
+   * When set, the chain uses this instead of parsing initialResponse for
+   * a [HANDOFF:] directive. The chain still parses initialResponse for a
+   * [PARALLEL:] directive — those don't go through the queue.
+   */
+  initialHandoff?: HandoffDirective;
 }
 
 /**
@@ -851,7 +858,7 @@ export async function executeChainCore(
     }
   }
 
-  let handoff = parseHandoff(initialResponse);
+  let handoff = params.initialHandoff ?? parseHandoff(initialResponse);
   let fromAgent = initialAgent;
 
   // Lazy worktree creation — created on first handoff to a writer agent
@@ -997,7 +1004,7 @@ export async function runHandoffChain(
   channel: TextChannel,
   initialAgent: string,
   initialResponse: string,
-  options?: { originAgent?: string }
+  options?: { originAgent?: string; initialHandoff?: HandoffDirective }
 ): Promise<ChainResult> {
   const originAgent = options?.originAgent || initialAgent;
   const sink = new DiscordSink(channel);
@@ -1009,6 +1016,7 @@ export async function runHandoffChain(
     initialAgent,
     initialResponse,
     originAgent,
+    initialHandoff: options?.initialHandoff,
   });
 }
 

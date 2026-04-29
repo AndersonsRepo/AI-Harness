@@ -50,6 +50,7 @@ import {
   parseCreateChannel,
   runHandoffChain,
   getProjectSessionKey,
+  dequeueHandoff,
   type ChainResult,
 } from "./handoff-router.js";
 import {
@@ -693,9 +694,14 @@ export class DiscordTransport implements TransportAdapter {
       }
     }
 
-    // Check for handoff in project channels
+    // Check for handoff in project channels.
+    // Prefer the harness_handoff tool's queue over text-based [HANDOFF:]
+    // parsing — the tool is a structured signal, regex on prose is fragile.
+    // Fall back to parseHandoff so existing text directives still work.
     const project = getProject(channelId);
-    const handoff = parseHandoff(response);
+    const handoffSessionKey = project && agentName ? getProjectSessionKey(channelId, agentName) : null;
+    const queuedHandoff = handoffSessionKey ? dequeueHandoff(handoffSessionKey) : null;
+    const handoff = queuedHandoff ?? parseHandoff(response);
     if (project && agentName && handoff) {
       // Post pre-handoff text
       if (handoff.preHandoffText) {
@@ -714,7 +720,8 @@ export class DiscordTransport implements TransportAdapter {
       }
 
       const chainResult = await runHandoffChain(
-        channel, agentName, response, { originAgent: agentName }
+        channel, agentName, response,
+        { originAgent: agentName, initialHandoff: queuedHandoff ?? undefined }
       );
 
       // Orchestrator debrief
