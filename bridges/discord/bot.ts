@@ -10,7 +10,7 @@ import {
 } from "discord.js";
 import { spawn } from "child_process";
 import { config } from "dotenv";
-import { getSession, setSession, clearSession, clearChannelSessions, validateSession } from "./session-store.js";
+import { getSession, setSession, clearSession, clearChannelSessions, clearStaleAgentSessions, validateSession } from "./session-store.js";
 import {
   getChannelConfig,
   setChannelConfig,
@@ -915,6 +915,39 @@ async function handleCommand(message: Message, content: string): Promise<boolean
     return true;
   }
 
+  // /reload-agents — clear sessions older than their agent.md mtime so edits
+  // to .claude/agents/*.md take effect on the next message instead of being
+  // masked by a resumed session that pre-dates the edit.
+  if (content === "/reload-agents") {
+    const agentNames = listAgents();
+    const agentsDir = join(HARNESS_ROOT, ".claude", "agents");
+    const mtimes = new Map<string, number>();
+    for (const name of agentNames) {
+      try {
+        mtimes.set(name, statSync(join(agentsDir, `${name}.md`)).mtimeMs);
+      } catch {
+        // Skip agents whose file is missing
+      }
+    }
+
+    const results = clearStaleAgentSessions(mtimes);
+    const total = results.reduce((sum, r) => sum + r.cleared, 0);
+
+    if (total === 0) {
+      await message.reply(
+        "No stale agent sessions. All sessions are newer than their agent.md files."
+      );
+    } else {
+      const lines = results
+        .map((r) => `• \`${r.agent}\` — ${r.cleared} session(s)`)
+        .join("\n");
+      await message.reply(
+        `Cleared ${total} stale session(s):\n${lines}\n\n*Non-project channels: use \`/new\` to refresh.*`
+      );
+    }
+    return true;
+  }
+
   // /agent create <name> "<description>" — create a new agent
   const createMatch = content.match(
     /^\/agent\s+create\s+(\w+)\s+"([^"]+)"$/
@@ -1367,6 +1400,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
             "`/agent <name>` — Set channel agent",
             "`/agent clear` — Remove agent override",
             "`/agent create <name> \"desc\"` — Create agent",
+            "`/reload-agents` — Clear sessions older than agent.md edits",
             "`/model <name>` — Set channel model",
             "`/config` — Show channel config",
           ].join("\n"),

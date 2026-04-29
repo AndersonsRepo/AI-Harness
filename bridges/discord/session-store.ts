@@ -174,6 +174,40 @@ export function clearChannelSessions(channelId: string): number {
   return result.changes;
 }
 
+/**
+ * Clear sessions older than their agent.md file's mtime. Targets compound-keyed
+ * project sessions (`<channelId>:<agentName>`) — these dominate the bot's
+ * session footprint and are the source of the "edited orchestrator.md but
+ * change didn't take effect" gotcha. Non-project channels keep their session
+ * and can be refreshed via /new.
+ *
+ * Returns per-agent clear counts for any agent that had at least one stale
+ * session removed. Agents whose .md file doesn't exist or has no stale
+ * sessions are simply omitted.
+ */
+export function clearStaleAgentSessions(
+  agentMtimesMs: Map<string, number>,
+): { agent: string; cleared: number }[] {
+  const db = getDb();
+  const results: { agent: string; cleared: number }[] = [];
+
+  for (const [agent, mtimeMs] of agentMtimesMs) {
+    // SQLite's datetime('now') stores text in 'YYYY-MM-DD HH:MM:SS' UTC format.
+    // ISO string is 'YYYY-MM-DDTHH:MM:SS.sssZ' — slice + replace to match.
+    const mtimeIso = new Date(mtimeMs).toISOString().replace("T", " ").slice(0, 19);
+
+    const result = db.prepare(
+      "DELETE FROM sessions WHERE channel_id LIKE ? AND created_at < ?"
+    ).run(`%:${agent}`, mtimeIso);
+
+    if (result.changes > 0) {
+      results.push({ agent, cleared: result.changes });
+    }
+  }
+
+  return results;
+}
+
 export function validateSession(channelId: string, runtime?: RuntimeTag): boolean {
   const db = getDb();
   const keyShape = getSessionsKeyShape();
