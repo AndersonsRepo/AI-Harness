@@ -1,0 +1,11 @@
+{
+  "_comment": "Weekly per-role telemetry. Copy to heartbeat-tasks/role-telemetry-weekly.json to activate; install plist via heartbeat-tasks/scripts/generate-plist.py role-telemetry-weekly --install. Posts to #agent-stream every Monday 09:00 PT.",
+  "type": "script",
+  "script": "role-telemetry-weekly.py",
+  "cron": "0 9 * * 1",
+  "timeout": 180,
+  "enabled": true,
+  "notify": null,
+  "discord_channel": "agent-stream",
+  "description": "Runs scripts/role-telemetry-report.ts over the last 7 days and posts the table to #agent-stream. Surfaces per-(agent, runtime) cost, error rate, loop rate so Codex quality drift is visible without manual checks. Pairs with D5.2 Phase 1 CLI."
+}
