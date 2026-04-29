@@ -13,6 +13,7 @@ import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { getSession } from "./session-store.js";
 import { claudeDisallowedToolArgs } from "./safety.js";
+import { buildMcpConfigFile } from "./mcp-config-builder.js";
 
 export const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 
@@ -351,6 +352,17 @@ export async function buildClaudeConfig(opts: BuildConfigOptions): Promise<Claud
   if (tools.allowedTools) {
     args.push("--allowedTools", tools.allowedTools);
   }
+
+  // Per-channel MCP scoping. Without --strict-mcp-config Claude inherits the
+  // entire user-scope mcpServers registry (~11 servers today), which blows
+  // past the default 256 fd limit. The builder writes an ephemeral config
+  // containing only the channel's allowed servers (default baseline if
+  // unset). See mcp-config-builder.ts.
+  const mcpConfig = buildMcpConfigFile({
+    channelId: opts.channelId,
+    taskId: opts.taskId,
+  });
+  args.push("--mcp-config", mcpConfig.configPath, "--strict-mcp-config");
 
   // Session resume
   if (!opts.skipSessionResume) {

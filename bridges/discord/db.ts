@@ -184,6 +184,12 @@ export function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(18);
     console.log("[DB] Applied schema v18 (handoff_queue for tool-based delegation)");
   }
+
+  if (version < 19) {
+    applyV19(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(19);
+    console.log("[DB] Applied schema v19 (channel_configs.allowed_mcps for per-channel MCP scoping)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -204,6 +210,7 @@ function applyV1(database: Database.Database): void {
       allowed_tools    TEXT,
       disallowed_tools TEXT,
       model            TEXT,
+      allowed_mcps     TEXT,
       updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -639,6 +646,18 @@ function applyV17(database: Database.Database): void {
   // Nullable: existing rows have no provenance to backfill.
   if (!columnExists(database, "task_telemetry", "runtime")) {
     database.exec(`ALTER TABLE task_telemetry ADD COLUMN runtime TEXT;`);
+  }
+}
+
+function applyV19(database: Database.Database): void {
+  // Per-channel MCP server scoping. Without this, every Claude spawn inherits
+  // the full user-scope mcpServers registry from ~/.claude.json — 11+ servers
+  // today, which blows past the default 256 file-descriptor limit and forces
+  // users to bump ulimit. Stored as a JSON array of server names. Null means
+  // "use the default baseline" (vault, harness, projects, codex), set in
+  // mcp-config-builder.ts.
+  if (!columnExists(database, "channel_configs", "allowed_mcps")) {
+    database.exec(`ALTER TABLE channel_configs ADD COLUMN allowed_mcps TEXT;`);
   }
 }
 

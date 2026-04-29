@@ -7,6 +7,9 @@ export interface ChannelConfig {
   allowedTools?: string[];
   disallowedTools?: string[];
   model?: string;
+  // Per-channel MCP server allowlist. Unset → use default baseline in
+  // mcp-config-builder. Empty array → no MCPs (rare, mostly tests).
+  allowedMcps?: string[];
   updatedAt: string;
 }
 
@@ -20,6 +23,7 @@ function rowToConfig(row: any): ChannelConfig {
     allowedTools: row.allowed_tools ? JSON.parse(row.allowed_tools) : undefined,
     disallowedTools: row.disallowed_tools ? JSON.parse(row.disallowed_tools) : undefined,
     model: row.model || undefined,
+    allowedMcps: row.allowed_mcps ? JSON.parse(row.allowed_mcps) : undefined,
     updatedAt: row.updated_at,
   };
 }
@@ -45,11 +49,12 @@ export function setChannelConfig(
     allowedTools: Object.prototype.hasOwnProperty.call(config, "allowedTools") ? config.allowedTools : existing?.allowedTools,
     disallowedTools: Object.prototype.hasOwnProperty.call(config, "disallowedTools") ? config.disallowedTools : existing?.disallowedTools,
     model: Object.prototype.hasOwnProperty.call(config, "model") ? config.model : existing?.model,
+    allowedMcps: Object.prototype.hasOwnProperty.call(config, "allowedMcps") ? config.allowedMcps : existing?.allowedMcps,
   };
 
   db.prepare(`
-    INSERT INTO channel_configs (channel_id, agent, runtime, permission_mode, allowed_tools, disallowed_tools, model, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO channel_configs (channel_id, agent, runtime, permission_mode, allowed_tools, disallowed_tools, model, allowed_mcps, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(channel_id) DO UPDATE SET
       agent = excluded.agent,
       runtime = excluded.runtime,
@@ -57,6 +62,7 @@ export function setChannelConfig(
       allowed_tools = excluded.allowed_tools,
       disallowed_tools = excluded.disallowed_tools,
       model = excluded.model,
+      allowed_mcps = excluded.allowed_mcps,
       updated_at = datetime('now')
   `).run(
     channelId,
@@ -65,7 +71,8 @@ export function setChannelConfig(
     merged.permissionMode || null,
     merged.allowedTools ? JSON.stringify(merged.allowedTools) : null,
     merged.disallowedTools ? JSON.stringify(merged.disallowedTools) : null,
-    merged.model || null
+    merged.model || null,
+    merged.allowedMcps ? JSON.stringify(merged.allowedMcps) : null
   );
 
   return {
