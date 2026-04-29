@@ -722,17 +722,17 @@ export async function executeHandoff(
     return null;
   }
 
-  // Post the originating agent's message to the channel
+  // Post the from→to arrow. Pre-handoff text itself is posted by the caller:
+  // bot.ts / discord-transport.ts handle the initial step before invoking
+  // runHandoffChain; executeChainCore posts subsequent steps via
+  // sink.postPreHandoffText. Posting it here too caused the message to
+  // appear twice in Discord.
   try {
-    if (preHandoffText) {
-      const chunks = monitor.splitForDiscord(`**${capitalize(fromAgent)}:** ${preHandoffText}`, 1900, "handoff:pre-text");
-      for (const chunk of chunks) await channel.send(chunk);
-    }
     await channel.send(
       `*${capitalize(fromAgent)} → ${capitalize(toAgent)}:* ${handoffMessage.slice(0, 500)}`
     );
   } catch (err: any) {
-    console.error(`[HANDOFF] Failed to post pre-handoff text: ${err.message}`);
+    console.error(`[HANDOFF] Failed to post handoff arrow: ${err.message}`);
   }
 
   // Update active agent
