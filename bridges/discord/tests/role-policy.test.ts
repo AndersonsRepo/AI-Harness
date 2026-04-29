@@ -10,11 +10,13 @@ function cleanupChannel(channelId: string): void {
 }
 
 describe("Role Policy — Runtime Selection", () => {
-  it("defaults builder and researcher to Codex; reviewer to Claude", () => {
+  it("defaults builder/researcher/education to Codex; reviewer to Claude", () => {
     assert.equal(getPreferredRuntimeForAgent("builder"), "codex");
     assert.deepEqual(getFallbackOrderForAgent("builder"), ["codex", "claude"]);
     assert.equal(getPreferredRuntimeForAgent("researcher"), "codex");
     assert.deepEqual(getFallbackOrderForAgent("researcher"), ["codex", "claude"]);
+    assert.equal(getPreferredRuntimeForAgent("education"), "codex");
+    assert.deepEqual(getFallbackOrderForAgent("education"), ["codex", "claude"]);
     assert.equal(getPreferredRuntimeForAgent("reviewer"), "claude");
     assert.deepEqual(getFallbackOrderForAgent("reviewer"), ["claude", "codex"]);
   });
