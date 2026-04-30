@@ -592,6 +592,9 @@ describe("Handoff Router — Runtime Resolution", () => {
     assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "codex-builder"), "codex");
     assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "reviewer"), "codex");
     assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "tester"), "codex");
-    assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "orchestrator"), "claude");
+    assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "orchestrator"), "codex");
+    // ops is the post-D3.1 Claude-default sentinel — no role-policy override,
+    // no codex frontmatter. If it flips, role-policy or agent file changed.
+    assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "ops"), "claude");
   });
 });

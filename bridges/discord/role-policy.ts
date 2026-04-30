@@ -19,7 +19,8 @@ export function getPreferredRuntimeForAgent(agentName?: string | null): AgentRun
     agentName === "researcher" ||
     agentName === "education" ||
     agentName === "reviewer" ||
-    agentName === "tester"
+    agentName === "tester" ||
+    agentName === "orchestrator"
   ) {
     return "codex";
   }

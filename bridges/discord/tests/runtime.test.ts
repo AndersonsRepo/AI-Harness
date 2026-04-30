@@ -160,7 +160,7 @@ describe("Task Runner — Mixed Runtime Dispatch", () => {
     assert.equal(getTask(taskId)?.runtime, "codex");
   });
 
-  it("keeps orchestrator tasks on Claude by role policy when there is no override", async () => {
+  it("routes orchestrator tasks to Codex by role policy when there is no override (D3.1)", async () => {
     const channelId = "runtime-orchestrator-task";
     const taskId = submitTask({
       channelId,
@@ -174,12 +174,12 @@ describe("Task Runner — Mixed Runtime Dispatch", () => {
     const output = await outputPromise;
 
     assert.ok(spawnResult);
-    assert.equal(spawnResult?.runtime, "claude");
-    assert.equal(spawnCalls[0]?.args[0].endsWith("claude-runner.py"), true);
-    assert.equal(output.response, "Claude completed it");
-    assert.equal(output.sessionId, "claude-session-123");
-    assert.equal(getSession(channelId, "claude"), "claude-session-123");
-    assert.equal(getTask(taskId)?.runtime, "claude");
+    assert.equal(spawnResult?.runtime, "codex");
+    assert.equal(spawnCalls[0]?.args[0].endsWith("codex-runner.py"), true);
+    assert.equal(output.response, "Codex built it");
+    assert.equal(output.sessionId, "codex-thread-123");
+    assert.equal(getSession(channelId, "codex"), "codex-thread-123");
+    assert.equal(getTask(taskId)?.runtime, "codex");
   });
 
   it("channel runtime override takes precedence over agent metadata", () => {
