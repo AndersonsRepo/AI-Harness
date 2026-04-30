@@ -83,7 +83,11 @@ function fmtCents(c: number): string {
 function fmtDuration(ms: number): string {
   if (ms === 0) return "—";
   if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const remSec = sec % 60;
+  return remSec === 0 ? `${min}m` : `${min}m${String(remSec).padStart(2, "0")}s`;
 }
 
 function fmtPct(num: number, denom: number): string {
@@ -110,21 +114,32 @@ export function formatReport(rows: RoleTelemetryRow[], opts: AggregateOptions = 
     };
   }
 
-  const header =
-    "| agent           | runtime | count | cost   | avg dur | err%   | loop% | tools |";
-  const sep =
-    "|-----------------|---------|------:|-------:|--------:|-------:|------:|------:|";
-  const lines = [header, sep];
+  // Discord code blocks wrap above ~70 chars on narrow viewports, so each row
+  // must stay short. Group by agent so runtimes appear under a single heading;
+  // drop loop% (almost always 0) and tools (noisy, only meaningful for Claude).
+  const byAgent = new Map<string, RoleTelemetryRow[]>();
   for (const r of rows) {
-    const agent = r.agent.padEnd(15).slice(0, 15);
-    const runtime = r.runtime.padEnd(7);
-    const count = String(r.count).padStart(5);
-    const cost = fmtCents(r.totalCostCents).padStart(6);
-    const dur = fmtDuration(r.avgDurationMs).padStart(7);
-    const errPct = fmtPct(r.errorCount, r.count).padStart(6);
-    const loopPct = fmtPct(r.loopCount, r.count).padStart(5);
-    const tools = String(r.totalTools).padStart(5);
-    lines.push(`| ${agent} | ${runtime} | ${count} | ${cost} | ${dur} | ${errPct} | ${loopPct} | ${tools} |`);
+    const list = byAgent.get(r.agent) ?? [];
+    list.push(r);
+    byAgent.set(r.agent, list);
+  }
+
+  const lines: string[] = [];
+  const sortedAgents = Array.from(byAgent.keys()).sort();
+  for (let i = 0; i < sortedAgents.length; i++) {
+    const agent = sortedAgents[i];
+    if (i > 0) lines.push("");
+    lines.push(agent);
+    const runtimes = byAgent.get(agent)!.slice().sort((a, b) => a.runtime.localeCompare(b.runtime));
+    for (const r of runtimes) {
+      const runtime = r.runtime.padEnd(8);
+      const count = String(r.count).padStart(5);
+      const cost = fmtCents(r.totalCostCents).padStart(6);
+      const dur = fmtDuration(r.avgDurationMs).padStart(6);
+      const errPct = fmtPct(r.errorCount, r.count).padStart(5);
+      // Width: 2 + 8 + 1 + 5 + 2 + 6 + 2 + 6 + 2 + 5 + 4 = ~43 chars
+      lines.push(`  ${runtime} ${count}  ${cost}  ${dur}  ${errPct} err`);
+    }
   }
   const table = lines.join("\n");
 
@@ -146,8 +161,8 @@ export function formatReport(rows: RoleTelemetryRow[], opts: AggregateOptions = 
   }
 
   const summary =
-    `${totalCount} tasks, ${fmtCents(totalCost)} total, ${fmtCents(claudeCost)} on Claude, ` +
-    `${codexShare.toFixed(0)}% on Codex.${warning}`;
+    `${totalCount} tasks · ${fmtCents(totalCost)} total · ${fmtCents(claudeCost)} Claude · ` +
+    `${codexShare.toFixed(0)}% Codex${warning}`;
 
   return { windowLabel, table, summary };
 }

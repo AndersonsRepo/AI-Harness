@@ -112,7 +112,7 @@ describe("role-telemetry aggregation", () => {
     assert.equal(legacy.totalCostCents, 3);
   });
 
-  it("formatReport produces a non-empty table and summary", () => {
+  it("formatReport produces a grouped, narrow layout", () => {
     const rows = aggregateByRoleRuntime({
       since: new Date("2026-04-22T00:00:00Z"),
       until: new Date("2026-04-29T00:00:00Z"),
@@ -123,11 +123,33 @@ describe("role-telemetry aggregation", () => {
     });
 
     assert.equal(report.windowLabel, "2026-04-22 → 2026-04-29");
-    assert.match(report.table, /agent\s+\| runtime/);
-    assert.match(report.table, /researcher/);
-    assert.match(report.table, /codex/);
+    // Agent appears as its own line (heading), runtimes indented under it
+    assert.match(report.table, /^researcher$/m);
+    assert.match(report.table, /^builder$/m);
+    assert.match(report.table, /^  codex/m);
+    // err suffix on each row
+    assert.match(report.table, / err/);
+    // No markdown table chrome
+    assert.ok(!report.table.includes("|"), "should not include markdown table pipes");
+    // Each table line under 70 chars (Discord narrow viewport tolerance)
+    const longest = report.table.split("\n").reduce((m, l) => Math.max(m, l.length), 0);
+    assert.ok(longest <= 70, `longest line ${longest} exceeds 70 chars`);
     assert.match(report.summary, /tasks/);
     assert.equal(report.emptyMessage, undefined);
+  });
+
+  it("fmtDuration renders minutes for >=60s", () => {
+    const rows = aggregateByRoleRuntime({
+      since: new Date("2026-04-22T00:00:00Z"),
+      until: new Date("2026-04-29T00:00:00Z"),
+    });
+    const report = formatReport(rows, {
+      since: new Date("2026-04-22T00:00:00Z"),
+      until: new Date("2026-04-29T00:00:00Z"),
+    });
+    // No row in the fixture exceeds 60s; just confirm no fractional-second
+    // notation like "12.0s" leaked through (we round before formatting).
+    assert.ok(!/\d+\.\ds /.test(report.table), "should not have fractional seconds");
   });
 
   it("formatReport emptyMessage when no rows", () => {
