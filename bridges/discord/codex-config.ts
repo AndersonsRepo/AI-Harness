@@ -76,6 +76,35 @@ export function buildCodexMcpApprovalArgs(
   return args;
 }
 
+// Per-spawn env propagation for the harness MCP server. Codex CLI does not
+// inherit parent env into MCP subprocesses, so without these overrides any
+// harness-MCP tool that reads HARNESS_* env vars (chiefly harness_handoff)
+// returns "Handoff unavailable: harness env vars... are not set" — see
+// ERR-20260430-001 for the diagnosis.
+//
+// Strategy mirrors buildCodexMcpApprovalArgs: only emit overrides if the
+// harness MCP server is actually registered. Each value is double-quote
+// escaped because they land inside a TOML string literal on the codex CLI.
+// The values come from a known-shape set (channelId is digits, sessionKey
+// is `<channelId>:<agentName>`, fromAgent is one of a fixed roster) so an
+// embedded double quote is not a real-world hazard, but we escape anyway
+// because it's free and makes the helper robust if the call sites widen.
+export function buildCodexHarnessEnvArgs(opts: {
+  channelId: string;
+  sessionKey: string;
+  fromAgent: string;
+  registryPath?: string;
+}): string[] {
+  const registered = readCodexMcpRegistry(opts.registryPath);
+  if (!registered.has("harness")) return [];
+  const esc = (s: string) => s.replace(/"/g, '\\"');
+  return [
+    "-c", `mcp_servers.harness.env.HARNESS_CHANNEL_ID="${esc(opts.channelId)}"`,
+    "-c", `mcp_servers.harness.env.HARNESS_SESSION_KEY="${esc(opts.sessionKey)}"`,
+    "-c", `mcp_servers.harness.env.HARNESS_FROM_AGENT="${esc(opts.fromAgent)}"`,
+  ];
+}
+
 function composePrompt(parts: {
   agentPrompt?: string | null;
   context?: string | null;
@@ -161,6 +190,17 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
   // "user cancelled MCP tool call" — see header comment on
   // buildCodexMcpApprovalArgs for the full rationale.
   runnerArgs.push(...buildCodexMcpApprovalArgs(opts.channelId));
+
+  // Inject HARNESS_* env vars into the harness MCP subprocess so tools
+  // like harness_handoff can identify the chain context. Codex doesn't
+  // pass parent env to MCP subprocesses by default — see ERR-20260430-001.
+  runnerArgs.push(
+    ...buildCodexHarnessEnvArgs({
+      channelId: opts.channelId,
+      sessionKey,
+      fromAgent,
+    }),
+  );
 
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),

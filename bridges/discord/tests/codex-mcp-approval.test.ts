@@ -9,7 +9,7 @@ mkdirSync(join(harnessRoot, "bridges", "discord"), { recursive: true });
 process.env.HARNESS_ROOT = harnessRoot;
 
 const { setChannelConfig, clearChannelConfig } = await import("../channel-config-store.js");
-const { buildCodexMcpApprovalArgs } = await import("../codex-config.js");
+const { buildCodexMcpApprovalArgs, buildCodexHarnessEnvArgs } = await import("../codex-config.js");
 
 const fixtureDir = mkdtempSync(join(tmpdir(), "aih-codex-toml-"));
 const tomlPath = join(fixtureDir, "config.toml");
@@ -73,6 +73,87 @@ describe("buildCodexMcpApprovalArgs", () => {
   it("returns [] when codex config.toml is missing", () => {
     setChannelConfig(CHAN, { allowedMcps: ["vault"] });
     const args = buildCodexMcpApprovalArgs(CHAN, join(fixtureDir, "does-not-exist.toml"));
+    assert.deepEqual(args, []);
+  });
+});
+
+describe("buildCodexHarnessEnvArgs — propagate HARNESS_* env into harness MCP subprocess", () => {
+  // ERR-20260430-001: Codex doesn't inherit parent env into MCP subprocesses.
+  // Without these -c overrides, harness_handoff (and any future tool that
+  // reads HARNESS_* env vars) errors out under Codex.
+  //
+  // Owns its own fixture dir because the previous describe block's after()
+  // hook wipes the shared one before this block runs.
+
+  const myFixtureDir = mkdtempSync(join(tmpdir(), "aih-codex-env-toml-"));
+  const myTomlPath = join(myFixtureDir, "config.toml");
+  writeFileSync(
+    myTomlPath,
+    [
+      'model = "gpt-5.4"',
+      "",
+      "[mcp_servers.vault]",
+      'command = "node"',
+      "",
+      "[mcp_servers.harness]",
+      'command = "node"',
+      "",
+    ].join("\n"),
+  );
+
+  after(() => {
+    rmSync(myFixtureDir, { recursive: true, force: true });
+  });
+
+  it("emits three -c overrides when harness MCP is registered", () => {
+    const args = buildCodexHarnessEnvArgs({
+      channelId: "1499234537090322443",
+      sessionKey: "1499234537090322443:orchestrator",
+      fromAgent: "orchestrator",
+      registryPath: myTomlPath,
+    });
+    assert.deepEqual(args, [
+      "-c", 'mcp_servers.harness.env.HARNESS_CHANNEL_ID="1499234537090322443"',
+      "-c", 'mcp_servers.harness.env.HARNESS_SESSION_KEY="1499234537090322443:orchestrator"',
+      "-c", 'mcp_servers.harness.env.HARNESS_FROM_AGENT="orchestrator"',
+    ]);
+  });
+
+  it("returns [] when the harness MCP server is not registered with codex", () => {
+    const noHarnessToml = join(myFixtureDir, "no-harness.toml");
+    writeFileSync(
+      noHarnessToml,
+      'model = "gpt-5.4"\n\n[mcp_servers.vault]\ncommand = "node"\n',
+    );
+    const args = buildCodexHarnessEnvArgs({
+      channelId: "abc",
+      sessionKey: "abc:orchestrator",
+      fromAgent: "orchestrator",
+      registryPath: noHarnessToml,
+    });
+    assert.deepEqual(args, []);
+  });
+
+  it("escapes embedded double quotes in values", () => {
+    // Defensive: real-world values won't contain `"` (digits + colon + agent
+    // name from a fixed roster) but the helper should still produce a valid
+    // TOML string literal if the call sites widen.
+    const args = buildCodexHarnessEnvArgs({
+      channelId: 'weird"chan',
+      sessionKey: "session",
+      fromAgent: "agent",
+      registryPath: myTomlPath,
+    });
+    assert.equal(args[1], 'mcp_servers.harness.env.HARNESS_CHANNEL_ID="weird\\"chan"');
+  });
+
+  it("returns [] when codex config.toml is missing", () => {
+    const args = buildCodexHarnessEnvArgs({
+      channelId: "abc",
+      sessionKey: "abc:orchestrator",
+      fromAgent: "orchestrator",
+      registryPath: join(myFixtureDir, "does-not-exist.toml"),
+    });
     assert.deepEqual(args, []);
   });
 });
