@@ -2316,28 +2316,6 @@ client.on("clientReady", async () => {
     }
   }
 
-  // Performance channel — destination for the weekly role-telemetry heartbeat
-  // and any other long-form metrics reports. Top-level so it stays out of
-  // school/scheduler categories.
-  for (const guild of client.guilds.cache.values()) {
-    try {
-      const perfCh = guild.channels.cache.find(
-        (c) => c.name === "performance" && c.type === ChannelType.GuildText
-      );
-      if (!perfCh) {
-        await guild.channels.create({
-          name: "performance",
-          type: ChannelType.GuildText,
-          topic: "Per-role telemetry, cost tracking, runtime quality drift signals",
-          reason: "AI Harness performance telemetry",
-        });
-        console.log(`[PERFORMANCE] Created #performance channel in ${guild.name}`);
-      }
-    } catch (err: any) {
-      console.error(`[PERFORMANCE] Failed to create performance channel: ${err.message}`);
-    }
-  }
-
   // Ensure separate hackathon project channels exist (1 per project)
   // NOTE: createProject() prefixes channel names with "proj-", so check for that
   // Ensure separate hackathon project channels exist (1 per project)

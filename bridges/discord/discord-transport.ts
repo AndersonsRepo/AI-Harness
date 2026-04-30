@@ -979,6 +979,21 @@ export class DiscordTransport implements TransportAdapter {
           });
           console.log(`[DISCORD] Created #linkedin`);
         }
+
+        // Performance channel (top-level) — destination for weekly role-
+        // telemetry heartbeat and other long-form metrics reports.
+        const perfCh = guild.channels.cache.find(
+          (c) => c.name === "performance" && c.type === ChannelType.GuildText
+        );
+        if (!perfCh) {
+          await guild.channels.create({
+            name: "performance",
+            type: ChannelType.GuildText,
+            topic: "Per-role telemetry, cost tracking, runtime quality drift signals",
+            reason: "AI Harness performance telemetry",
+          });
+          console.log(`[DISCORD] Created #performance`);
+        }
       } catch (err: any) {
         console.error(`[DISCORD] Channel setup failed: ${err.message}`);
       }
