@@ -5,7 +5,7 @@ import { getDb } from "./db.js";
 import { setSession, validateSession } from "./session-store.js";
 import { getChannelConfig } from "./channel-config-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
-import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance } from "./instance-monitor.js";
+import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance, recordCodexResult } from "./instance-monitor.js";
 import { proc } from "./platform.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
 import {
@@ -502,6 +502,15 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     // Successful response — reset API failure counter
     if (runtime === "claude") {
       recordApiSuccess();
+    }
+
+    // Codex stdout is the JSONL event stream. Claude streams events to
+    // chunk files in streamDir which the StreamPoller already feeds into
+    // processMonitorEvent; Codex doesn't (codex-runner.py's --stream-dir
+    // is accept-only-for-compat per its docstring). Without this, every
+    // Codex spawn records `total_tools = 0` regardless of MCP/Bash usage.
+    if (runtime === "codex" && typeof stdout === "string") {
+      recordCodexResult(taskId, stdout);
     }
 
     const responseText = runtime === "codex"

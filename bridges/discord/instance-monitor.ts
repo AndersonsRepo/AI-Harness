@@ -311,6 +311,88 @@ function pushToolCall(instance: MonitoredInstance, tool: ToolCallEvent): void {
   }
 }
 
+// ─── Codex JSONL Parsing ────────────────────────────────────────────
+//
+// Codex emits a different event shape than Claude's stream-json. The
+// per-event handler above matches Claude's `assistant` blocks; this
+// post-completion pass walks the full Codex JSONL stdout and synthesizes
+// telemetry so role-telemetry / task_telemetry don't silently report
+// `total_tools = 0` for every Codex spawn.
+//
+// Codex shapes consumed here (item.completed events with item.type =):
+//   - mcp_tool_call    → tool call, name `mcp__<server>__<tool>`
+//   - command_execution → Bash equivalent
+//   - agent_message    → assistant text accumulation
+// And turn-level:
+//   - turn.completed.usage.{input_tokens,output_tokens} → token estimates
+
+export function recordCodexResult(taskId: string, stdoutJsonl: string): void {
+  const instance = instances.get(taskId);
+  if (!instance || typeof stdoutJsonl !== "string" || !stdoutJsonl) return;
+
+  for (const rawLine of stdoutJsonl.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let ev: any;
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!ev || typeof ev !== "object") continue;
+
+    if (ev.type === "item.completed" && ev.item && typeof ev.item === "object") {
+      const item = ev.item;
+      const itemType = String(item.type || "");
+
+      if (itemType === "mcp_tool_call") {
+        const server = String(item.server || "unknown");
+        const tool = String(item.tool || "unknown");
+        const toolName = `mcp__${server}__${tool}`;
+        const toolInput = (item.arguments && typeof item.arguments === "object")
+          ? item.arguments as Record<string, unknown>
+          : {};
+        let resultPreview: string;
+        if (item.error && typeof item.error === "object" && item.error.message) {
+          resultPreview = `Error: ${String(item.error.message).slice(0, 200)}`;
+        } else if (item.result !== undefined && item.result !== null) {
+          resultPreview = JSON.stringify(item.result).slice(0, 200);
+        } else {
+          resultPreview = "";
+        }
+        pushToolCall(instance, {
+          timestamp: Date.now(),
+          toolName,
+          toolInput,
+          displaySummary: formatToolSummary(toolName, toolInput),
+          resultPreview,
+        });
+      } else if (itemType === "command_execution") {
+        const command = String(item.command || "");
+        pushToolCall(instance, {
+          timestamp: Date.now(),
+          toolName: "Bash",
+          toolInput: { command },
+          displaySummary: formatToolSummary("Bash", { command }),
+          resultPreview: String(item.output || "").slice(0, 200),
+        });
+      } else if (itemType === "agent_message" && typeof item.text === "string") {
+        instance.assistantText += item.text;
+        instance.estimatedOutputTokens = Math.round(instance.assistantText.length / 4);
+      }
+    } else if (ev.type === "turn.completed" && ev.usage && typeof ev.usage === "object") {
+      // Authoritative token counts from Codex itself — preferred over the
+      // text-length estimate maintained while accumulating agent_message.
+      if (typeof ev.usage.input_tokens === "number") {
+        instance.estimatedInputTokens = ev.usage.input_tokens;
+      }
+      if (typeof ev.usage.output_tokens === "number") {
+        instance.estimatedOutputTokens = ev.usage.output_tokens;
+      }
+    }
+  }
+}
+
 // ─── Intervention Controls ───────────────────────────────────────────
 
 export function setHoldContinuation(taskId: string, hold: boolean): boolean {

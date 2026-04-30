@@ -1,3 +1,6 @@
+import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { getChannelConfig } from "./channel-config-store.js";
 import { assembleContext } from "./context-assembler.js";
 import { readAgentPrompt, readAgentMetadata, CodexSandbox, agentAllowsWrite } from "./agent-loader.js";
@@ -5,6 +8,7 @@ import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { HARNESS_ROOT } from "./claude-config.js";
 import { safetyPatternsJson } from "./safety.js";
 import { getSession } from "./session-store.js";
+import { resolveAllowedMcps } from "./mcp-config-builder.js";
 
 export interface CodexRunConfig {
   prompt: string;
@@ -27,6 +31,50 @@ export interface BuildCodexConfigOptions {
 }
 
 const DEFAULT_SANDBOX: CodexSandbox = "workspace-write";
+
+// Codex MCP servers default to `default_tools_approval_mode="prompt"`, which
+// hangs `codex exec` (no human to approve) — every call returns "user
+// cancelled MCP tool call". For headless spawns we override the registered
+// servers to "approve" so MCP tools execute without prompting. Scoped to the
+// spawn via `-c` rather than persisted to ~/.codex/config.toml so an
+// interactive `codex` from a terminal still uses the safer prompt default.
+//
+// Read directly from ~/.codex/config.toml because Codex maintains its own MCP
+// registry separate from Claude's ~/.claude.json (a parallel registry, not a
+// shared one). The regex matches the canonical [mcp_servers.<name>] heading
+// shape codex itself emits — exotic quoted names would slip past, but those
+// aren't producible via `codex mcp add`.
+function readCodexMcpRegistry(configPath?: string): Set<string> {
+  const path = configPath ?? join(homedir(), ".codex", "config.toml");
+  if (!existsSync(path)) return new Set();
+  try {
+    const text = readFileSync(path, "utf-8");
+    const names = new Set<string>();
+    const re = /^\[mcp_servers\.([A-Za-z0-9_-]+)\]/gm;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      names.add(m[1]!);
+    }
+    return names;
+  } catch {
+    return new Set();
+  }
+}
+
+export function buildCodexMcpApprovalArgs(
+  channelId: string,
+  registryPath?: string,
+): string[] {
+  const allowed = resolveAllowedMcps(channelId);
+  const registered = readCodexMcpRegistry(registryPath);
+  const args: string[] = [];
+  for (const name of allowed) {
+    if (registered.has(name)) {
+      args.push("-c", `mcp_servers.${name}.default_tools_approval_mode="approve"`);
+    }
+  }
+  return args;
+}
 
 function composePrompt(parts: {
   agentPrompt?: string | null;
@@ -107,6 +155,13 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
     "--skip-git-repo-check",
     "-c", "approval_policy=\"never\"",
   );
+
+  // Auto-approve MCP tool calls for registered servers in this channel's
+  // allowlist. Without this, `codex exec` hangs the call and surfaces
+  // "user cancelled MCP tool call" — see header comment on
+  // buildCodexMcpApprovalArgs for the full rationale.
+  runnerArgs.push(...buildCodexMcpApprovalArgs(opts.channelId));
+
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     HARNESS_ROOT,
