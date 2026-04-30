@@ -23,7 +23,7 @@ NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 REPORT_SCRIPT = os.path.join(HARNESS_ROOT, "scripts", "role-telemetry-report.ts")
 
 
-def notify(message: str, channel: str = "agent-stream") -> None:
+def notify(message: str, channel: str = "performance") -> None:
     entry = {
         "task": "role-telemetry-weekly",
         "channel": channel,
@@ -75,7 +75,7 @@ def main() -> int:
 
     message = f"**Weekly role telemetry**\n```\n{body}\n```"
     notify(message)
-    print(f"Queued report ({len(message)} chars) → #agent-stream")
+    print(f"Queued report ({len(message)} chars) → #performance")
     return 0
 
 
