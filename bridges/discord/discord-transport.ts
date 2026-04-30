@@ -333,7 +333,9 @@ export class DiscordTransport implements TransportAdapter {
           }
         });
 
-        // Channel creation handled by bot.ts — removed here to prevent duplicates
+        // Channel auto-setup (school/courses/linkedin/performance). bot.ts is
+        // legacy/dead and never runs this — see ERR-20260429-003.
+        await this.ensureChannels();
 
         // Notification drain polling
         const notifyFile = join(this.config.harnessRoot, "heartbeat-tasks", "pending-notifications.jsonl");
