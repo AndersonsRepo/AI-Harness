@@ -138,12 +138,34 @@ describe("Task Runner — Mixed Runtime Dispatch", () => {
     assert.equal(getTask(taskId)?.runtime, "codex");
   });
 
-  it("keeps reviewer tasks on Claude by role policy when there is no override", async () => {
+  it("routes reviewer tasks to Codex by role policy when there is no override", async () => {
     const channelId = "runtime-reviewer-task";
     const taskId = submitTask({
       channelId,
       prompt: "Review this change",
       agent: "reviewer",
+      sessionKey: channelId,
+    });
+
+    const outputPromise = waitForTaskOutput(taskId);
+    const spawnResult = await spawnTask(taskId);
+    const output = await outputPromise;
+
+    assert.ok(spawnResult);
+    assert.equal(spawnResult?.runtime, "codex");
+    assert.equal(spawnCalls[0]?.args[0].endsWith("codex-runner.py"), true);
+    assert.equal(output.response, "Codex built it");
+    assert.equal(output.sessionId, "codex-thread-123");
+    assert.equal(getSession(channelId, "codex"), "codex-thread-123");
+    assert.equal(getTask(taskId)?.runtime, "codex");
+  });
+
+  it("keeps orchestrator tasks on Claude by role policy when there is no override", async () => {
+    const channelId = "runtime-orchestrator-task";
+    const taskId = submitTask({
+      channelId,
+      prompt: "Plan the work",
+      agent: "orchestrator",
       sessionKey: channelId,
     });
 

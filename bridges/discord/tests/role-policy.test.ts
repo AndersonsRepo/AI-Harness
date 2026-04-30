@@ -10,29 +10,33 @@ function cleanupChannel(channelId: string): void {
 }
 
 describe("Role Policy — Runtime Selection", () => {
-  it("defaults builder/researcher/education to Codex; reviewer to Claude", () => {
+  it("defaults builder/researcher/education/reviewer/tester to Codex; orchestrator to Claude", () => {
     assert.equal(getPreferredRuntimeForAgent("builder"), "codex");
     assert.deepEqual(getFallbackOrderForAgent("builder"), ["codex", "claude"]);
     assert.equal(getPreferredRuntimeForAgent("researcher"), "codex");
     assert.deepEqual(getFallbackOrderForAgent("researcher"), ["codex", "claude"]);
     assert.equal(getPreferredRuntimeForAgent("education"), "codex");
     assert.deepEqual(getFallbackOrderForAgent("education"), ["codex", "claude"]);
-    assert.equal(getPreferredRuntimeForAgent("reviewer"), "claude");
-    assert.deepEqual(getFallbackOrderForAgent("reviewer"), ["claude", "codex"]);
+    assert.equal(getPreferredRuntimeForAgent("reviewer"), "codex");
+    assert.deepEqual(getFallbackOrderForAgent("reviewer"), ["codex", "claude"]);
+    assert.equal(getPreferredRuntimeForAgent("tester"), "codex");
+    assert.deepEqual(getFallbackOrderForAgent("tester"), ["codex", "claude"]);
+    assert.equal(getPreferredRuntimeForAgent("orchestrator"), "claude");
+    assert.deepEqual(getFallbackOrderForAgent("orchestrator"), ["claude", "codex"]);
   });
 
   it("uses channel override ahead of role policy while preserving fallback order", () => {
     const channelId = "role-policy-override";
-    setChannelConfig(channelId, { runtime: "codex", agent: "reviewer" });
+    setChannelConfig(channelId, { runtime: "claude", agent: "reviewer" });
 
     const policy = resolveRuntimePolicy({
       channelId,
       agentName: "reviewer",
     });
 
-    assert.equal(policy.selectedRuntime, "codex");
+    assert.equal(policy.selectedRuntime, "claude");
     assert.equal(policy.source, "channel");
-    assert.deepEqual(policy.fallbackOrder, ["codex", "claude"]);
+    assert.deepEqual(policy.fallbackOrder, ["claude", "codex"]);
     cleanupChannel(channelId);
   });
 });

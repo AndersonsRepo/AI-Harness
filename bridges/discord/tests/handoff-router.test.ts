@@ -590,6 +590,8 @@ describe("Handoff Router — Runtime Resolution", () => {
 
   it("falls back to agent runtime metadata when no channel override exists", () => {
     assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "codex-builder"), "codex");
-    assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "reviewer"), "claude");
+    assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "reviewer"), "codex");
+    assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "tester"), "codex");
+    assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "orchestrator"), "claude");
   });
 });
