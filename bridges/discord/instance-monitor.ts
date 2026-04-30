@@ -41,6 +41,10 @@ export interface MonitoredInstance {
   chunkCount: number;
   estimatedInputTokens: number;
   estimatedOutputTokens: number;
+  // Subset of estimatedInputTokens that hit the prompt cache. Codex reports
+  // this in turn.completed.usage.cached_input_tokens; Claude path leaves it 0
+  // (cache-cost capture for Claude is a separate follow-up).
+  cachedInputTokens: number;
 
   // Discord state
   monitorMessageId: string | null;
@@ -118,6 +122,7 @@ export function registerInstance(config: {
     chunkCount: 0,
     estimatedInputTokens: Math.round(config.prompt.length / 4) + 2000,
     estimatedOutputTokens: 0,
+    cachedInputTokens: 0,
 
     monitorMessageId: null,
     monitorThreadId: null,
@@ -324,7 +329,9 @@ function pushToolCall(instance: MonitoredInstance, tool: ToolCallEvent): void {
 //   - command_execution → Bash equivalent
 //   - agent_message    → assistant text accumulation
 // And turn-level:
-//   - turn.completed.usage.{input_tokens,output_tokens} → token estimates
+//   - turn.completed.usage.{input_tokens,output_tokens,cached_input_tokens}
+//     → token estimates (cached_input_tokens is a subset of input_tokens
+//     reported separately so cost can apply the cached rate to that slice)
 
 export function recordCodexResult(taskId: string, stdoutJsonl: string): void {
   const instance = instances.get(taskId);
@@ -389,6 +396,9 @@ export function recordCodexResult(taskId: string, stdoutJsonl: string): void {
       if (typeof ev.usage.output_tokens === "number") {
         instance.estimatedOutputTokens = ev.usage.output_tokens;
       }
+      if (typeof ev.usage.cached_input_tokens === "number") {
+        instance.cachedInputTokens = ev.usage.cached_input_tokens;
+      }
     }
   }
 }
@@ -426,6 +436,34 @@ export function isHoldingContinuation(taskId: string): boolean {
   return instances.get(taskId)?.holdContinuation || false;
 }
 
+// ─── Pricing ─────────────────────────────────────────────────────────
+//
+// Per-million-token rates in USD. Claude row prices Sonnet 4.x; Codex row
+// prices GPT-5.4 (the default model in ~/.codex/config.toml). Cached input
+// applies only to Codex for now — Claude prompt-cache cost capture is a
+// separate follow-up. If the runtime field on a MonitoredInstance ever
+// gains a third value, add a row here or the cost will silently fall back
+// to Claude pricing.
+const PRICING_PER_MTOK_USD: Record<
+  "claude" | "codex",
+  { input: number; cachedInput: number; output: number }
+> = {
+  claude: { input: 3, cachedInput: 3, output: 15 },
+  codex:  { input: 1.25, cachedInput: 0.125, output: 10 },
+};
+
+function estimateCostCents(instance: MonitoredInstance): number {
+  const rates = PRICING_PER_MTOK_USD[instance.runtime] ?? PRICING_PER_MTOK_USD.claude;
+  // cached_input_tokens is a subset of input_tokens; subtract so each slice
+  // is priced at its own rate. Defensive clamp covers a malformed payload
+  // where cached > input.
+  const cached = Math.max(0, Math.min(instance.cachedInputTokens, instance.estimatedInputTokens));
+  const fresh = instance.estimatedInputTokens - cached;
+  const inputCost = (fresh / 1_000_000) * rates.input + (cached / 1_000_000) * rates.cachedInput;
+  const outputCost = (instance.estimatedOutputTokens / 1_000_000) * rates.output;
+  return Math.round((inputCost + outputCost) * 100);
+}
+
 // ─── Summary for Persistence ─────────────────────────────────────────
 
 export function getCompletedSummary(taskId: string): {
@@ -441,11 +479,7 @@ export function getCompletedSummary(taskId: string): {
   if (!instance) return null;
 
   const durationMs = Date.now() - instance.startedAt;
-
-  // Cost estimate: Sonnet pricing $3/MTok input, $15/MTok output
-  const inputCost = (instance.estimatedInputTokens / 1_000_000) * 3;
-  const outputCost = (instance.estimatedOutputTokens / 1_000_000) * 15;
-  const estCostCents = Math.round((inputCost + outputCost) * 100);
+  const estCostCents = estimateCostCents(instance);
 
   return {
     toolCalls: instance.toolCalls,

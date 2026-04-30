@@ -179,3 +179,111 @@ describe("recordCodexResult — telemetry parsing for Codex JSONL", () => {
     assert.doesNotThrow(() => recordCodexResult(TASK_ID, jsonl));
   });
 });
+
+describe("estimateCostCents — runtime-branched pricing in getCompletedSummary", () => {
+  // Each test gets a fresh task_id so cost assertions don't bleed across cases.
+  // Phase 0 cost-capture (D3.1 plan): Codex spawns must be priced at GPT-5.4
+  // rates, not Sonnet — prior to this branch, telemetry over-reported Codex
+  // by ~2.4×.
+
+  async function runOne(opts: {
+    taskId: string;
+    runtime: "claude" | "codex";
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens?: number;
+  }) {
+    const { registerInstance, recordCodexResult, getCompletedSummary, finalizeInstance } =
+      await import("../instance-monitor.js");
+    registerInstance({
+      taskId: opts.taskId,
+      channelId: "chan-cost",
+      agent: "researcher",
+      runtime: opts.runtime,
+      prompt: "test",
+      pid: 9999,
+    });
+
+    if (opts.runtime === "codex") {
+      // For Codex, drive token counts through the JSONL parser so we exercise
+      // the same code path the runtime actually uses in production.
+      const usage: Record<string, number> = {
+        input_tokens: opts.inputTokens,
+        output_tokens: opts.outputTokens,
+      };
+      if (typeof opts.cachedInputTokens === "number") {
+        usage.cached_input_tokens = opts.cachedInputTokens;
+      }
+      recordCodexResult(opts.taskId, JSON.stringify({ type: "turn.completed", usage }));
+    } else {
+      // For Claude, the production path mutates estimatedInputTokens via
+      // stream-json events; for this unit test we set the counts directly
+      // using the registry. Reach into the Map the same way the production
+      // code does.
+      const { getInstance } = await import("../instance-monitor.js");
+      const inst = getInstance(opts.taskId)!;
+      inst.estimatedInputTokens = opts.inputTokens;
+      inst.estimatedOutputTokens = opts.outputTokens;
+    }
+
+    const summary = getCompletedSummary(opts.taskId)!;
+    finalizeInstance(opts.taskId, "completed");
+    return summary;
+  }
+
+  it("Codex spawn uses GPT-5.4 pricing ($1.25/$10 per MTok), not Sonnet", async () => {
+    // 100K input, 5K output
+    // Codex: 100_000 * 1.25/M + 5_000 * 10/M = $0.125 + $0.05 = $0.175 = 17.5¢ → 18¢
+    // (Sonnet would be: $0.30 + $0.075 = $0.375 = 37.5¢ → 38¢)
+    const summary = await runOne({
+      taskId: "cost-codex-no-cache",
+      runtime: "codex",
+      inputTokens: 100_000,
+      outputTokens: 5_000,
+    });
+    assert.equal(summary.estCostCents, 18, "Codex pricing should yield ~18¢");
+  });
+
+  it("Codex cached_input_tokens are billed at the cached rate ($0.125/MTok), not full input rate", async () => {
+    // 1M input total, 800K cached, 200K fresh, 100K output
+    // Fresh:  200_000 * 1.25/M  = $0.25
+    // Cached: 800_000 * 0.125/M = $0.10
+    // Output: 100_000 * 10/M    = $1.00
+    // Total: $1.35 = 135¢
+    // (Without caching applied, total would be $2.25 = 225¢ — caching saves ~40%)
+    const summary = await runOne({
+      taskId: "cost-codex-cached",
+      runtime: "codex",
+      inputTokens: 1_000_000,
+      cachedInputTokens: 800_000,
+      outputTokens: 100_000,
+    });
+    assert.equal(summary.estCostCents, 135, "Cached portion should be priced at $0.125/MTok");
+  });
+
+  it("Claude spawn keeps Sonnet pricing ($3/$15 per MTok) — no regression from Codex branch", async () => {
+    // Same shape as the Codex no-cache test, but Claude runtime.
+    // 100_000 * 3/M + 5_000 * 15/M = $0.30 + $0.075 = $0.375 = 37.5¢ → 38¢
+    const summary = await runOne({
+      taskId: "cost-claude-baseline",
+      runtime: "claude",
+      inputTokens: 100_000,
+      outputTokens: 5_000,
+    });
+    assert.equal(summary.estCostCents, 38, "Claude should still use Sonnet pricing");
+  });
+
+  it("malformed cached_input_tokens > input_tokens does not push fresh negative", async () => {
+    // Defensive clamp: if a payload reports cached > input, fresh would go
+    // negative without the Math.min guard, producing a credit. Guard ensures
+    // cost is non-negative and the entire input is treated as cached.
+    const summary = await runOne({
+      taskId: "cost-codex-malformed-cache",
+      runtime: "codex",
+      inputTokens: 100,
+      cachedInputTokens: 999_999,
+      outputTokens: 0,
+    });
+    assert.ok(summary.estCostCents >= 0, "cost cents must not go negative on bad payload");
+  });
+});
