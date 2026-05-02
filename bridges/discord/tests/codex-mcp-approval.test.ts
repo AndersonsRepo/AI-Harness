@@ -158,6 +158,181 @@ describe("buildCodexHarnessEnvArgs — propagate HARNESS_* env into harness MCP 
   });
 });
 
+describe("recordClaudeResult — post-hoc Claude stream-json replay for chain-step telemetry", () => {
+  // ERR-20260430-002: chain steps spawn via executeHandoffCore which doesn't
+  // run a StreamPoller, so events have to be replayed post-hoc from the full
+  // stdout once it lands. Mirrors recordCodexResult.
+  const TASK_ID = "test-claude-replay-1";
+
+  before(async () => {
+    const { registerInstance } = await import("../instance-monitor.js");
+    registerInstance({
+      taskId: TASK_ID,
+      channelId: "chan-claude-replay",
+      agent: "researcher",
+      runtime: "claude",
+      prompt: "test",
+      pid: 0,
+    });
+  });
+
+  after(async () => {
+    const { finalizeInstance } = await import("../instance-monitor.js");
+    finalizeInstance(TASK_ID, "completed");
+  });
+
+  it("replays assistant tool_use + text blocks into the instance", async () => {
+    const { recordClaudeResult, getCompletedSummary } = await import("../instance-monitor.js");
+    const stdout = [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "tool_use", name: "Bash", input: { command: "ls -la" } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", output: "total 12" }],
+        },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "Found 12 files in the directory." }],
+        },
+      }),
+      JSON.stringify({ type: "result", is_error: false }),
+    ].join("\n");
+
+    recordClaudeResult(TASK_ID, stdout);
+
+    const summary = getCompletedSummary(TASK_ID);
+    assert.ok(summary, "summary present");
+    assert.equal(summary!.totalTools, 1, "Bash tool_use counted");
+    assert.equal(summary!.toolCalls[0]!.toolName, "Bash");
+    // Output tokens estimated from accumulated assistant text length
+    assert.ok(summary!.estOutputTokens > 0, "output token estimate should be > 0");
+  });
+
+  it("ignores malformed lines + unknown event types without throwing", async () => {
+    const { recordClaudeResult } = await import("../instance-monitor.js");
+    const stdout = [
+      "",
+      "not json at all",
+      JSON.stringify({ type: "rate_limit_event" }),
+      JSON.stringify({ /* missing type */ }),
+    ].join("\n");
+    assert.doesNotThrow(() => recordClaudeResult(TASK_ID, stdout));
+  });
+
+  it("no-ops when the instance isn't registered", async () => {
+    const { recordClaudeResult } = await import("../instance-monitor.js");
+    assert.doesNotThrow(() =>
+      recordClaudeResult("never-registered-id", JSON.stringify({ type: "assistant" })),
+    );
+  });
+});
+
+describe("Chain-step telemetry persistence — registerInstance → record* → persistTaskTelemetry", () => {
+  // Integration-shape test: exercises the full pipeline executeHandoffCore
+  // now uses, against a real (test) DB. Doesn't go through executeHandoffCore
+  // itself (that would require spawning python3) — verifies the data shape
+  // and DB row land correctly given the right inputs.
+
+  it("Codex chain step: persists a task_telemetry row with runtime=codex and Codex pricing", async () => {
+    const { registerInstance, recordCodexResult, getCompletedSummary, finalizeInstance } =
+      await import("../instance-monitor.js");
+    const { persistTaskTelemetry } = await import("../task-telemetry.js");
+    const { getDb } = await import("../db.js");
+
+    const taskId = "chain-test-codex-step-1";
+    const channelId = "chan-chain-codex";
+    registerInstance({
+      taskId,
+      channelId,
+      agent: "researcher",
+      runtime: "codex",
+      prompt: "delegated researcher task",
+      pid: 0,
+    });
+
+    const stdout = JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: 50_000, output_tokens: 2_500 },
+    });
+    recordCodexResult(taskId, stdout);
+
+    const summary = getCompletedSummary(taskId);
+    assert.ok(summary, "summary populated");
+    persistTaskTelemetry({
+      taskId,
+      channelId,
+      agent: "researcher",
+      runtime: "codex",
+      prompt: "delegated researcher task",
+      status: "completed",
+      telemetry: summary!,
+      error: null,
+    });
+    finalizeInstance(taskId, "completed");
+
+    const row = getDb()
+      .prepare("SELECT agent, runtime, status, est_input_tokens, est_output_tokens, est_cost_cents FROM task_telemetry WHERE task_id = ?")
+      .get(taskId) as any;
+    assert.ok(row, "row exists");
+    assert.equal(row.agent, "researcher");
+    assert.equal(row.runtime, "codex");
+    assert.equal(row.status, "completed");
+    assert.equal(row.est_input_tokens, 50_000);
+    assert.equal(row.est_output_tokens, 2_500);
+    // 50k * 1.25/M + 2.5k * 10/M = $0.0625 + $0.025 = $0.0875 = 8.75¢ → 9¢
+    assert.equal(row.est_cost_cents, 9, "Codex pricing applied");
+  });
+
+  it("failed chain step: persists a task_telemetry row with status=failed + error message", async () => {
+    const { registerInstance, getCompletedSummary, finalizeInstance } =
+      await import("../instance-monitor.js");
+    const { persistTaskTelemetry } = await import("../task-telemetry.js");
+    const { getDb } = await import("../db.js");
+
+    const taskId = "chain-test-failed-step-1";
+    const channelId = "chan-chain-fail";
+    registerInstance({
+      taskId,
+      channelId,
+      agent: "builder",
+      runtime: "codex",
+      prompt: "build something",
+      pid: 0,
+    });
+
+    // No stdout fed → instance only has initial token estimate from registerInstance
+    const summary = getCompletedSummary(taskId);
+    assert.ok(summary);
+    persistTaskTelemetry({
+      taskId,
+      channelId,
+      agent: "builder",
+      runtime: "codex",
+      prompt: "build something",
+      status: "failed",
+      telemetry: summary!,
+      error: "timeout",
+    });
+    finalizeInstance(taskId, "failed");
+
+    const row = getDb()
+      .prepare("SELECT status, error FROM task_telemetry WHERE task_id = ?")
+      .get(taskId) as any;
+    assert.ok(row);
+    assert.equal(row.status, "failed");
+    assert.equal(row.error, "timeout");
+  });
+});
+
 describe("recordCodexResult — telemetry parsing for Codex JSONL", () => {
   const TASK_ID = "test-codex-record-1";
 

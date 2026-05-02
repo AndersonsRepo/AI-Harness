@@ -403,6 +403,38 @@ export function recordCodexResult(taskId: string, stdoutJsonl: string): void {
   }
 }
 
+// ─── Claude stdout post-hoc replay ───────────────────────────────────
+//
+// task-runner spawns drive a StreamPoller that feeds events into
+// processMonitorEvent live. The handoff-router path doesn't poll —
+// it watches for the result file and reads the whole stdout once at
+// the end. This helper iterates Claude's stream-json stdout post-hoc
+// and feeds each line through processMonitorEvent so chain-step
+// instances accumulate the same tool-call / token state that
+// task-runner spawns get for free.
+//
+// Mirrors recordCodexResult: tolerant of malformed lines, no-ops on
+// unknown event types, defensive against missing instances.
+
+export function recordClaudeResult(taskId: string, stdout: string): void {
+  const instance = instances.get(taskId);
+  if (!instance || typeof stdout !== "string" || !stdout) return;
+
+  for (const rawLine of stdout.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let event: any;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event && typeof event === "object" && typeof event.type === "string") {
+      processMonitorEvent(taskId, event);
+    }
+  }
+}
+
 // ─── Intervention Controls ───────────────────────────────────────────
 
 export function setHoldContinuation(taskId: string, hold: boolean): boolean {

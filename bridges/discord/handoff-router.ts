@@ -24,6 +24,14 @@ import {
   buildClaudeConfig,
 } from "./claude-config.js";
 import { buildCodexConfig, extractCodexResponse, extractCodexSessionId } from "./codex-config.js";
+import {
+  registerInstance,
+  recordCodexResult,
+  recordClaudeResult,
+  getCompletedSummary,
+  finalizeInstance,
+} from "./instance-monitor.js";
+import { persistTaskTelemetry } from "./task-telemetry.js";
 
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const MAX_CONTEXT_MESSAGES = 15;
@@ -538,6 +546,21 @@ export async function executeHandoffCore(
     skipSessionResume = false,
   } = params;
 
+  // Per-spawn telemetry id. Distinct prefix from task-runner's `task-` so
+  // role-telemetry consumers can identify chain-step rows specifically if
+  // ever needed. Matches the (taskId, channelId, agent, runtime) PK shape
+  // task_telemetry already uses for entry-point spawns. See ERR-20260430-002
+  // for the original gap that motivated this.
+  const chainTaskId = `chain-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  registerInstance({
+    taskId: chainTaskId,
+    channelId,
+    agent: toAgent,
+    runtime,
+    prompt,
+    pid: 0,
+  });
+
   // Runner-level timeout (seconds) matches the watcher-level timeout (ms)
   // so claude-runner.py / codex-runner.py kill their child agent BEFORE the
   // FileWatcher gives up — the runner's timeout writes a structured error
@@ -614,11 +637,60 @@ export async function executeHandoffCore(
     });
     childProc.unref();
 
+    // Persist task_telemetry for this chain step before resolving. The
+    // entry-point spawn path (task-runner.ts → core-gateway.ts) already
+    // does this; the chain path historically did not, so role-telemetry
+    // weekly reports under-counted chain specialists by however much chain
+    // traffic those roles see. ERR-20260430-002 has the full diagnosis.
+    //
+    // Wrap resolve in a helper so every exit path goes through telemetry
+    // capture without duplicating the call sites. Errors during persist
+    // are logged but never throw — telemetry must not break the chain.
+    const finalize = (
+      coreResult: ExecuteHandoffCoreResult,
+      stdout: string | undefined,
+    ): void => {
+      try {
+        if (typeof stdout === "string" && stdout) {
+          if (runtime === "codex") {
+            recordCodexResult(chainTaskId, stdout);
+          } else {
+            recordClaudeResult(chainTaskId, stdout);
+          }
+        }
+        const summary = getCompletedSummary(chainTaskId);
+        const status = coreResult.ok ? "completed" : "failed";
+        const errorMessage = coreResult.ok
+          ? undefined
+          : "errorMessage" in coreResult
+            ? coreResult.errorMessage
+            : coreResult.reason;
+        if (summary) {
+          persistTaskTelemetry({
+            taskId: chainTaskId,
+            channelId,
+            agent: toAgent,
+            runtime,
+            prompt,
+            status,
+            telemetry: summary,
+            error: errorMessage ?? null,
+          });
+        }
+      } catch (err: any) {
+        console.error(`[HANDOFF] Telemetry persist failed for ${chainTaskId}: ${err.message}`);
+      } finally {
+        finalizeInstance(chainTaskId, coreResult.ok ? "completed" : "failed");
+      }
+      resolve(coreResult);
+    };
+
     const watcher = new FileWatcher({
       filePath: outputFile,
       onFile: async (content: string) => {
         untrackWatcher(watcher);
 
+        let stdoutForTelemetry: string | undefined;
         try {
           if (promptFile && existsSync(promptFile)) {
             unlinkSync(promptFile);
@@ -629,10 +701,11 @@ export async function executeHandoffCore(
 
           const result = JSON.parse(content);
           const { stdout, stderr, returncode } = result;
+          stdoutForTelemetry = typeof stdout === "string" ? stdout : undefined;
 
           if (returncode !== 0) {
             const errorMsg = stderr?.trim() || `Agent exited with code ${returncode}`;
-            resolve({ ok: false, reason: "exit-nonzero", errorMessage: errorMsg });
+            finalize({ ok: false, reason: "exit-nonzero", errorMessage: errorMsg }, stdoutForTelemetry);
             return;
           }
 
@@ -648,21 +721,24 @@ export async function executeHandoffCore(
           }
 
           if (!responseText) {
-            resolve({ ok: false, reason: "no-response" });
+            finalize({ ok: false, reason: "no-response" }, stdoutForTelemetry);
             return;
           }
 
           const nextHandoff = parseHandoff(responseText);
-          resolve({
-            ok: true,
-            agentName: toAgent,
-            response: responseText,
-            nextHandoff,
-            sessionId: sessionId ?? null,
-          });
+          finalize(
+            {
+              ok: true,
+              agentName: toAgent,
+              response: responseText,
+              nextHandoff,
+              sessionId: sessionId ?? null,
+            },
+            stdoutForTelemetry,
+          );
         } catch (err: any) {
           console.error(`[HANDOFF] Error reading output: ${err.message}`);
-          resolve({ ok: false, reason: "parse-error", errorMessage: err.message });
+          finalize({ ok: false, reason: "parse-error", errorMessage: err.message }, stdoutForTelemetry);
         }
       },
       onTimeout: async () => {
@@ -670,7 +746,9 @@ export async function executeHandoffCore(
         if (promptFile && existsSync(promptFile)) {
           unlinkSync(promptFile);
         }
-        resolve({ ok: false, reason: "timeout" });
+        // Timeout path has no stdout — telemetry will reflect just the
+        // initial token estimate from registerInstance, marked failed.
+        finalize({ ok: false, reason: "timeout" }, undefined);
       },
       timeoutMs,
       fallbackPollMs: 2000,
