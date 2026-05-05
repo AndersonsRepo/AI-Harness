@@ -968,11 +968,14 @@ function getHeartbeatConfigs(): HeartbeatConfig[] {
     .map((f) => {
       try {
         const config = JSON.parse(readFileSync(join(HEARTBEAT_DIR, f), "utf-8"));
+        // Skip data/config files that aren't heartbeat tasks (course-map, projects, pr-review-config).
+        // Real tasks always have a scheduling field.
+        if (!config.schedule && !config.cron && !config.interval_minutes) return null;
         return {
           name: config.name || basename(f, ".json"),
           description: config.description || "",
           type: config.type || "unknown",
-          schedule: config.schedule || config.interval_minutes ? `${config.interval_minutes}m` : "unknown",
+          schedule: config.schedule || (config.interval_minutes ? `${config.interval_minutes}m` : config.cron || "unknown"),
           enabled: config.enabled !== false,
         };
       } catch {
