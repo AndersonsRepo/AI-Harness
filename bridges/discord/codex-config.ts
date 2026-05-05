@@ -3,10 +3,16 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { getChannelConfig } from "./channel-config-store.js";
 import { assembleContext } from "./context-assembler.js";
-import { readAgentPrompt, readAgentMetadata, CodexSandbox, agentAllowsWrite } from "./agent-loader.js";
+import {
+  readAgentPrompt,
+  readAgentMetadata,
+  CodexSandbox,
+  agentAllowsWrite,
+  AGENT_TOOL_RESTRICTIONS,
+} from "./agent-loader.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { HARNESS_ROOT } from "./claude-config.js";
-import { safetyPatternsJson } from "./safety.js";
+import { safetyPatternsJson, agentToolPolicyJson } from "./safety.js";
 import { getSession } from "./session-store.js";
 import { resolveAllowedMcps } from "./mcp-config-builder.js";
 
@@ -209,6 +215,16 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
     }),
   );
 
+  // Per-agent tool policy. Codex CLI has no `--disallowedTools` /
+  // `--allowedTools` analog, so codex-runner.py enforces this at the
+  // event-stream level by killing the subprocess on a violating
+  // command_execution / mcp_tool_call. Null when the agent has no
+  // restrictions or only restrictions on tools that have no JSONL
+  // representation (Read, Edit, Grep, …) — those are sandbox-governed.
+  const toolPolicy = agentName
+    ? agentToolPolicyJson(AGENT_TOOL_RESTRICTIONS[agentName])
+    : null;
+
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     HARNESS_ROOT,
@@ -218,6 +234,7 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
     // codex-runner.py enforces these at the event-stream level, since
     // `codex exec` has no equivalent of Claude's --disallowedTools flag.
     CODEX_SAFETY_PATTERNS: safetyPatternsJson(),
+    ...(toolPolicy ? { CODEX_TOOL_POLICY: toolPolicy } : {}),
     ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
   };
 

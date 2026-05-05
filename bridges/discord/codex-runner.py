@@ -168,6 +168,155 @@ def scan_for_destructive(line: str, compiled_patterns):
     return None
 
 
+# ─── Per-Agent Tool Policy ──────────────────────────────────────────
+#
+# Loaded from CODEX_TOOL_POLICY env (set by codex-config.ts). Mirrors the
+# Claude --allowedTools/--disallowedTools enforcement that doesn't exist
+# at the Codex CLI layer. We match `command_execution` and `mcp_tool_call`
+# events; anything else (Codex built-in file/search/web) is governed by
+# the sandbox flag instead and isn't visible here.
+
+
+def _load_agent_tool_policy():
+    """Parse the CODEX_TOOL_POLICY env var. Returns a dict with compiled
+    regex patterns or None if unset / malformed."""
+    raw = os.environ.get("CODEX_TOOL_POLICY")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        sys.stderr.write(
+            "[codex-runner] CODEX_TOOL_POLICY was set but not valid JSON; ignoring.\n"
+        )
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    mode = parsed.get("mode")
+    if mode not in ("whitelist", "blacklist"):
+        return None
+    bash = parsed.get("bashPatterns") or []
+    mcp = parsed.get("mcpPatterns") or []
+
+    compiled_bash = []
+    for entry in bash:
+        if not isinstance(entry, dict):
+            continue
+        pid = entry.get("id") or "unknown"
+        regex = entry.get("regex")
+        if not isinstance(regex, str):
+            continue
+        flags = re.IGNORECASE if entry.get("caseInsensitive") else 0
+        try:
+            compiled_bash.append((pid, re.compile(regex, flags)))
+        except re.error as e:
+            sys.stderr.write(f"[codex-runner] Skipping invalid policy pattern {pid!r}: {e}\n")
+
+    mcp_set = {m for m in mcp if isinstance(m, str)}
+    return {"mode": mode, "bashPatterns": compiled_bash, "mcpPatterns": mcp_set}
+
+
+def _classify_event(event):
+    """Return ('bash', command_str) or ('mcp', tool_name) or None.
+
+    Codex emits item.completed events for both shapes; we match them here
+    so the call site doesn't need to re-derive the event taxonomy. Returns
+    None for events that aren't tool calls (agent_message, turn.completed,
+    etc.)."""
+    if not isinstance(event, dict) or event.get("type") != "item.completed":
+        return None
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return None
+    item_type = str(item.get("type") or "")
+    if item_type == "command_execution":
+        cmd = item.get("command")
+        return ("bash", cmd) if isinstance(cmd, str) else None
+    if item_type == "mcp_tool_call":
+        server = item.get("server") or "unknown"
+        tool = item.get("tool") or "unknown"
+        return ("mcp", f"mcp__{server}__{tool}")
+    return None
+
+
+def scan_for_policy_violation(line: str, policy):
+    """Apply per-agent tool policy to one JSONL line.
+
+    Returns (violation_id, detail) when the event is a tool call that
+    violates the policy; None otherwise (including for non-tool-call
+    events, malformed lines, or when policy is None).
+    """
+    if not policy:
+        return None
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+    classified = _classify_event(event)
+    if not classified:
+        return None
+    kind, value = classified
+    mode = policy["mode"]
+
+    if kind == "bash":
+        matches = [pid for pid, pattern in policy["bashPatterns"] if pattern.search(value)]
+        if mode == "blacklist":
+            if matches:
+                return (f"policy-blacklist-bash:{matches[0]}", value)
+        else:  # whitelist
+            if not matches:
+                return ("policy-whitelist-bash:not-allowed", value)
+        return None
+
+    if kind == "mcp":
+        in_set = value in policy["mcpPatterns"]
+        if mode == "blacklist":
+            if in_set:
+                return (f"policy-blacklist-mcp:{value}", value)
+        else:  # whitelist
+            if not in_set:
+                return (f"policy-whitelist-mcp:{value}", value)
+        return None
+
+    return None
+
+
+# Flags accepted by `codex exec` but rejected by `codex exec resume`.
+_EXEC_ONLY_VALUE_FLAGS = {
+    "-s", "--sandbox",
+    "-C", "--cd",
+    "-p", "--profile",
+    "--add-dir",
+    "--output-schema",
+    "--color",
+    "--local-provider",
+}
+_EXEC_ONLY_BOOL_FLAGS = {"--oss"}
+
+
+def _strip_exec_only_flags(args):
+    out = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _EXEC_ONLY_VALUE_FLAGS:
+            i += 2
+            continue
+        if "=" in a and a.split("=", 1)[0] in _EXEC_ONLY_VALUE_FLAGS:
+            i += 1
+            continue
+        if a in _EXEC_ONLY_BOOL_FLAGS:
+            i += 1
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
 def main():
     args = sys.argv[1:]
     if len(args) < 1:
@@ -373,6 +522,7 @@ def main():
             pass
 
     safety_patterns = _load_safety_patterns()
+    tool_policy = _load_agent_tool_policy()
     backoff_delays = _resolve_backoff_delays()
     max_retries = len(backoff_delays)
 
@@ -431,6 +581,18 @@ def main():
             hit = scan_for_destructive(decoded, safety_patterns)
             if hit:
                 safety_violation[0] = hit
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                break
+
+            # Per-agent tool policy. The global destructive-pattern scan is
+            # the floor; this is the per-role cap (parity with Claude's
+            # AGENT_TOOL_RESTRICTIONS via --allowedTools/--disallowedTools).
+            policy_hit = scan_for_policy_violation(decoded, tool_policy)
+            if policy_hit:
+                safety_violation[0] = policy_hit
                 try:
                     proc.kill()
                 except OSError:
