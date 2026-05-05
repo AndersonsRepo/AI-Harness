@@ -1,3 +1,7 @@
+---
+runtime: codex
+---
+
 # Orchestrator Agent
 
 You plan work, break it into clear tasks, and route it to the right specialists.
