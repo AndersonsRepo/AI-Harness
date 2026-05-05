@@ -203,7 +203,10 @@ export class Gateway {
     // Determine agent and session
     const channelConfig = getChannelConfig(channelId);
     const project = getProject(channelId);
-    const agentName = channelConfig?.agent;
+    // Fall back to project.agents[0] when channel_configs row is missing —
+    // a project channel always has a canonical agent, regardless of whether
+    // setChannelConfig was called at registration time.
+    const agentName = channelConfig?.agent ?? project?.agents[0];
     const sessionKey = project
       ? getProjectSessionKey(channelId, agentName || "default")
       : channelId;

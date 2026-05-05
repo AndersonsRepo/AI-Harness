@@ -730,9 +730,12 @@ async function handleClaude(
 
   // Determine agent and session key
   const channelConfig = getChannelConfig(channelId);
-  const agentName = channelConfig?.agent;
-
   const project = getProject(channelId);
+  // Fall back to project.agents[0] when channel_configs row is missing —
+  // a project channel always has a canonical agent, regardless of whether
+  // setChannelConfig was called at registration time.
+  const agentName = channelConfig?.agent ?? project?.agents[0];
+
   const sessionKey =
     project && agentName
       ? getProjectSessionKey(channelId, agentName)
