@@ -13,17 +13,6 @@ function uniqueRuntimes(items: AgentRuntime[]): AgentRuntime[] {
 }
 
 export function getPreferredRuntimeForAgent(agentName?: string | null): AgentRuntime {
-  if (
-    agentName === "builder" ||
-    agentName === "codex-builder" ||
-    agentName === "researcher" ||
-    agentName === "education" ||
-    agentName === "reviewer" ||
-    agentName === "tester" ||
-    agentName === "orchestrator"
-  ) {
-    return "codex";
-  }
   return getAgentRuntime(agentName);
 }
 
