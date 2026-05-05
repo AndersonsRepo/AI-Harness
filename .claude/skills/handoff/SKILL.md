@@ -40,12 +40,14 @@ Preserve context across session boundaries by extracting the conversation into a
 
 3. **Read the digest file** with Read tool.
 
-4. **Generate TL;DR**. Analyze the digest and produce a compact recap (~150-300 words) with these sections:
+4. **Generate TL;DR**. Analyze the digest and produce a compact recap with these sections:
    - **Project**: what codebase/project this session was about
    - **Just completed**: most recent accomplishments (last 5-10 turns)
    - **Current issue / where stuck**: what was being worked on when the session ended
    - **Next steps**: concrete investigation or action items
    - **Full digest**: path to the saved digest file for retrieval
+
+   **Hard limit: the recap (everything inside the inner code fence) must be ≤1800 characters** so the user can paste it as a single Discord message (Discord's per-message cap is 2000; 1800 leaves headroom for code-block fences and any prefix the user adds). If you exceed it, tighten — drop prose, prefer bullets, use IDs over titles, cite the digest path instead of restating its contents. Count after drafting; do not ship over-limit.
 
 5. **Output the TL;DR** in a fenced code block so the user can copy-paste it into the new session.
 
