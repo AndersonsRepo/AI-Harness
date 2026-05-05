@@ -25,6 +25,7 @@ import json
 import os
 import re
 import resource
+import shutil
 import signal
 import subprocess
 import sys
@@ -208,8 +209,14 @@ def main():
     sys.path.insert(0, os.path.join(harness_root, "heartbeat-tasks"))
     from lib.platform import env as plat_env  # type: ignore
 
-    codex_path = os.environ.get("CODEX_CLI_PATH") or os.path.expanduser(
-        "~/.local/codex-cli/node_modules/.bin/codex"
+    # Resolution order: explicit env override → $PATH lookup → personal-machine fallback.
+    # The $PATH middle step lets public-template clones work when codex is
+    # installed via the standard installer (which puts it on PATH) instead of
+    # the private personal-machine layout.
+    codex_path = (
+        os.environ.get("CODEX_CLI_PATH")
+        or shutil.which("codex")
+        or os.path.expanduser("~/.local/codex-cli/node_modules/.bin/codex")
     )
     cwd = os.environ.get("PROJECT_CWD", harness_root)
 
