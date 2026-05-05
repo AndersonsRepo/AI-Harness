@@ -316,11 +316,17 @@ async function spawnParallelAgent(
     pid,
   });
 
-  const streamPoller = new StreamPoller(streamDir, () => {}, {
-    monitorCallback: (event) => processMonitorEvent(taskId, event),
-  });
-  activeParallelPollers.set(taskId, streamPoller);
-  streamPoller.start();
+  // Only attach a StreamPoller for runtimes that emit per-event chunks into
+  // streamDir. Codex's runner accepts --stream-dir for compat but writes
+  // nothing there; its telemetry is replayed post-hoc from final stdout in
+  // handleParallelOutput via adapter.recordResult().
+  if (adapter.capabilities.streamingTelemetry) {
+    const streamPoller = new StreamPoller(streamDir, () => {}, {
+      monitorCallback: (event) => processMonitorEvent(taskId, event),
+    });
+    activeParallelPollers.set(taskId, streamPoller);
+    streamPoller.start();
+  }
 
   // FileWatcher for output
   const watcher = new FileWatcher({
@@ -398,6 +404,17 @@ async function handleParallelOutput(
   const returncode = parsed.returncode ?? 1;
 
   const adapter = getAdapter(runtime);
+
+  // Replay events into the monitor for non-streaming runtimes (Codex).
+  // Claude's StreamPoller already populated the instance live; recordResult
+  // for Claude re-feeds the same events but processMonitorEvent is
+  // idempotent at the level we care about (chunkCount + assistantText
+  // double-count is acceptable telemetry slop). For Codex this is the
+  // only telemetry capture point.
+  if (!adapter.capabilities.streamingTelemetry) {
+    adapter.recordResult(taskId, parsed);
+  }
+
   if (returncode !== 0) {
     const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
     const errorMsg = stderr.trim() || `${runtimeLabel} exited with code ${returncode}`;

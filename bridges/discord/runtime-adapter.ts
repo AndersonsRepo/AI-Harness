@@ -95,6 +95,12 @@ export interface RuntimeCapabilities {
   transientErrorRetry: boolean;
   /** Resume by stored session id (vs. always-fresh). */
   sessionResume: boolean;
+  /**
+   * Runner emits per-event chunks into `--stream-dir` for live consumption
+   * by StreamPoller. False for runtimes that only produce a final stdout
+   * blob; for those, telemetry must be replayed post-hoc via recordResult().
+   */
+  streamingTelemetry: boolean;
 }
 
 export interface RuntimeAdapter {
@@ -160,6 +166,7 @@ const claudeAdapter: RuntimeAdapter = {
     loopDetection: true,
     transientErrorRetry: true,
     sessionResume: true,
+    streamingTelemetry: true,
   },
 
   async buildSpawnArgs(input: BuildSpawnInput): Promise<SpawnArgs> {
@@ -268,6 +275,9 @@ const codexAdapter: RuntimeAdapter = {
     // `codex exec resume <session-id>` works (with the narrow flag set
     // documented in cbbf8f3 / ERR-codex-exec-resume-sandbox-flag-rejected).
     sessionResume: true,
+    // codex-runner.py accepts --stream-dir for compat but never writes to
+    // it; Codex telemetry is replayed post-hoc from the final stdout.
+    streamingTelemetry: false,
   },
 
   async buildSpawnArgs(input: BuildSpawnInput): Promise<SpawnArgs> {

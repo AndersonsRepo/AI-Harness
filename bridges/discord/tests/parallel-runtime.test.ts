@@ -114,3 +114,84 @@ describe("tmux Orchestrator — Mixed Runtime Dispatch", () => {
     assert.equal(status?.tasks[0]?.runtime, "codex");
   });
 });
+
+// TODO-7: tmux-orchestrator's StreamPoller is dead-wired for Codex (codex-runner
+// accepts --stream-dir but writes nothing). Telemetry is now replayed post-hoc
+// via adapter.recordResult() in handleParallelOutput. This test proves Codex
+// parallel spawns get non-zero tool-call telemetry — previously total_tools
+// was 0 because the StreamPoller fired no events.
+describe("tmux Orchestrator — Codex post-hoc telemetry replay", () => {
+  const channelId = "parallel-codex-telemetry";
+
+  beforeEach(() => {
+    cleanupChannel(channelId);
+    setParallelSpawnProcessForTests(((command: string, args: readonly string[]) => {
+      const callArgs = [...args].map(String);
+      const outputFile = callArgs[1];
+      // Emit two item.completed tool events so total_tools should land at 2.
+      const stdout = [
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "command_execution", command: "ls /tmp" },
+        }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "mcp_tool_call",
+            server: "vault",
+            tool: "vault_read",
+            arguments: { path: "x.md" },
+          },
+        }),
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "Codex parallel done" },
+        }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: 1000, output_tokens: 200, cached_input_tokens: 500 },
+        }),
+      ].join("\n");
+
+      const payload = {
+        stdout,
+        stderr: "",
+        returncode: 0,
+        threadId: "telemetry-thread",
+        lastMessage: "Codex parallel done",
+      };
+      setTimeout(() => writeFileSync(outputFile, JSON.stringify(payload)), 25);
+      return { pid: 5500, unref() {} } as ChildProcess;
+    }) as typeof import("child_process").spawn);
+  });
+
+  afterEach(() => {
+    setParallelSpawnProcessForTests(null);
+    cleanupChannel(channelId);
+  });
+
+  it("populates task_telemetry.total_tools from item.completed events post-hoc", async () => {
+    const directive: ParallelDirective = {
+      agents: ["builder"],
+      tasks: new Map([["builder", "Codex parallel work"]]),
+    };
+
+    const groupId = await spawnParallelGroup({ channelId, directive });
+    const status = await waitForGroupCompletion(groupId);
+    assert.ok(status);
+    const taskId = status!.tasks[0]!.task_id;
+    assert.equal(status!.tasks[0]!.runtime, "codex");
+
+    const db = getDb();
+    const row = db.prepare(
+      "SELECT total_tools, est_input_tokens, est_output_tokens FROM task_telemetry WHERE task_id = ?",
+    ).get(taskId) as
+      | { total_tools: number; est_input_tokens: number; est_output_tokens: number }
+      | undefined;
+
+    assert.ok(row, "task_telemetry row should exist");
+    assert.equal(row!.total_tools, 2, "two item.completed tool events should be replayed");
+    assert.equal(row!.est_input_tokens, 1000, "turn.completed.usage should set token counts");
+    assert.equal(row!.est_output_tokens, 200);
+  });
+});
