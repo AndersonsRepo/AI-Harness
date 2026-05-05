@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, unlinkSync, mkdirSync } from "fs";
 import { join } from "path";
 import * as registry from "./process-registry.js";
 import {
@@ -12,13 +12,9 @@ import { getChannelConfig } from "./channel-config-store.js";
 import type { AgentRuntime } from "./agent-loader.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { proc } from "./platform.js";
-import {
-  HARNESS_ROOT,
-  extractResponse,
-  buildClaudeConfig,
-} from "./claude-config.js";
-import { buildCodexConfig, extractCodexResponse } from "./codex-config.js";
+import { HARNESS_ROOT } from "./claude-config.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
+import { getAdapter } from "./runtime-adapter.js";
 
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const SUBAGENT_TIMEOUT = parseInt(process.env.SUBAGENT_TIMEOUT || "300", 10);
@@ -60,58 +56,26 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
     channelId: options.channelId,
     agentName,
   }).selectedRuntime;
-  let pythonArgs: string[];
-  let childCwd: string;
-  let childEnv: Record<string, string>;
 
-  if (runtime === "codex") {
-    const config = await buildCodexConfig({
-      channelId: options.channelId,
-      prompt: options.description,
-      agentName,
-      sessionKey: options.channelId,
-      taskId: `subagent-${Date.now()}`,
-      skipSessionResume: true,
-    });
+  const adapter = getAdapter(runtime);
+  const promptFilePath =
+    runtime === "codex" ? join(TEMP_DIR, `subagent-${id}.prompt.txt`) : undefined;
+  const spawnArgs = await adapter.buildSpawnArgs({
+    channelId: options.channelId,
+    prompt: options.description,
+    agentName: agentName ?? null,
+    sessionKey: options.channelId,
+    taskId: `subagent-${Date.now()}`,
+    outputFile,
+    timeoutSecs: SUBAGENT_TIMEOUT,
+    skipSessionResume: true,
+    promptFilePath,
+  });
+  promptFile = spawnArgs.promptFilePath;
 
-    promptFile = join(TEMP_DIR, `subagent-${id}.prompt.txt`);
-    writeFileSync(promptFile, config.prompt, "utf-8");
-
-    pythonArgs = [
-      `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
-      outputFile,
-      "--timeout",
-      String(SUBAGENT_TIMEOUT),
-      "--prompt-file",
-      promptFile,
-      ...config.runnerArgs,
-    ];
-    childCwd = config.cwd;
-    childEnv = config.env;
-  } else {
-    const config = await buildClaudeConfig({
-      channelId: options.channelId,
-      prompt: options.description,
-      agentName,
-      sessionKey: options.channelId,
-      taskId: `subagent-${Date.now()}`,
-      skipSessionResume: true,
-    });
-
-    pythonArgs = [
-      `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
-      outputFile,
-      "--timeout",
-      String(SUBAGENT_TIMEOUT),
-      ...config.args,
-    ];
-    childCwd = config.cwd;
-    childEnv = config.env;
-  }
-
-  const childProc = spawnProcess("python3", pythonArgs, {
-    cwd: childCwd,
-    env: childEnv,
+  const childProc = spawnProcess("python3", spawnArgs.pythonArgs, {
+    cwd: spawnArgs.cwd,
+    env: spawnArgs.env,
     detached: true,
     stdio: "ignore",
   });
@@ -200,9 +164,8 @@ async function handleSubagentOutput(entry: registry.SubagentEntry, content: stri
         );
       }
     } else {
-      const responseText = entry.runtime === "codex"
-        ? extractCodexResponse(result) || "No response parsed"
-        : extractResponse(stdout) || "No response parsed";
+      const adapter = getAdapter(entry.runtime || "claude");
+      const responseText = adapter.extractResponse(result) || "No response parsed";
       registry.update(entry.id, {
         status: "completed",
         completedAt: new Date().toISOString(),

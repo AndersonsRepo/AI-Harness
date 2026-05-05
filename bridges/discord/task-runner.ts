@@ -1,25 +1,15 @@
 import { spawn } from "child_process";
-import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, unlinkSync, mkdirSync } from "fs";
 import { join } from "path";
 import { getDb } from "./db.js";
 import { setSession, validateSession } from "./session-store.js";
 import { getChannelConfig } from "./channel-config-store.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
-import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance, recordCodexResult } from "./instance-monitor.js";
+import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance } from "./instance-monitor.js";
 import { proc } from "./platform.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
-import {
-  HARNESS_ROOT,
-  extractResponse as sharedExtractResponse,
-  extractSessionId as sharedExtractSessionId,
-  buildClaudeConfig,
-  classifyClaudeError,
-} from "./claude-config.js";
-import {
-  buildCodexConfig,
-  extractCodexResponse,
-  extractCodexSessionId,
-} from "./codex-config.js";
+import { HARNESS_ROOT, classifyClaudeError } from "./claude-config.js";
+import { getAdapter } from "./runtime-adapter.js";
 import type { AgentRuntime } from "./agent-loader.js";
 
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -200,10 +190,12 @@ function generateId(): string {
   return `task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// --- Extract helpers (delegating to claude-config.ts) ---
+// --- Extract helpers (re-exported from claude-config.ts for back-compat) ---
 
-export const extractResponse = sharedExtractResponse;
-export const extractSessionId = sharedExtractSessionId;
+export {
+  extractResponse,
+  extractSessionId,
+} from "./claude-config.js";
 
 export function resolveTaskRuntime(task: Pick<TaskRecord, "runtime" | "agent" | "channel_id">): AgentRuntime {
   return resolveRuntimePolicy({
@@ -330,66 +322,31 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
   const channelConfig = getChannelConfig(task.channel_id);
   const agentName = task.agent || channelConfig?.agent;
   const runtime = resolveTaskRuntime(task);
-  const isContinuation = runtime === "claude" && task.step_count > 0;
+  const adapter = getAdapter(runtime);
+  const isContinuation = adapter.capabilities.continuation && task.step_count > 0;
 
-  let pythonArgs: string[];
-  let childCwd: string;
-  let childEnv: Record<string, string>;
-
-  if (runtime === "codex") {
-    const config = await buildCodexConfig({
-      channelId: task.channel_id,
-      prompt: task.prompt,
-      agentName,
-      sessionKey: task.session_key || task.channel_id,
-      taskId: task.id,
-      extraSystemPrompts,
-      worktreePath: opts?.worktreePath,
-      outputFile,
-      streamDir,
-    });
-
-    const promptFile = join(PROMPT_DIR, `prompt-${requestId}.txt`);
-    writeFileSync(promptFile, config.prompt, "utf-8");
-    taskPromptFiles.set(taskId, promptFile);
-
-    pythonArgs = [
-      `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
-      outputFile,
-      "--stream-dir",
-      streamDir,
-      "--prompt-file",
-      promptFile,
-      ...config.runnerArgs,
-    ];
-    childCwd = config.cwd;
-    childEnv = config.env;
-  } else {
-    const config = await buildClaudeConfig({
-      channelId: task.channel_id,
-      prompt: task.prompt,
-      agentName,
-      sessionKey: task.session_key || task.channel_id,
-      taskId: task.id,
-      isContinuation,
-      extraSystemPrompts,
-      worktreePath: opts?.worktreePath,
-    });
-
-    pythonArgs = [
-      `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
-      outputFile,
-      "--stream-dir",
-      streamDir,
-      ...config.args,
-    ];
-    childCwd = config.cwd;
-    childEnv = config.env;
+  const promptFilePath =
+    runtime === "codex" ? join(PROMPT_DIR, `prompt-${requestId}.txt`) : undefined;
+  const spawnArgs = await adapter.buildSpawnArgs({
+    channelId: task.channel_id,
+    prompt: task.prompt,
+    agentName: agentName ?? null,
+    sessionKey: task.session_key || task.channel_id,
+    taskId: task.id,
+    outputFile,
+    streamDir,
+    extraSystemPrompts,
+    worktreePath: opts?.worktreePath,
+    isContinuation,
+    promptFilePath,
+  });
+  if (spawnArgs.promptFilePath) {
+    taskPromptFiles.set(taskId, spawnArgs.promptFilePath);
   }
 
-  const childProc = spawnProcess("python3", pythonArgs, {
-    cwd: childCwd,
-    env: childEnv,
+  const childProc = spawnProcess("python3", spawnArgs.pythonArgs, {
+    cwd: spawnArgs.cwd,
+    env: spawnArgs.env,
     detached: true,
     stdio: "ignore",
   });
@@ -437,6 +394,7 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
   const task = getTask(taskId);
   if (!task) return;
   const runtime = resolveTaskRuntime(task);
+  const adapter = getAdapter(runtime);
 
   try {
     // Clean up output file
@@ -455,8 +413,9 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     console.log(`[TASK] ${taskId} runtime: ${runtime}, returncode: ${returncode}, stdout length: ${(stdout || "").length}`);
     if (stderr) console.error(`[TASK STDERR] ${stderr.slice(0, 500)}`);
 
-    // Check for stale session error
+    // Check for stale session error — only for runtimes that support session resume
     if (
+      adapter.capabilities.sessionResume &&
       runtime === "claude" &&
       returncode !== 0 &&
       task.attempt === 0 &&
@@ -488,7 +447,7 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
       }
 
       // Track API failures for observability
-      if (runtime === "claude" && isTransientApiError(errorMsg)) {
+      if (adapter.capabilities.transientErrorRetry && isTransientApiError(errorMsg)) {
         recordApiFailure();
       }
       await handleFailure(taskId, errorMsg, permanent);
@@ -500,30 +459,24 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     }
 
     // Successful response — reset API failure counter
-    if (runtime === "claude") {
+    if (adapter.capabilities.transientErrorRetry) {
       recordApiSuccess();
     }
 
-    // Codex stdout is the JSONL event stream. Claude streams events to
-    // chunk files in streamDir which the StreamPoller already feeds into
-    // processMonitorEvent; Codex doesn't (codex-runner.py's --stream-dir
-    // is accept-only-for-compat per its docstring). Without this, every
-    // Codex spawn records `total_tools = 0` regardless of MCP/Bash usage.
-    if (runtime === "codex" && typeof stdout === "string") {
-      recordCodexResult(taskId, stdout);
-    }
+    // Per-spawn telemetry recording. Codex stdout is the JSONL event stream
+    // parsed post-hoc (codex-runner.py's --stream-dir is accept-only-for-compat).
+    // Claude streams via streamDir chunk files that StreamPoller feeds into
+    // processMonitorEvent live, so the post-hoc record here is a no-op for the
+    // recordClaudeResult side. Adapters internalize the difference.
+    adapter.recordResult(taskId, result);
 
-    const responseText = runtime === "codex"
-      ? extractCodexResponse(result)
-      : extractResponse(stdout);
-    const sessionId = runtime === "codex"
-      ? extractCodexSessionId(result)
-      : extractSessionId(stdout);
+    const responseText = adapter.extractResponse(result);
+    const sessionId = adapter.extractSessionId(result);
 
     console.log(`[TASK] ${taskId} extractResponse: ${responseText ? responseText.length + ' chars' : 'NULL'}, sessionId: ${sessionId || 'null'}`);
 
-    // Loop detection — check for repeated tool call patterns
-    const loopWarning = runtime === "claude" ? checkForLoops(taskId, stdout) : null;
+    // Loop detection — only adapters that support it parse the right event shape
+    const loopWarning = adapter.capabilities.loopDetection ? checkForLoops(taskId, stdout) : null;
     if (loopWarning) {
       console.warn(`[TASK] ${taskId} ${loopWarning}`);
       // Kill the task if looping — don't allow continuation
@@ -545,9 +498,10 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
       setSession(sessionKey, sessionId, runtime);
     }
 
-    // Check for continuation
+    // Check for continuation — adapter-gated; only Claude supports [CONTINUE]
+    // bounded-step today.
     if (
-      runtime === "claude" &&
+      adapter.capabilities.continuation &&
       responseText &&
       needsContinuation(responseText) &&
       task.step_count < task.max_steps

@@ -16,7 +16,7 @@
 
 import { spawn } from "child_process";
 import { join } from "path";
-import { mkdirSync, writeFileSync, existsSync, unlinkSync } from "fs";
+import { mkdirSync, existsSync, unlinkSync } from "fs";
 import { getDb } from "./db.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
@@ -28,17 +28,8 @@ import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, getWorktr
 import type { AgentRuntime } from "./agent-loader.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
 import { registerInstance, processMonitorEvent, getCompletedSummary, finalizeInstance } from "./instance-monitor.js";
-import {
-  HARNESS_ROOT,
-  extractResponse,
-  extractSessionId,
-  buildClaudeConfig,
-} from "./claude-config.js";
-import {
-  buildCodexConfig,
-  extractCodexResponse,
-  extractCodexSessionId,
-} from "./codex-config.js";
+import { HARNESS_ROOT } from "./claude-config.js";
+import { getAdapter } from "./runtime-adapter.js";
 import { persistTaskTelemetry } from "./task-telemetry.js";
 
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
@@ -276,60 +267,26 @@ async function spawnParallelAgent(
     agentName: resolvedAgent,
   }).selectedRuntime;
 
-  let pythonArgs: string[];
-  let childCwd: string;
-  let childEnv: Record<string, string>;
+  const adapter = getAdapter(runtime);
+  const promptFilePath =
+    runtime === "codex" ? join(PROMPT_DIR, `parallel-${taskId}.prompt.txt`) : undefined;
+  const spawnArgs = await adapter.buildSpawnArgs({
+    channelId,
+    prompt: description,
+    agentName: resolvedAgent,
+    sessionKey: `${channelId}:${agent}`,
+    taskId,
+    outputFile,
+    streamDir,
+    skipSessionResume: true,
+    worktreePath,
+    promptFilePath,
+  });
+  promptFile = spawnArgs.promptFilePath;
 
-  if (runtime === "codex") {
-    const config = await buildCodexConfig({
-      channelId,
-      prompt: description,
-      agentName: resolvedAgent,
-      sessionKey: `${channelId}:${agent}`,
-      taskId,
-      skipSessionResume: true,
-      worktreePath,
-    });
-
-    promptFile = join(PROMPT_DIR, `parallel-${taskId}.prompt.txt`);
-    writeFileSync(promptFile, config.prompt, "utf-8");
-
-    pythonArgs = [
-      `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
-      outputFile,
-      "--stream-dir",
-      streamDir,
-      "--prompt-file",
-      promptFile,
-      ...config.runnerArgs,
-    ];
-    childCwd = config.cwd;
-    childEnv = config.env;
-  } else {
-    const config = await buildClaudeConfig({
-      channelId,
-      prompt: description,
-      agentName: resolvedAgent,
-      sessionKey: `${channelId}:${agent}`,
-      taskId,
-      skipSessionResume: true,
-      worktreePath,
-    });
-
-    pythonArgs = [
-      `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
-      outputFile,
-      "--stream-dir",
-      streamDir,
-      ...config.args,
-    ];
-    childCwd = config.cwd;
-    childEnv = config.env;
-  }
-
-  const childProc = spawnProcess("python3", pythonArgs, {
-    cwd: childCwd,
-    env: childEnv,
+  const childProc = spawnProcess("python3", spawnArgs.pythonArgs, {
+    cwd: spawnArgs.cwd,
+    env: spawnArgs.env,
     detached: true,
     stdio: "ignore",
   });
@@ -440,6 +397,7 @@ async function handleParallelOutput(
   const stderr = parsed.stderr || "";
   const returncode = parsed.returncode ?? 1;
 
+  const adapter = getAdapter(runtime);
   if (returncode !== 0) {
     const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
     const errorMsg = stderr.trim() || `${runtimeLabel} exited with code ${returncode}`;
@@ -464,12 +422,8 @@ async function handleParallelOutput(
     }
     finalizeInstance(taskId, "failed");
   } else {
-    const responseText = runtime === "codex"
-      ? extractCodexResponse(parsed)
-      : extractResponse(stdout);
-    const sessionId = runtime === "codex"
-      ? extractCodexSessionId(parsed)
-      : extractSessionId(stdout);
+    const responseText = adapter.extractResponse(parsed);
+    const sessionId = adapter.extractSessionId(parsed);
 
     // Save session for potential follow-up
     if (sessionId) {

@@ -1,6 +1,6 @@
 import { TextChannel, Message } from "discord.js";
 import { spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync, mkdirSync, readdirSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, unlinkSync, mkdirSync, readdirSync } from "fs";
 import { join } from "path";
 import { parseParallelDirective, spawnParallelGroup } from "./tmux-orchestrator.js";
 import {
@@ -17,17 +17,10 @@ import { monitor } from "./truncation-monitor.js";
 import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, isGitRepo, captureArtifacts, commitWorktreeIfDirty, ArtifactBundle } from "./worktree-manager.js";
 import type { AgentRuntime } from "./agent-loader.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
-import {
-  HARNESS_ROOT,
-  extractResponse,
-  extractSessionId,
-  buildClaudeConfig,
-} from "./claude-config.js";
-import { buildCodexConfig, extractCodexResponse, extractCodexSessionId } from "./codex-config.js";
+import { HARNESS_ROOT } from "./claude-config.js";
+import { getAdapter } from "./runtime-adapter.js";
 import {
   registerInstance,
-  recordCodexResult,
-  recordClaudeResult,
   getCompletedSummary,
   finalizeInstance,
 } from "./instance-monitor.js";
@@ -572,66 +565,30 @@ export async function executeHandoffCore(
     TEMP_DIR,
     `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
   );
-  let promptFile: string | null = null;
 
-  let pythonArgs: string[];
-  let childCwd: string;
-  let childEnv: Record<string, string>;
-
-  if (runtime === "codex") {
-    const config = await buildCodexConfig({
-      channelId,
-      prompt,
-      agentName: toAgent,
-      sessionKey,
-      taskId: "handoff",
-      worktreePath,
-      skipSessionResume,
-    });
-
-    promptFile = join(
-      TEMP_DIR,
-      `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.prompt.txt`,
-    );
-    writeFileSync(promptFile, config.prompt, "utf-8");
-
-    pythonArgs = [
-      `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
-      outputFile,
-      "--timeout",
-      runnerTimeoutSecs,
-      "--prompt-file",
-      promptFile,
-      ...config.runnerArgs,
-    ];
-    childCwd = config.cwd;
-    childEnv = config.env;
-  } else {
-    const config = await buildClaudeConfig({
-      channelId,
-      prompt,
-      agentName: toAgent,
-      sessionKey,
-      taskId: "handoff",
-      worktreePath,
-      skipSessionResume,
-    });
-
-    pythonArgs = [
-      `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
-      outputFile,
-      "--timeout",
-      runnerTimeoutSecs,
-      ...config.args,
-    ];
-    childCwd = config.cwd;
-    childEnv = config.env;
-  }
+  const adapter = getAdapter(runtime);
+  const promptFilePath =
+    runtime === "codex"
+      ? join(TEMP_DIR, `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.prompt.txt`)
+      : undefined;
+  const spawnArgs = await adapter.buildSpawnArgs({
+    channelId,
+    prompt,
+    agentName: toAgent,
+    sessionKey,
+    taskId: "handoff",
+    outputFile,
+    worktreePath,
+    skipSessionResume,
+    timeoutSecs: parseInt(runnerTimeoutSecs, 10),
+    promptFilePath,
+  });
+  const promptFile = spawnArgs.promptFilePath;
 
   return new Promise<ExecuteHandoffCoreResult>((resolve) => {
-    const childProc = spawn("python3", pythonArgs, {
-      cwd: childCwd,
-      env: childEnv,
+    const childProc = spawn("python3", spawnArgs.pythonArgs, {
+      cwd: spawnArgs.cwd,
+      env: spawnArgs.env,
       detached: true,
       stdio: "ignore",
     });
@@ -648,15 +605,11 @@ export async function executeHandoffCore(
     // are logged but never throw — telemetry must not break the chain.
     const finalize = (
       coreResult: ExecuteHandoffCoreResult,
-      stdout: string | undefined,
+      envelope: Record<string, unknown> | undefined,
     ): void => {
       try {
-        if (typeof stdout === "string" && stdout) {
-          if (runtime === "codex") {
-            recordCodexResult(chainTaskId, stdout);
-          } else {
-            recordClaudeResult(chainTaskId, stdout);
-          }
+        if (envelope) {
+          adapter.recordResult(chainTaskId, envelope as any);
         }
         const summary = getCompletedSummary(chainTaskId);
         const status = coreResult.ok ? "completed" : "failed";
@@ -690,7 +643,7 @@ export async function executeHandoffCore(
       onFile: async (content: string) => {
         untrackWatcher(watcher);
 
-        let stdoutForTelemetry: string | undefined;
+        let envelopeForTelemetry: Record<string, unknown> | undefined;
         try {
           if (promptFile && existsSync(promptFile)) {
             unlinkSync(promptFile);
@@ -700,28 +653,24 @@ export async function executeHandoffCore(
           }
 
           const result = JSON.parse(content);
-          const { stdout, stderr, returncode } = result;
-          stdoutForTelemetry = typeof stdout === "string" ? stdout : undefined;
+          const { stderr, returncode } = result;
+          envelopeForTelemetry = result;
 
           if (returncode !== 0) {
             const errorMsg = stderr?.trim() || `Agent exited with code ${returncode}`;
-            finalize({ ok: false, reason: "exit-nonzero", errorMessage: errorMsg }, stdoutForTelemetry);
+            finalize({ ok: false, reason: "exit-nonzero", errorMessage: errorMsg }, envelopeForTelemetry);
             return;
           }
 
-          const responseText = runtime === "codex"
-            ? extractCodexResponse(result)
-            : extractResponse(stdout);
-          const sessionId = runtime === "codex"
-            ? extractCodexSessionId(result)
-            : extractSessionId(stdout);
+          const responseText = adapter.extractResponse(result);
+          const sessionId = adapter.extractSessionId(result);
 
           if (sessionId) {
             setSession(sessionKey, sessionId, runtime);
           }
 
           if (!responseText) {
-            finalize({ ok: false, reason: "no-response" }, stdoutForTelemetry);
+            finalize({ ok: false, reason: "no-response" }, envelopeForTelemetry);
             return;
           }
 
@@ -734,11 +683,11 @@ export async function executeHandoffCore(
               nextHandoff,
               sessionId: sessionId ?? null,
             },
-            stdoutForTelemetry,
+            envelopeForTelemetry,
           );
         } catch (err: any) {
           console.error(`[HANDOFF] Error reading output: ${err.message}`);
-          finalize({ ok: false, reason: "parse-error", errorMessage: err.message }, stdoutForTelemetry);
+          finalize({ ok: false, reason: "parse-error", errorMessage: err.message }, envelopeForTelemetry);
         }
       },
       onTimeout: async () => {

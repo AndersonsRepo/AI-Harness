@@ -11,15 +11,9 @@ import {
   mkdirSync,
   readFileSync,
   unlinkSync,
-  writeFileSync,
-  renameSync,
 } from "fs";
 import { join } from "path";
-import { buildClaudeConfig, extractResponse } from "../../claude-config.js";
-import {
-  buildCodexConfig,
-  extractCodexResponse,
-} from "../../codex-config.js";
+import { getAdapter } from "../../runtime-adapter.js";
 import {
   parseHandoff,
   buildHandoffPrompt,
@@ -73,15 +67,14 @@ function uniqueRequestId(label: string): string {
 }
 
 async function spawnAndWait(
-  runnerPath: string,
-  runnerArgs: string[],
+  pythonArgs: string[],
   env: Record<string, string>,
   cwd: string,
   outputFile: string,
   timeoutMs: number,
 ): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
-    const proc = spawn("python3", [runnerPath, outputFile, ...runnerArgs], {
+    const proc = spawn("python3", pythonArgs, {
       cwd,
       env,
       detached: false,
@@ -135,63 +128,12 @@ export async function runAgent(
   const requestId = uniqueRequestId(`${runtime}-replay`);
   const outputFile = join(TEMP_DIR, `replay-${requestId}.json`);
 
-  try {
-    if (runtime === "claude") {
-      const config = await buildClaudeConfig({
-        channelId,
-        prompt,
-        agentName,
-        sessionKey: `tier2-replay:${requestId}`,
-        taskId: requestId,
-        skipSessionResume: true,
-      });
-      const runnerPath = join(
-        HARNESS_ROOT,
-        "bridges",
-        "discord",
-        "claude-runner.py",
-      );
-      const result = await spawnAndWait(
-        runnerPath,
-        config.args,
-        config.env,
-        config.cwd,
-        outputFile,
-        timeoutMs,
-      );
-      if (!result.ok) {
-        return {
-          ok: false,
-          responseText: null,
-          durationMs: Date.now() - startedAt,
-          error: result.error,
-        };
-      }
-      const raw = readFileSync(outputFile, "utf-8");
-      // claude-runner.py wraps output as {"stdout": "...", "stderr": "...",
-      // "returncode": N}. Unwrap before handing to extractResponse, which
-      // expects the raw stream-json/single-json that claude itself produced.
-      let inner = raw;
-      try {
-        const envelope = JSON.parse(raw);
-        if (typeof envelope?.stdout === "string") inner = envelope.stdout;
-      } catch {
-        // Not wrapped — pass through.
-      }
-      const responseText = extractResponse(inner);
-      const costUsd = extractClaudeCostFromInner(inner);
-      return {
-        ok: responseText != null,
-        responseText,
-        durationMs: Date.now() - startedAt,
-        rawOutputPath: outputFile,
-        error: responseText == null ? "extractResponse returned null" : undefined,
-        costUsd,
-      };
-    }
+  const adapter = getAdapter(runtime);
+  const promptFilePath =
+    runtime === "codex" ? join(TEMP_DIR, `prompt-${requestId}.txt`) : undefined;
 
-    // Codex
-    const codexConfig = await buildCodexConfig({
+  try {
+    const spawnArgs = await adapter.buildSpawnArgs({
       channelId,
       prompt,
       agentName,
@@ -199,28 +141,18 @@ export async function runAgent(
       taskId: requestId,
       outputFile,
       skipSessionResume: true,
+      promptFilePath,
     });
-    // Codex runner takes the prompt via a file flag, not argv.
-    const promptFile = join(TEMP_DIR, `prompt-${requestId}.txt`);
-    writeFileSync(promptFile, codexConfig.prompt, "utf-8");
-    const runnerPath = join(
-      HARNESS_ROOT,
-      "bridges",
-      "discord",
-      "codex-runner.py",
-    );
-    const args = ["--prompt-file", promptFile, ...codexConfig.runnerArgs];
     const result = await spawnAndWait(
-      runnerPath,
-      args,
-      codexConfig.env,
-      codexConfig.cwd,
+      spawnArgs.pythonArgs,
+      spawnArgs.env,
+      spawnArgs.cwd,
       outputFile,
       timeoutMs,
     );
-    try {
-      unlinkSync(promptFile);
-    } catch {}
+    if (spawnArgs.promptFilePath) {
+      try { unlinkSync(spawnArgs.promptFilePath); } catch {}
+    }
     if (!result.ok) {
       return {
         ok: false,
@@ -229,40 +161,35 @@ export async function runAgent(
         error: result.error,
       };
     }
+
     const raw = readFileSync(outputFile, "utf-8");
-    let parsed: unknown;
+    let envelope: any;
     try {
-      parsed = JSON.parse(raw);
+      envelope = JSON.parse(raw);
     } catch (e) {
       return {
         ok: false,
         responseText: null,
         durationMs: Date.now() - startedAt,
-        error: `codex output not JSON: ${(e as Error).message}`,
+        error: `runner output not JSON: ${(e as Error).message}`,
       };
     }
-    // codex-runner.py also wraps output as {"stdout": "...", "stderr": "...",
-    // "returncode": N}. extractCodexResponse expects the inner Codex JSON —
-    // try the envelope first, then the raw.
-    let inner: unknown = parsed;
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      typeof (parsed as { stdout?: unknown }).stdout === "string"
-    ) {
-      try {
-        inner = JSON.parse((parsed as { stdout: string }).stdout);
-      } catch {
-        inner = parsed;
-      }
-    }
-    const responseText = extractCodexResponse(inner);
+
+    const responseText = adapter.extractResponse(envelope);
+    // Cost surfacing: Claude reports total_cost_usd in the inner stdout;
+    // Codex doesn't emit it directly, so this stays undefined for Codex.
+    const costUsd =
+      runtime === "claude" && typeof envelope?.stdout === "string"
+        ? extractClaudeCostFromInner(envelope.stdout)
+        : undefined;
+
     return {
       ok: responseText != null,
       responseText,
       durationMs: Date.now() - startedAt,
       rawOutputPath: outputFile,
-      error: responseText == null ? "extractCodexResponse returned null" : undefined,
+      error: responseText == null ? "extractResponse returned null" : undefined,
+      costUsd,
     };
   } catch (err) {
     return {
