@@ -28,6 +28,10 @@ export interface BuildCodexConfigOptions {
   outputFile?: string;
   streamDir?: string;
   skipSessionResume?: boolean;
+  /** Step > 0 of a [CONTINUE] chain. The original task prompt is replaced
+   *  with a continuation directive; session resume picks up the prior
+   *  thread so the model has full context. Mirrors claude-config.ts. */
+  isContinuation?: boolean;
 }
 
 const DEFAULT_SANDBOX: CodexSandbox = "workspace-write";
@@ -146,11 +150,14 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
     taskId: opts.taskId || `codex-spawn-${Date.now()}`,
   });
 
+  const userPrompt = opts.isContinuation
+    ? "Continue where you left off. If you are done, do not include [CONTINUE]."
+    : opts.prompt;
   const promptBody = composePrompt({
     agentPrompt,
     context,
     extras: opts.extraSystemPrompts,
-    userPrompt: opts.prompt,
+    userPrompt,
   });
 
   const project = getProject(opts.channelId);

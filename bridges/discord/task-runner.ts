@@ -65,25 +65,12 @@ const LOOP_HISTORY_SIZE = 30;
 const LOOP_WARNING_THRESHOLD = 4;  // warn after 4 repeats of same tool+args pattern
 const taskToolHistory = new Map<string, string[]>();
 
-function checkForLoops(taskId: string, stdout: string): string | null {
-  // Extract tool_use events from stream-json output
-  const toolCalls: string[] = [];
-  for (const line of stdout.split("\n")) {
-    try {
-      const event = JSON.parse(line);
-      if (event.type === "tool_use" || event.type === "tool_result") {
-        // Create a signature from tool name + truncated input
-        const sig = `${event.name || event.tool || "unknown"}:${JSON.stringify(event.input || "").slice(0, 100)}`;
-        toolCalls.push(sig);
-      }
-    } catch {}
-  }
-
-  if (toolCalls.length === 0) return null;
+function checkForLoops(taskId: string, signatures: string[]): string | null {
+  if (signatures.length === 0) return null;
 
   // Append to history
   const history = taskToolHistory.get(taskId) || [];
-  history.push(...toolCalls);
+  history.push(...signatures);
   // Keep only last N entries
   if (history.length > LOOP_HISTORY_SIZE) {
     history.splice(0, history.length - LOOP_HISTORY_SIZE);
@@ -413,18 +400,19 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
     console.log(`[TASK] ${taskId} runtime: ${runtime}, returncode: ${returncode}, stdout length: ${(stdout || "").length}`);
     if (stderr) console.error(`[TASK STDERR] ${stderr.slice(0, 500)}`);
 
-    // Check for stale session error — only for runtimes that support session resume
+    // Check for stale session error — adapter decides what counts as "the
+    // upstream runtime no longer recognizes this session id". The runtime
+    // arg to validateSession scopes the clear to one runtime row so the
+    // sibling runtime's session for the same channel survives.
     if (
       adapter.capabilities.sessionResume &&
-      runtime === "claude" &&
       returncode !== 0 &&
       task.attempt === 0 &&
-      stderr?.includes("session") &&
-      (stderr?.includes("not found") || stderr?.includes("expired"))
+      adapter.isStaleSessionError(result)
     ) {
-      console.log(`[TASK] ${taskId} stale session detected, clearing and retrying`);
+      console.log(`[TASK] ${taskId} stale ${runtime} session detected, clearing and retrying`);
       const sessionKey = task.session_key || task.channel_id;
-      validateSession(sessionKey, "claude");
+      validateSession(sessionKey, runtime);
       clearLoopHistory(taskId);
       // Immediate retry (counts as attempt 1)
       updateTask(taskId, { attempt: 1, status: "pending", last_error: "Stale session - retrying" });
@@ -475,8 +463,12 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
 
     console.log(`[TASK] ${taskId} extractResponse: ${responseText ? responseText.length + ' chars' : 'NULL'}, sessionId: ${sessionId || 'null'}`);
 
-    // Loop detection — only adapters that support it parse the right event shape
-    const loopWarning = adapter.capabilities.loopDetection ? checkForLoops(taskId, stdout) : null;
+    // Loop detection — adapter parses the runtime-specific event shape into
+    // signatures; the threshold check itself is shared.
+    const signatures = adapter.capabilities.loopDetection
+      ? adapter.parseToolCallSignatures(result)
+      : [];
+    const loopWarning = signatures.length > 0 ? checkForLoops(taskId, signatures) : null;
     if (loopWarning) {
       console.warn(`[TASK] ${taskId} ${loopWarning}`);
       // Kill the task if looping — don't allow continuation
@@ -498,8 +490,9 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
       setSession(sessionKey, sessionId, runtime);
     }
 
-    // Check for continuation — adapter-gated; only Claude supports [CONTINUE]
-    // bounded-step today.
+    // Check for continuation — adapter-gated. Both Claude and Codex
+    // recognize the `[CONTINUE]` text marker; the next spawn resumes the
+    // stored session id so the model has full context.
     if (
       adapter.capabilities.continuation &&
       responseText &&

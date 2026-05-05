@@ -115,6 +115,22 @@ export interface RuntimeAdapter {
 
   /** Record per-spawn telemetry (tool counts, tokens) from envelope.stdout. */
   recordResult(taskId: string, envelope: ParsedEnvelope): void;
+
+  /**
+   * Parse tool-call signatures from envelope stdout for loop detection.
+   * Returns one signature per tool invocation in deterministic order. Empty
+   * array when stdout has no recognizable tool events. Adapters that set
+   * `capabilities.loopDetection = false` may return [] unconditionally.
+   */
+  parseToolCallSignatures(envelope: ParsedEnvelope): string[];
+
+  /**
+   * Decide whether a non-zero-returncode envelope represents a stale stored
+   * session id (one the upstream runtime no longer recognizes). When true,
+   * task-runner clears the session and retries cold instead of treating the
+   * spawn as a generic failure.
+   */
+  isStaleSessionError(envelope: ParsedEnvelope): boolean;
 }
 
 const adapters = new Map<AgentRuntime, RuntimeAdapter>();
@@ -192,6 +208,44 @@ const claudeAdapter: RuntimeAdapter = {
       recordClaudeResult(taskId, envelope.stdout);
     }
   },
+
+  parseToolCallSignatures(envelope: ParsedEnvelope): string[] {
+    const stdout = typeof envelope.stdout === "string" ? envelope.stdout : "";
+    if (!stdout) return [];
+    const signatures: string[] = [];
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const ev = JSON.parse(trimmed);
+        if (ev?.type === "tool_use" || ev?.type === "tool_result") {
+          const name = ev.name || ev.tool || "unknown";
+          const inputJson = JSON.stringify(ev.input || "").slice(0, 100);
+          signatures.push(`${name}:${inputJson}`);
+          continue;
+        }
+        // Claude CLI nests tool_use blocks inside assistant messages
+        if (ev?.type === "assistant" && Array.isArray(ev?.message?.content)) {
+          for (const block of ev.message.content) {
+            if (block?.type === "tool_use" && block?.name) {
+              const inputJson = JSON.stringify(block.input || "").slice(0, 100);
+              signatures.push(`${block.name}:${inputJson}`);
+            }
+          }
+        }
+      } catch {}
+    }
+    return signatures;
+  },
+
+  isStaleSessionError(envelope: ParsedEnvelope): boolean {
+    const stderr = typeof envelope.stderr === "string" ? envelope.stderr.toLowerCase() : "";
+    if (!stderr) return false;
+    return (
+      stderr.includes("session") &&
+      (stderr.includes("not found") || stderr.includes("expired"))
+    );
+  },
 };
 
 // ─── Codex Adapter ──────────────────────────────────────────────────────
@@ -200,12 +254,14 @@ const codexAdapter: RuntimeAdapter = {
   tag: "codex",
 
   capabilities: {
-    // Codex doesn't emit Claude's `[CONTINUE]` directive shape and the
-    // step_count machinery in task-runner predates Codex.
-    continuation: false,
-    // Loop detection parses Claude's tool_use event shape from stream-json.
-    // Codex's JSONL shape is different; loop detection has not been ported.
-    loopDetection: false,
+    // `[CONTINUE]` is a textual marker the agent prompt instructs the model
+    // to emit when more work remains. Both runtimes can produce it; Codex
+    // also supports `codex exec resume <thread-id>` so step 2 picks up where
+    // step 1 left off (parity with Claude's `--resume`).
+    continuation: true,
+    // Codex's JSONL stream uses `item.completed` events with mcp_tool_call /
+    // command_execution shapes. parseToolCallSignatures() handles both.
+    loopDetection: true,
     // codex-runner.py has its own retry-with-backoff for 429/5xx; the
     // tracker drives the bot-level cooldown. Wired symmetrically.
     transientErrorRetry: true,
@@ -234,6 +290,7 @@ const codexAdapter: RuntimeAdapter = {
       outputFile: input.outputFile,
       streamDir: input.streamDir,
       skipSessionResume: input.skipSessionResume,
+      isContinuation: input.isContinuation,
     });
 
     writeFileSync(input.promptFilePath, config.prompt, "utf-8");
@@ -270,6 +327,53 @@ const codexAdapter: RuntimeAdapter = {
     if (typeof envelope.stdout === "string") {
       recordCodexResult(taskId, envelope.stdout);
     }
+  },
+
+  parseToolCallSignatures(envelope: ParsedEnvelope): string[] {
+    const stdout = typeof envelope.stdout === "string" ? envelope.stdout : "";
+    if (!stdout) return [];
+    const signatures: string[] = [];
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const ev = JSON.parse(trimmed);
+        if (ev?.type !== "item.completed") continue;
+        const item = ev.item;
+        if (!item || typeof item !== "object") continue;
+        const itemType = String(item.type || "");
+        if (itemType === "mcp_tool_call") {
+          const name = `mcp__${item.server || "unknown"}__${item.tool || "unknown"}`;
+          const args = item.arguments && typeof item.arguments === "object" ? item.arguments : {};
+          signatures.push(`${name}:${JSON.stringify(args).slice(0, 100)}`);
+        } else if (itemType === "command_execution") {
+          const command = String(item.command || "");
+          signatures.push(`Bash:${JSON.stringify({ command }).slice(0, 100)}`);
+        }
+      } catch {}
+    }
+    return signatures;
+  },
+
+  isStaleSessionError(envelope: ParsedEnvelope): boolean {
+    const stderr = typeof envelope.stderr === "string" ? envelope.stderr.toLowerCase() : "";
+    if (!stderr) return false;
+    // Codex CLI's exact stderr text for an unknown thread/session is not
+    // documented in the codebase yet. Match permissively across the three
+    // identifier nouns Codex uses (thread/session/conversation) crossed with
+    // the standard "missing/invalid" lexicon. False positives only cost one
+    // extra cold-start retry; false negatives leave a stale id wedging the
+    // session forever, which is the worse failure mode.
+    const subject = ["thread", "session", "conversation"].some((s) => stderr.includes(s));
+    const verb = [
+      "not found",
+      "does not exist",
+      "no such",
+      "unknown",
+      "invalid",
+      "expired",
+    ].some((s) => stderr.includes(s));
+    return subject && verb;
   },
 };
 
