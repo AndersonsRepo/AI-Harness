@@ -16,6 +16,7 @@ import json
 import subprocess
 import datetime
 import re
+from collections import defaultdict, deque
 
 HARNESS_ROOT = os.environ.get(
     "HARNESS_ROOT",
@@ -33,7 +34,11 @@ VAULT_DIR = os.path.join(HARNESS_ROOT, "vault", "shared", "course-notes")
 NOTIFY_FILE = os.path.join(TASKS_DIR, "pending-notifications.jsonl")
 
 # Max PDFs to process per run (cost control)
-MAX_PER_RUN = 3
+MAX_PER_RUN = 5
+
+# Stderr from the LLM call goes here so heartbeat operators can see why a
+# file failed instead of just "FAILED (2 retries left)" in the stdout log.
+ERROR_LOG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs", "notes-ingest.errors.log")
 
 # Map GoodNotes folder names → vault directory names and Discord channels
 # Loaded from course-map.json (gitignored) — copy course-map.example.json to get started
@@ -100,6 +105,99 @@ def parse_course(rel_path):
         return None
     folder_name = parts[1]
     return COURSE_MAP.get(folder_name)
+
+
+def is_drive_stub(path: str) -> bool:
+    """Return True if `path` is a Google Drive placeholder (not materialized).
+
+    Drive's CloudStorage virtual filesystem only downloads file content when
+    a UI tool (Drive app, Preview, Quick Look) reads it. Headless reads
+    (cat, open(), Read tool) hit "Resource deadlock avoided" and get nothing.
+    We detect that by trying to read a few bytes with a short timeout; if
+    it errors out, the file is a stub and ingestion will fail.
+
+    Cheaper than parsing `file -h <path>` output because we don't fork.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.read(8)
+        return False
+    except (OSError, IOError):
+        return True
+
+
+def materialize_drive_file(path: str, timeout_sec: int = 8) -> bool:
+    """Try to materialize a Drive stub by triggering Quick Look.
+
+    qlmanage opens the file via macOS QuickLook generators, which routes
+    through Drive's File Provider in a way that triggers download. Runs
+    headless (no visible UI). We then re-check is_drive_stub.
+
+    Returns True if the file is now readable, False if still a stub.
+    """
+    if not is_drive_stub(path):
+        return True
+    try:
+        # qlmanage -p generates previews; we throw the output away. The
+        # daemon-spawn pattern keeps us from blocking the main loop if
+        # qlmanage misbehaves.
+        proc = subprocess.Popen(
+            ["qlmanage", "-p", path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            proc.wait(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+    except (OSError, FileNotFoundError):
+        # qlmanage missing (non-macOS, or odd PATH) — give up silently.
+        return False
+    return not is_drive_stub(path)
+
+
+def log_error(rel_path: str, message: str) -> None:
+    """Append a structured error line to ERROR_LOG so we can see WHY an
+    ingest failed without grepping through the heartbeat-runner stdout.
+    """
+    try:
+        os.makedirs(os.path.dirname(ERROR_LOG), exist_ok=True)
+        with open(ERROR_LOG, "a") as f:
+            ts = datetime.datetime.now().isoformat()
+            f.write(f"[{ts}] {rel_path}: {message}\n")
+    except OSError:
+        pass
+
+
+def select_round_robin(candidates, max_count):
+    """Pick up to max_count files, round-robin across courses.
+
+    `candidates` is a list of (full_path, rel_path, course_info) sorted
+    alphabetically. We bucket by course channel, then pull one from each
+    bucket in order until we hit max_count. This keeps a single course
+    (e.g. "Computers and Society" with 70 backlogged files) from starving
+    every other course on every run.
+    """
+    by_course = defaultdict(deque)
+    course_order = []
+    for triple in candidates:
+        channel = triple[2].get("channel", "default")
+        if channel not in by_course:
+            course_order.append(channel)
+        by_course[channel].append(triple)
+
+    picked = []
+    while len(picked) < max_count and any(by_course[c] for c in course_order):
+        for channel in course_order:
+            if len(picked) >= max_count:
+                break
+            if by_course[channel]:
+                picked.append(by_course[channel].popleft())
+    return picked
 
 
 def make_vault_filename(rel_path, course_info):
@@ -236,6 +334,7 @@ ingested: {datetime.datetime.now().strftime('%Y-%m-%d')}
                     return vault_path
         except Exception as e:
             print(f"  LLM structuring failed: {e}", file=sys.stderr)
+            log_error(rel_path, f"PPTX LLM structuring failed: {type(e).__name__}: {e}")
 
         # Fallback: write raw extracted text
         frontmatter = f"""---
@@ -306,7 +405,9 @@ Do NOT include any meta-commentary — just the extracted content."""
         content = response.text
 
         if not content or len(content) < 50:
-            print(f"  Empty or too short response for {rel_path}", file=sys.stderr)
+            msg = f"Empty or too-short LLM response ({len(content) if content else 0} chars)"
+            print(f"  {msg} for {rel_path}", file=sys.stderr)
+            log_error(rel_path, msg)
             return None
 
         # Write vault entry with frontmatter
@@ -325,9 +426,11 @@ ingested: {datetime.datetime.now().strftime('%Y-%m-%d')}
 
     except LLMError as e:
         print(f"  LLM error: {e}", file=sys.stderr)
+        log_error(rel_path, f"LLMError: {e}")
         return None
     except Exception as e:
         print(f"  Error: {e}", file=sys.stderr)
+        log_error(rel_path, f"{type(e).__name__}: {e}")
         return None
 
 
@@ -352,7 +455,8 @@ def main():
     # Filter to Cal Poly Pomona academic files only (PDF + PPTX)
     SUPPORTED_EXTENSIONS = (".pdf", ".pptx")
     failures = state.get("failures", {})
-    to_process = []
+    candidates = []
+    skipped_stubs = []
     for rel_path in sorted(known_files):
         if rel_path in ingested:
             continue
@@ -368,16 +472,34 @@ def main():
         full_path = os.path.join(drive_dir, rel_path)
         if not os.path.exists(full_path):
             continue
-        to_process.append((full_path, rel_path, course_info))
+        # Drive-stub guard: if the file is a placeholder, try Quick Look to
+        # force materialization. If still a stub after that, skip silently
+        # — DON'T count as a failure, since opening it later (via Drive app
+        # or by the user) will let it succeed on a future run.
+        if not materialize_drive_file(full_path):
+            skipped_stubs.append(rel_path)
+            continue
+        candidates.append((full_path, rel_path, course_info))
 
-    if not to_process:
-        print("All academic PDFs already ingested")
+    if not candidates:
+        msg = "All academic PDFs already ingested"
+        if skipped_stubs:
+            msg = f"No materialized files to process ({len(skipped_stubs)} Drive stubs skipped)"
+        print(msg)
         save_state(state)
         return
 
-    # Cap per run
-    batch = to_process[:MAX_PER_RUN]
-    print(f"Processing {len(batch)} of {len(to_process)} pending files...")
+    # Round-robin across courses so one big backlog (e.g. Comp Society) doesn't
+    # starve other courses (e.g. Philosophy) every run. See ERR vault entry on
+    # alphabetical-FIFO starvation.
+    batch = select_round_robin(candidates, MAX_PER_RUN)
+    print(f"Processing {len(batch)} of {len(candidates)} pending files...")
+    if skipped_stubs:
+        # Surface Drive stubs so the user knows to open them in Drive app.
+        # Limit the displayed list so the heartbeat log doesn't blow up.
+        sample = ", ".join(skipped_stubs[:3])
+        more = f" (and {len(skipped_stubs) - 3} more)" if len(skipped_stubs) > 3 else ""
+        print(f"  Skipped {len(skipped_stubs)} Drive stub(s) — open in Drive app to materialize: {sample}{more}")
 
     results = {"success": [], "failed": []}
     for full_path, rel_path, course_info in batch:
