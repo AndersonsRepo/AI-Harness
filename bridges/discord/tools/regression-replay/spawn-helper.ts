@@ -29,6 +29,30 @@ const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 
 export type Runtime = "claude" | "codex";
 
+const RUNNER_PATHS: Record<Runtime, string> = {
+  claude: join(HARNESS_ROOT, "bridges", "discord", "claude-runner.py"),
+  codex: join(HARNESS_ROOT, "bridges", "discord", "codex-runner.py"),
+};
+
+const validatedRunners = new Set<Runtime>();
+
+// Verify the runner script exists before we hand it to python3. Without this,
+// a misconfigured HARNESS_ROOT or a moved runner surfaces as opaque python
+// exit code 2 with stderr buried in SpawnAgentResult.error — across a 10-seed
+// replay run, that's a long debugging detour for a config issue.
+function validateRunnerPath(runtime: Runtime): void {
+  if (validatedRunners.has(runtime)) return;
+  const path = RUNNER_PATHS[runtime];
+  if (!existsSync(path)) {
+    throw new Error(
+      `regression-replay: ${runtime}-runner.py not found at ${path}. ` +
+        `HARNESS_ROOT=${HARNESS_ROOT}. ` +
+        `Either set HARNESS_ROOT to the AI-Harness repo root, or restore the runner.`,
+    );
+  }
+  validatedRunners.add(runtime);
+}
+
 export interface SpawnAgentOptions {
   runtime: Runtime;
   agentName: string;
@@ -123,6 +147,8 @@ export async function runAgent(
   const startedAt = Date.now();
   const { runtime, agentName, prompt, channelId } = opts;
   const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
+
+  validateRunnerPath(runtime);
 
   if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true });
   const requestId = uniqueRequestId(`${runtime}-replay`);

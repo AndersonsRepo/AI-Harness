@@ -29,21 +29,28 @@ const TIER1_CHANNEL_ID = "regression-replay-tier1";
 const HARNESS_VERSION = 1;
 const RUBRIC_VERSION = 2;
 
+// Real seed responses run several paragraphs. Anything below this is almost
+// always an apology, redirect, or empty stub — saving it as the pin would
+// poison every tier-2 PoLL judgment thereafter.
+const MIN_PIN_RESPONSE_CHARS = 200;
+
 function parseArgs(argv: string[]): {
   seedId: string;
   parameters: Record<string, string>;
   runAgentToo: boolean;
+  allowShort: boolean;
 } {
   const args = argv.slice(2);
   if (args.length < 1) {
     console.error(
-      "Usage: pin-capture <seed-id> [--param key=value ...] [--no-agent-run]",
+      "Usage: pin-capture <seed-id> [--param key=value ...] [--no-agent-run] [--allow-short]",
     );
     process.exit(2);
   }
   const seedId = args[0];
   const parameters: Record<string, string> = {};
   let runAgentToo = true;
+  let allowShort = false;
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--param") {
       const kv = args[++i];
@@ -55,16 +62,18 @@ function parseArgs(argv: string[]): {
       parameters[kv.slice(0, eq)] = kv.slice(eq + 1);
     } else if (args[i] === "--no-agent-run") {
       runAgentToo = false;
+    } else if (args[i] === "--allow-short") {
+      allowShort = true;
     } else {
       console.error(`Unknown argument: ${args[i]}`);
       process.exit(2);
     }
   }
-  return { seedId, parameters, runAgentToo };
+  return { seedId, parameters, runAgentToo, allowShort };
 }
 
 async function main(): Promise<void> {
-  const { seedId, parameters, runAgentToo } = parseArgs(process.argv);
+  const { seedId, parameters, runAgentToo, allowShort } = parseArgs(process.argv);
   const seed = loadSeed(seedId);
   if (!seed) {
     console.error(`Seed not found: ${seedId}`);
@@ -124,6 +133,38 @@ async function main(): Promise<void> {
     }
   } else {
     console.error("[pin-capture] --no-agent-run set; skipping agent run (tier 2 will not work for this pin)");
+  }
+
+  if (runAgentToo) {
+    const shortResponses: string[] = [];
+    if (agentResponse && agentResponse.text.length < MIN_PIN_RESPONSE_CHARS) {
+      shortResponses.push(
+        `agent_response: ${agentResponse.text.length} chars`,
+      );
+    }
+    if (chainResponses) {
+      for (const entry of chainResponses) {
+        if (entry.response.length < MIN_PIN_RESPONSE_CHARS) {
+          shortResponses.push(
+            `chain step ${entry.agent}: ${entry.response.length} chars`,
+          );
+        }
+      }
+    }
+    if (shortResponses.length > 0) {
+      console.error(
+        `[pin-capture] WARN: response shorter than ${MIN_PIN_RESPONSE_CHARS} chars (likely apology/stub):`,
+      );
+      for (const msg of shortResponses) console.error(`  - ${msg}`);
+      if (!allowShort) {
+        console.error(
+          `[pin-capture] ABORT: refusing to save a likely-poisoned baseline. ` +
+            `Re-run pin-capture, or pass --allow-short to override if the response is genuinely terse.`,
+        );
+        process.exit(3);
+      }
+      console.error("[pin-capture] --allow-short set; saving anyway.");
+    }
   }
 
   const baseline: Baseline = {
