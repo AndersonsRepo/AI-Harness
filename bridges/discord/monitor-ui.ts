@@ -40,6 +40,13 @@ const monitorThreads = new Map<string, ThreadChannel>();
 const threadToolCounts = new Map<string, number>();
 // Throttle flush interval
 let flushInterval: ReturnType<typeof setInterval> | null = null;
+// Task ids whose first registration `channel.send` is still in flight.
+// Without this guard the callback in discord-transport / bot.ts checks
+// `instance.monitorMessageId` synchronously, but that field is only set
+// AFTER the await; a burst of processMonitorEvent calls (e.g. recordResult
+// replaying the full stdout in a tight loop) all see it undefined and
+// queue parallel channel.send calls, posting 30+ duplicate embeds.
+const registrationsInFlight = new Set<string>();
 
 // ─── Initialization ──────────────────────────────────────────────────
 
@@ -99,29 +106,40 @@ export function stopMonitorUI(): void {
 // ─── Instance Lifecycle ──────────────────────────────────────────────
 
 export async function onInstanceRegistered(instance: MonitoredInstance): Promise<void> {
-  const channel = await ensureMonitorChannel();
-  if (!channel) return;
-
-  const { embed, row } = buildInstanceEmbed(instance);
+  // Idempotent guard: if registration is already in flight or the embed has
+  // already been posted, drop the call. Both checks are synchronous so a
+  // burst of callers all see the claim before any of them yields to await.
+  if (registrationsInFlight.has(instance.taskId)) return;
+  if (monitorMessages.has(instance.taskId)) return;
+  registrationsInFlight.add(instance.taskId);
 
   try {
-    const msg = await channel.send({ embeds: [embed], components: [row] });
-    monitorMessages.set(instance.taskId, msg);
-    instance.monitorMessageId = msg.id;
+    const channel = await ensureMonitorChannel();
+    if (!channel) return;
 
-    // Create a thread for detailed tool call log
+    const { embed, row } = buildInstanceEmbed(instance);
+
     try {
-      const thread = await msg.startThread({
-        name: `${instance.agent || "default"} — ${instance.prompt.slice(0, 40)}`,
-        autoArchiveDuration: 60,
-      });
-      instance.monitorThreadId = thread.id;
-      monitorThreads.set(instance.taskId, thread);
-    } catch {}
+      const msg = await channel.send({ embeds: [embed], components: [row] });
+      monitorMessages.set(instance.taskId, msg);
+      instance.monitorMessageId = msg.id;
 
-    console.log(`[MONITOR-UI] Created monitor embed for ${instance.taskId}`);
-  } catch (err: any) {
-    console.error(`[MONITOR-UI] Failed to send monitor embed: ${err.message}`);
+      // Create a thread for detailed tool call log
+      try {
+        const thread = await msg.startThread({
+          name: `${instance.agent || "default"} — ${instance.prompt.slice(0, 40)}`,
+          autoArchiveDuration: 60,
+        });
+        instance.monitorThreadId = thread.id;
+        monitorThreads.set(instance.taskId, thread);
+      } catch {}
+
+      console.log(`[MONITOR-UI] Created monitor embed for ${instance.taskId}`);
+    } catch (err: any) {
+      console.error(`[MONITOR-UI] Failed to send monitor embed: ${err.message}`);
+    }
+  } finally {
+    registrationsInFlight.delete(instance.taskId);
   }
 }
 
@@ -177,6 +195,7 @@ export async function onInstanceCompleted(instance: MonitoredInstance): Promise<
     monitorThreads.delete(instance.taskId);
     threadToolCounts.delete(instance.taskId);
     lastUpdateTimes.delete(instance.taskId);
+    registrationsInFlight.delete(instance.taskId);
   }, 120_000);
 }
 
