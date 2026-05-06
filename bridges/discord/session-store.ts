@@ -36,41 +36,81 @@ function getSessionsKeyShape(): SessionsKeyShape {
   return "unknown";
 }
 
-export function getSession(channelId: string, runtime?: RuntimeTag): string | null {
+/**
+ * Default age beyond which a stored session id is considered stale and
+ * skipped on resume — `codex exec resume <stale-id>` hangs silently for
+ * 10+ minutes on some stale threads instead of failing fast, so we'd
+ * rather cold-start a fresh thread once a day's gone by. Both runtimes
+ * use the same default; override per-runtime via env if needed.
+ */
+const SESSION_RESUME_MAX_AGE_HOURS = parseFloat(
+  process.env.SESSION_RESUME_MAX_AGE_HOURS || "24",
+);
+export const SESSION_RESUME_MAX_AGE_MS = SESSION_RESUME_MAX_AGE_HOURS * 60 * 60 * 1000;
+
+export interface GetSessionOptions {
+  /** When set, return null if last_response_at is older than this many ms. */
+  maxAgeMs?: number;
+}
+
+function isFreshEnough(lastResponseAt: string | null | undefined, maxAgeMs: number | undefined): boolean {
+  if (maxAgeMs === undefined) return true;
+  if (!lastResponseAt) return false;
+  // SQLite datetime('now') stores 'YYYY-MM-DD HH:MM:SS' in UTC. Append 'Z'
+  // so Date.parse treats it as UTC instead of local time.
+  const ts = Date.parse(lastResponseAt.replace(" ", "T") + "Z");
+  if (Number.isNaN(ts)) return false;
+  return Date.now() - ts <= maxAgeMs;
+}
+
+export function getSession(
+  channelId: string,
+  runtime?: RuntimeTag,
+  opts?: GetSessionOptions,
+): string | null {
   const db = getDb();
   const keyShape = getSessionsKeyShape();
+  const maxAgeMs = opts?.maxAgeMs;
+  // Older schemas don't have last_response_at; only filter by age when
+  // the column exists, otherwise fall back to "always fresh" (no-op).
+  const hasResponseAt = columnExistsSafe(db, "sessions", "last_response_at");
+  const selectCols = hasResponseAt ? "session_id, last_response_at" : "session_id";
 
   if (runtime) {
     if (keyShape === "channel-runtime") {
       const row = db.prepare(
-        "SELECT session_id FROM sessions WHERE channel_id = ? AND runtime = ?"
-      ).get(channelId, runtime) as { session_id: string } | undefined;
+        `SELECT ${selectCols} FROM sessions WHERE channel_id = ? AND runtime = ?`,
+      ).get(channelId, runtime) as { session_id: string; last_response_at?: string } | undefined;
       if (!row) return null;
+      if (hasResponseAt && !isFreshEnough(row.last_response_at, maxAgeMs)) return null;
       db.prepare("UPDATE sessions SET last_used = datetime('now') WHERE channel_id = ? AND runtime = ?").run(channelId, runtime);
       return row.session_id;
     }
 
     if (keyShape === "channel-only") {
       const row = db.prepare(
-        "SELECT session_id FROM sessions WHERE channel_id = ?"
-      ).get(channelId) as { session_id: string } | undefined;
+        `SELECT ${selectCols} FROM sessions WHERE channel_id = ?`,
+      ).get(channelId) as { session_id: string; last_response_at?: string } | undefined;
       if (!row) return null;
+      if (hasResponseAt && !isFreshEnough(row.last_response_at, maxAgeMs)) return null;
       db.prepare("UPDATE sessions SET last_used = datetime('now') WHERE channel_id = ?").run(channelId);
       return row.session_id;
     }
 
     try {
       const row = db.prepare(
-        "SELECT session_id FROM sessions WHERE channel_id = ? AND runtime = ?"
-      ).get(channelId, runtime) as { session_id: string } | undefined;
+        `SELECT ${selectCols} FROM sessions WHERE channel_id = ? AND runtime = ?`,
+      ).get(channelId, runtime) as { session_id: string; last_response_at?: string } | undefined;
       if (!row) return null;
+      if (hasResponseAt && !isFreshEnough(row.last_response_at, maxAgeMs)) return null;
       db.prepare("UPDATE sessions SET last_used = datetime('now') WHERE channel_id = ? AND runtime = ?").run(channelId, runtime);
       return row.session_id;
     } catch {
       const row = db.prepare(
-        "SELECT session_id FROM sessions WHERE channel_id = ?"
-      ).get(channelId) as { session_id: string } | undefined;
+        `SELECT ${selectCols} FROM sessions WHERE channel_id = ?`,
+      ).get(channelId) as { session_id: string; last_response_at?: string } | undefined;
       if (!row) return null;
+      if (hasResponseAt && !isFreshEnough(row.last_response_at, maxAgeMs)) return null;
       db.prepare("UPDATE sessions SET last_used = datetime('now') WHERE channel_id = ?").run(channelId);
       return row.session_id;
     }
@@ -78,45 +118,72 @@ export function getSession(channelId: string, runtime?: RuntimeTag): string | nu
 
   if (keyShape === "channel-runtime") {
     const latest = db.prepare(
-      "SELECT session_id, runtime FROM sessions WHERE channel_id = ? ORDER BY last_used DESC LIMIT 1"
-    ).get(channelId) as { session_id: string; runtime: string } | undefined;
+      `SELECT ${selectCols}, runtime FROM sessions WHERE channel_id = ? ORDER BY last_used DESC LIMIT 1`,
+    ).get(channelId) as { session_id: string; runtime: string; last_response_at?: string } | undefined;
     if (!latest) return null;
+    if (hasResponseAt && !isFreshEnough(latest.last_response_at, maxAgeMs)) return null;
 
     db.prepare("UPDATE sessions SET last_used = datetime('now') WHERE channel_id = ? AND runtime = ?").run(channelId, latest.runtime);
     return latest.session_id;
   }
 
   const latest = db.prepare(
-    "SELECT session_id FROM sessions WHERE channel_id = ? ORDER BY last_used DESC LIMIT 1"
-  ).get(channelId) as { session_id: string } | undefined;
+    `SELECT ${selectCols} FROM sessions WHERE channel_id = ? ORDER BY last_used DESC LIMIT 1`,
+  ).get(channelId) as { session_id: string; last_response_at?: string } | undefined;
   if (!latest) return null;
+  if (hasResponseAt && !isFreshEnough(latest.last_response_at, maxAgeMs)) return null;
   db.prepare("UPDATE sessions SET last_used = datetime('now') WHERE channel_id = ?").run(channelId);
   return latest.session_id;
+}
+
+function columnExistsSafe(
+  db: ReturnType<typeof getDb>,
+  table: string,
+  column: string,
+): boolean {
+  try {
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    return rows.some((row) => row.name === column);
+  } catch {
+    return false;
+  }
 }
 
 export function setSession(channelId: string, sessionId: string, runtime: RuntimeTag = "claude"): void {
   const db = getDb();
   const keyShape = getSessionsKeyShape();
+  // last_response_at exists only after migration v20. On older schemas the
+  // column omission is silent (the SET clause references nothing missing).
+  const hasResponseAt = columnExistsSafe(db, "sessions", "last_response_at");
+  const insertCols = hasResponseAt
+    ? "channel_id, session_id, runtime, created_at, last_used, last_response_at"
+    : "channel_id, session_id, runtime, created_at, last_used";
+  const insertVals = hasResponseAt
+    ? "?, ?, ?, datetime('now'), datetime('now'), datetime('now')"
+    : "?, ?, ?, datetime('now'), datetime('now')";
+  const updateLastUsed = hasResponseAt
+    ? "last_used = datetime('now'), last_response_at = datetime('now')"
+    : "last_used = datetime('now')";
 
   if (keyShape === "channel-runtime") {
     db.prepare(`
-      INSERT INTO sessions (channel_id, session_id, runtime, created_at, last_used)
-      VALUES (?, ?, ?, datetime('now'), datetime('now'))
+      INSERT INTO sessions (${insertCols})
+      VALUES (${insertVals})
       ON CONFLICT(channel_id, runtime) DO UPDATE SET
         session_id = excluded.session_id,
-        last_used = datetime('now')
+        ${updateLastUsed}
     `).run(channelId, sessionId, runtime);
     return;
   }
 
   if (keyShape === "channel-only") {
     db.prepare(`
-      INSERT INTO sessions (channel_id, session_id, runtime, created_at, last_used)
-      VALUES (?, ?, ?, datetime('now'), datetime('now'))
+      INSERT INTO sessions (${insertCols})
+      VALUES (${insertVals})
       ON CONFLICT(channel_id) DO UPDATE SET
         session_id = excluded.session_id,
         runtime = excluded.runtime,
-        last_used = datetime('now')
+        ${updateLastUsed}
     `).run(channelId, sessionId, runtime);
     return;
   }
@@ -125,7 +192,7 @@ export function setSession(channelId: string, sessionId: string, runtime: Runtim
   // task completion over throwing during post-response session persistence.
   const updateByRuntime = db.prepare(`
     UPDATE sessions
-    SET session_id = ?, last_used = datetime('now')
+    SET session_id = ?, ${updateLastUsed}
     WHERE channel_id = ? AND runtime = ?
   `).run(sessionId, channelId, runtime);
 
@@ -135,13 +202,13 @@ export function setSession(channelId: string, sessionId: string, runtime: Runtim
 
   try {
     db.prepare(`
-      INSERT INTO sessions (channel_id, session_id, runtime, created_at, last_used)
-      VALUES (?, ?, ?, datetime('now'), datetime('now'))
+      INSERT INTO sessions (${insertCols})
+      VALUES (${insertVals})
     `).run(channelId, sessionId, runtime);
   } catch (err: any) {
     db.prepare(`
       UPDATE sessions
-      SET session_id = ?, runtime = ?, last_used = datetime('now')
+      SET session_id = ?, runtime = ?, ${updateLastUsed}
       WHERE channel_id = ?
     `).run(sessionId, runtime, channelId);
     console.warn(`[SESSION] Fallback session write used for ${channelId}: ${err.message}`);

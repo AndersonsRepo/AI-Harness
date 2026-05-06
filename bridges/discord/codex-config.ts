@@ -13,7 +13,7 @@ import {
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { HARNESS_ROOT } from "./claude-config.js";
 import { safetyPatternsJson, agentToolPolicyJson } from "./safety.js";
-import { getSession } from "./session-store.js";
+import { getSession, SESSION_RESUME_MAX_AGE_MS } from "./session-store.js";
 import { resolveAllowedMcps } from "./mcp-config-builder.js";
 
 export interface CodexRunConfig {
@@ -171,11 +171,6 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
   const workingDir = projectCwd || HARNESS_ROOT;
   const runnerArgs: string[] = [];
 
-  // Session resume: if a Codex thread id is already stored for this
-  // sessionKey, pass --session-id so codex-runner.py runs `codex exec resume
-  // <id>` instead of starting a fresh thread. Parity with claude-config's
-  // --resume flag. codex-runner.py consumes --session-id before the codex
-  // CLI args begin, so it must appear before --json below.
   // Chain-context identity. Used both for session resume (below) and for
   // env-var propagation to MCP tools (e.g. mcp-harness/harness_handoff)
   // that need to know which session to attribute writes to. Mirrors
@@ -183,8 +178,23 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
   const sessionKey = opts.sessionKey || opts.channelId;
   const fromAgent = agentName || "default";
 
+  // Session resume: if a Codex thread id is already stored for this
+  // sessionKey, pass --session-id so codex-runner.py runs `codex exec resume
+  // <id>` instead of starting a fresh thread. Parity with claude-config's
+  // --resume flag. codex-runner.py consumes --session-id before the codex
+  // CLI args begin, so it must appear before --json below.
+  //
+  // Age gate: `codex exec resume <stale-id>` hangs silently for 10+ minutes
+  // on some stale thread ids instead of failing fast — observed twice in
+  // production (researcher chain step in #ai-harness, days-old session id).
+  // Skipping resume past SESSION_RESUME_MAX_AGE_MS forces a cold-start
+  // before that hang can occur. The conversation context is held by
+  // Codex server-side, so the loss is small and a chain step typically
+  // doesn't depend on it.
   if (!opts.skipSessionResume) {
-    const existingSession = getSession(sessionKey, "codex");
+    const existingSession = getSession(sessionKey, "codex", {
+      maxAgeMs: SESSION_RESUME_MAX_AGE_MS,
+    });
     if (existingSession) {
       runnerArgs.push("--session-id", existingSession);
     }

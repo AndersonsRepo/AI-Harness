@@ -11,7 +11,7 @@ import { getChannelConfig } from "./channel-config-store.js";
 import { assembleContext } from "./context-assembler.js";
 import { readAgentPrompt, AGENT_TOOL_RESTRICTIONS, getAgentModel } from "./agent-loader.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
-import { getSession } from "./session-store.js";
+import { getSession, SESSION_RESUME_MAX_AGE_MS } from "./session-store.js";
 import { claudeDisallowedToolArgs } from "./safety.js";
 import { buildMcpConfigFile } from "./mcp-config-builder.js";
 
@@ -364,10 +364,15 @@ export async function buildClaudeConfig(opts: BuildConfigOptions): Promise<Claud
   });
   args.push("--mcp-config", mcpConfig.configPath, "--strict-mcp-config");
 
-  // Session resume
+  // Session resume — age-gated. Claude's CLI fails fast on a stale
+  // --resume id ("session not found"), so the proactive skip is mostly
+  // defense-in-depth and runtime parity with codex-config (where the
+  // hang is real). See SESSION_RESUME_MAX_AGE_MS in session-store.
   if (!opts.skipSessionResume) {
     const sessionKey = opts.sessionKey || opts.channelId;
-    const existingSession = getSession(sessionKey, "claude");
+    const existingSession = getSession(sessionKey, "claude", {
+      maxAgeMs: SESSION_RESUME_MAX_AGE_MS,
+    });
     if (existingSession) {
       args.push("--resume", existingSession);
     }

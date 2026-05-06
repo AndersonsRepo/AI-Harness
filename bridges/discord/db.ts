@@ -190,6 +190,12 @@ export function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(19);
     console.log("[DB] Applied schema v19 (channel_configs.allowed_mcps for per-channel MCP scoping)");
   }
+
+  if (version < 20) {
+    applyV20(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(20);
+    console.log("[DB] Applied schema v20 (sessions.last_response_at for stale-resume detection)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -658,6 +664,26 @@ function applyV19(database: Database.Database): void {
   // mcp-config-builder.ts.
   if (!columnExists(database, "channel_configs", "allowed_mcps")) {
     database.exec(`ALTER TABLE channel_configs ADD COLUMN allowed_mcps TEXT;`);
+  }
+}
+
+function applyV20(database: Database.Database): void {
+  // sessions.last_response_at — timestamp of the LAST SUCCESSFUL response from
+  // this session id. Differs from last_used, which gets bumped on every read
+  // (including reads where the subsequent spawn hangs and produces nothing).
+  //
+  // Why: Codex `exec resume <stale-id>` hangs silently for 10+ minutes on
+  // some stale thread ids instead of failing fast. Without a "last good
+  // response" timestamp, we can't tell apart a fresh session from one that's
+  // been read-but-never-responded for hours. last_response_at is the signal
+  // the config builders use to decide whether to pass --session-id.
+  //
+  // Backfilled from last_used so existing rows have a sensible starting
+  // point. Going forward, only setSession (called after a successful agent
+  // response) writes this column.
+  if (!columnExists(database, "sessions", "last_response_at")) {
+    database.exec(`ALTER TABLE sessions ADD COLUMN last_response_at TEXT;`);
+    database.exec(`UPDATE sessions SET last_response_at = last_used WHERE last_response_at IS NULL;`);
   }
 }
 
