@@ -62,6 +62,38 @@ interface QueuedTask {
  * If it returns true, the response was handled (e.g., handoff chain started)
  * and the gateway skips its default send logic.
  */
+/**
+ * Build the prompt-prefix line for one downloaded attachment. The label
+ * tells the agent which Read tool affordance to use (PDFs render as a
+ * pdf-pages doc; images render as an image; other files fall through
+ * to plain Read). Used by Gateway.handleMessage to compose the prompt
+ * with attachment context.
+ */
+export function formatAttachmentRef(path: string): string {
+  if (/\.pdf$/i.test(path)) return `Use the Read tool to read this PDF: ${path}`;
+  if (/\.(png|jpg|jpeg|gif|webp)$/i.test(path)) {
+    return `Use the Read tool to view this image: ${path}`;
+  }
+  return `Use the Read tool to read this file: ${path}`;
+}
+
+/**
+ * Decide whether a Discord attachment is something the bot should
+ * download. We accept images and PDFs — both are renderable by Claude's
+ * Read tool; Codex can extract text from PDFs too. Anything else gets
+ * dropped before the network round-trip.
+ */
+export function isSupportedAttachment(opts: {
+  contentType?: string | null;
+  name?: string | null;
+}): boolean {
+  const name = opts.name || "";
+  const ct = opts.contentType || "";
+  const isImage = ct.startsWith("image/") || /\.(png|jpg|jpeg|gif|webp)$/i.test(name);
+  const isPdf = ct === "application/pdf" || /\.pdf$/i.test(name);
+  return isImage || isPdf;
+}
+
 export type PostOutputHook = (
   channelId: string,
   response: string,
@@ -193,11 +225,11 @@ export class Gateway {
     const channelId = msg.channelId;
     const userText = msg.text.trim();
 
-    // Build prompt (with image paths if any)
+    // Build prompt (with attachment paths if any).
     let prompt = userText;
     if (msg.attachmentPaths.length > 0) {
-      const imgRefs = msg.attachmentPaths.map(p => `[Image: ${p}]`).join("\n");
-      prompt = `${imgRefs}\n\n${userText}`;
+      const refs = msg.attachmentPaths.map(formatAttachmentRef).join("\n");
+      prompt = `${refs}\n\n${userText}`;
     }
 
     // Determine agent and session

@@ -33,6 +33,7 @@ import type {
   ChannelCreateOpts,
 } from "./core-types.js";
 import type { Gateway } from "./core-gateway.js";
+import { isSupportedAttachment } from "./core-gateway.js";
 import { executeCommand, type CommandContext } from "./core-commands.js";
 import { setChannelConfig, getChannelConfig } from "./channel-config-store.js";
 import {
@@ -97,6 +98,7 @@ import {
   spawnTask,
   pruneDeadLetters,
 } from "./task-runner.js";
+import { spawn } from "child_process";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -402,6 +404,15 @@ export class DiscordTransport implements TransportAdapter {
       return;
     }
 
+    // Lifecycle commands. These run BEFORE the gateway/task-runner sees the
+    // message — important because a task-routed shutdown is immortal: the
+    // crashed-task recovery path would re-spawn the prompt on next start.
+    // See vault: LRN-do-not-task-the-bot-with-self-affecting-actions.
+    if (content === "!stop-heartbeats" || content === "!stop-bot" || content === "!stop-harness") {
+      await this.handleLifecycleCommand(message, content);
+      return;
+    }
+
     // Download image attachments
     const attachmentPaths = await this.downloadAttachments(message);
 
@@ -639,6 +650,15 @@ export class DiscordTransport implements TransportAdapter {
             ].join("\n"),
             inline: true,
           },
+          {
+            name: "Lifecycle",
+            value: [
+              "`!stop-heartbeats` — Stop all heartbeats (bot stays up)",
+              "`!stop-bot` — Stop the bot (terminal needed to restart)",
+              "`!stop-harness` — Stop bot + heartbeats",
+            ].join("\n"),
+            inline: true,
+          },
         )
         .setFooter({ text: "Type /help to see this message" });
       await message.reply({ embeds: [embed] });
@@ -766,6 +786,50 @@ export class DiscordTransport implements TransportAdapter {
     }
 
     console.log(`[DISCORD] Orchestrator debrief spawned as ${taskId}`);
+  }
+
+  // ─── Lifecycle Commands ──────────────────────────────────────────
+  //
+  // !stop-heartbeats / !stop-bot / !stop-harness route here, NOT through
+  // the task-runner. If a shutdown were processed via a Claude task, the
+  // task_queue row would be left in `running` state when the bot dies, and
+  // crash-recovery on next start would re-issue the prompt — an infinite
+  // loop. Bypassing the gateway means no row is created.
+  // See: LRN-do-not-task-the-bot-with-self-affecting-actions.
+
+  private async handleLifecycleCommand(message: Message, content: string): Promise<void> {
+    const scriptName = {
+      "!stop-heartbeats": "stop-heartbeats.sh",
+      "!stop-bot": "stop-bot.sh",
+      "!stop-harness": "stop-harness.sh",
+    }[content];
+    if (!scriptName) return;
+
+    const scriptPath = join(this.config.harnessRoot, "scripts", scriptName);
+    if (!existsSync(scriptPath)) {
+      await message.reply(`Script not found: \`${scriptPath}\``);
+      return;
+    }
+
+    // Acknowledge BEFORE spawning the script. For !stop-bot / !stop-harness
+    // the bot is about to be killed, so this reply is the last user-visible
+    // signal that the command was accepted.
+    const willKillSelf = content === "!stop-bot" || content === "!stop-harness";
+    const ack = willKillSelf
+      ? `Running \`${scriptName}\`. The bot will go offline shortly. Restart with \`./scripts/start-harness.sh\` from a terminal.`
+      : `Running \`${scriptName}\`. Bot remains online; heartbeats will stop.`;
+    await message.reply(ack);
+
+    console.log(`[LIFECYCLE] User ${message.author.id} triggered ${content} → ${scriptPath}`);
+
+    // Detached + ignored stdio so the script survives the bot's death.
+    // unref() prevents the parent's event loop from waiting on it.
+    const child = spawn("/bin/bash", [scriptPath], {
+      detached: true,
+      stdio: "ignore",
+      cwd: this.config.harnessRoot,
+    });
+    child.unref();
   }
 
   // ─── LinkedIn Approval ────────────────────────────────────────────
@@ -1018,20 +1082,34 @@ export class DiscordTransport implements TransportAdapter {
   }
 
   private async downloadAttachments(message: Message): Promise<string[]> {
-    const imageAttachments = message.attachments.filter(
-      (a) => a.contentType?.startsWith("image/") || /\.(png|jpg|jpeg|gif|webp)$/i.test(a.name || "")
+    // Filter to image + PDF attachments — see isSupportedAttachment for
+    // rationale (Read-tool renderable, no arbitrary binaries).
+    const supported = message.attachments.filter((a) =>
+      isSupportedAttachment({ contentType: a.contentType, name: a.name }),
     );
-    if (imageAttachments.size === 0) return [];
+    if (supported.size === 0) return [];
 
-    const imgDir = join(this.config.harnessRoot, "bridges", "discord", ".tmp", "images");
-    mkdirSync(imgDir, { recursive: true });
+    // 50MB cap mirrors Discord's nitro upload limit and keeps a runaway
+    // attachment from filling .tmp. Files over the cap get logged and
+    // skipped.
+    const MAX_BYTES = 50 * 1024 * 1024;
+
+    const dir = join(this.config.harnessRoot, "bridges", "discord", ".tmp", "attachments");
+    mkdirSync(dir, { recursive: true });
 
     const paths: string[] = [];
-    for (const [, attachment] of imageAttachments) {
+    for (const [, attachment] of supported) {
+      if (attachment.size > MAX_BYTES) {
+        console.warn(
+          `[DISCORD] Skipping ${attachment.name} (${attachment.size} bytes) — exceeds ${MAX_BYTES}-byte cap`,
+        );
+        continue;
+      }
       try {
-        const ext = (attachment.name || "image.png").split(".").pop() || "png";
+        const fallbackName = (attachment.contentType || "").includes("pdf") ? "file.pdf" : "image.png";
+        const ext = (attachment.name || fallbackName).split(".").pop() || "bin";
         const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
-        const filepath = join(imgDir, filename);
+        const filepath = join(dir, filename);
         const response = await fetch(attachment.url);
         const buffer = Buffer.from(await response.arrayBuffer());
         writeFileSync(filepath, buffer);
