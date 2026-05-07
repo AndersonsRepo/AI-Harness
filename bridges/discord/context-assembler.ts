@@ -7,7 +7,7 @@
  *
  * Data sources (all deterministic, no LLM):
  *   - SQLite: projects, channel_configs, task_queue, dead_letter
- *   - Vault: learnings (keyword match on frontmatter), shared knowledge, conventions, gotchas
+ *   - Vault: topics, learnings (keyword match on frontmatter), shared knowledge, conventions, gotchas
  *   - Filesystem: heartbeat state files, pending notifications
  */
 
@@ -22,6 +22,7 @@ import { monitor } from "./truncation-monitor.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const VAULT_DIR = join(HARNESS_ROOT, "vault");
+const TOPICS_DIR = join(VAULT_DIR, "topics");
 const LEARNINGS_DIR = join(VAULT_DIR, "learnings");
 const SHARED_DIR = join(VAULT_DIR, "shared");
 const PROJECT_KNOWLEDGE_DIR = join(SHARED_DIR, "project-knowledge");
@@ -108,6 +109,7 @@ export interface AssembleContextParams {
 
 interface VaultEntry {
   id: string;
+  path: string;
   title: string;
   tags: string[];
   patternKey: string;
@@ -115,6 +117,126 @@ interface VaultEntry {
   status: string;
   summary: string;
   score: number;
+}
+
+interface TopicPageContext {
+  slug: string;
+  title: string;
+  content: string;
+  sourcePaths: Set<string>;
+}
+
+const TOPIC_SLUG_ALIASES: Record<string, string> = {
+  "ai harness": "ai-harness",
+  "ai-harness": "ai-harness",
+};
+
+function normalizeTopicPath(value: string): string {
+  return value
+    .replace(/\\/g, "/")
+    .replace(/^\.?\//, "")
+    .replace(/^vault\//, "");
+}
+
+function normalizeTopicKey(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function parseGeneratedFromFrontmatter(frontmatter: string): Set<string> {
+  const match = frontmatter.match(/^generated_from:\s*\[(.*?)\]\s*$/m);
+  if (!match) return new Set();
+  return new Set(
+    match[1]
+      .split(",")
+      .map((item) => item.trim().replace(/^["']|["']$/g, ""))
+      .filter(Boolean)
+      .map(normalizeTopicPath),
+  );
+}
+
+function stripLeadingTitle(content: string): { title: string; body: string } {
+  const body = stripFrontmatter(content).trim();
+  const lines = body.split("\n");
+  const firstLine = lines[0]?.match(/^#\s+(.+)$/);
+  if (!firstLine) {
+    return { title: "Topic", body };
+  }
+  return {
+    title: firstLine[1].trim(),
+    body: lines.slice(1).join("\n").trim(),
+  };
+}
+
+export function resolveTopicSlug(projectName?: string, keywords: Iterable<string> = []): string | null {
+  const candidates: string[] = [];
+  if (projectName) candidates.push(projectName);
+  for (const keyword of keywords) candidates.push(keyword);
+
+  for (const candidate of candidates) {
+    const normalized = normalizeTopicKey(candidate);
+    if (TOPIC_SLUG_ALIASES[normalized]) {
+      return TOPIC_SLUG_ALIASES[normalized];
+    }
+  }
+
+  const keywordSet = new Set(Array.from(keywords, (keyword) => normalizeTopicKey(keyword)));
+  if (keywordSet.has("ai-harness") || (keywordSet.has("ai") && keywordSet.has("harness"))) {
+    return "ai-harness";
+  }
+
+  return null;
+}
+
+export function readTopicPageContext(topicSlug: string): TopicPageContext | null {
+  const fullPath = join(TOPICS_DIR, `${topicSlug}.md`);
+  if (!existsSync(fullPath)) return null;
+
+  try {
+    const raw = readFileSync(fullPath, "utf-8");
+    const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+    const frontmatter = fmMatch?.[1] ?? "";
+    const stripped = stripLeadingTitle(raw);
+    return {
+      slug: topicSlug,
+      title: stripped.title,
+      content: stripped.body,
+      sourcePaths: parseGeneratedFromFrontmatter(frontmatter),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function prioritizeTopicFallbackItems<T>(
+  items: T[],
+  topicSourcePaths: Iterable<string> | undefined,
+  getPath: (item: T) => string,
+  limit: number,
+): T[] {
+  if (!topicSourcePaths) return items.slice(0, limit);
+
+  const normalizedSourcePaths = new Set(Array.from(topicSourcePaths, normalizeTopicPath));
+  if (normalizedSourcePaths.size === 0) return items.slice(0, limit);
+
+  const preferred: T[] = [];
+  const deferred: T[] = [];
+  for (const item of items) {
+    const normalizedPath = normalizeTopicPath(getPath(item));
+    if (normalizedSourcePaths.has(normalizedPath)) deferred.push(item);
+    else preferred.push(item);
+  }
+
+  return [...preferred, ...deferred].slice(0, limit);
+}
+
+function buildTopicPageSection(projectName: string | undefined, keywords: string[]): TopicPageContext | null {
+  const slug = resolveTopicSlug(projectName, keywords);
+  if (!slug) return null;
+  return readTopicPageContext(slug);
 }
 
 // ─── Live State + Wikilink Resolution ────────────────────────────────
@@ -341,13 +463,24 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       totalChars += projectSection.length;
     }
 
-    // Priority 2: Relevant learnings (hybrid: semantic + keyword)
+    // Priority 2: Compiled topic page
+    const topicPage = buildTopicPageSection(project?.name, keywords);
+    if (topicPage && totalChars < maxTotal) {
+      const topicSection = `## Topic Page: ${topicPage.title}\n${topicPage.content}`;
+      const truncated = agentTruncate(topicSection, "projectKnowledge", "context:topic-page");
+      sections.push(truncated);
+      totalChars += truncated.length;
+    }
+
+    // Priority 3: Relevant learnings (hybrid: semantic + keyword)
     if (totalChars < maxTotal) {
       const learningsSection = await buildLearningsSection(params.prompt, keywords, {
         agentName: params.agentName,
         channelId: params.channelId,
         taskId: params.taskId,
         projectName: project?.name,
+        preferTopicPage: Boolean(topicPage),
+        topicSourcePaths: topicPage?.sourcePaths,
       });
       if (learningsSection) {
         let finalLearnings = agentTruncate(learningsSection, "learnings", "context:learnings");
@@ -366,7 +499,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 3: Project-specific knowledge
+    // Priority 4: Project-specific knowledge
     if (totalChars < maxTotal && project) {
       const knowledgeSection = buildProjectKnowledgeSection(project.name);
       if (knowledgeSection) {
@@ -376,7 +509,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 4: Task history
+    // Priority 5: Task history
     if (totalChars < maxTotal) {
       const taskSection = buildTaskHistorySection(params.channelId);
       if (taskSection) {
@@ -386,7 +519,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 5: Recent Outlook (email + calendar digest)
+    // Priority 6: Recent Outlook (email + calendar digest)
     if (totalChars < maxTotal) {
       const outlookSection = buildRecentOutlookSection();
       if (outlookSection) {
@@ -396,7 +529,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 5.5: Recent academic notes (course-specific if in a course channel)
+    // Priority 6.5: Recent academic notes (course-specific if in a course channel)
     if (totalChars < maxTotal) {
       const academicSection = buildRecentAcademicSection(params.channelId);
       if (academicSection) {
@@ -406,7 +539,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 6: Conventions + tool gotchas (always load — small files)
+    // Priority 7: Conventions + tool gotchas (always load — small files)
     if (totalChars < maxTotal) {
       const conventionsSection = buildConventionsSection();
       if (conventionsSection) {
@@ -425,7 +558,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 7: Heartbeat status (agent-aware limits, scheduler gets unlimited)
+    // Priority 8: Heartbeat status (agent-aware limits, scheduler gets unlimited)
     if (totalChars < maxTotal || agentLimit("heartbeats") === Infinity) {
       const heartbeatSection = buildHeartbeatSection();
       if (heartbeatSection) {
@@ -435,7 +568,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 8: Pending work
+    // Priority 9: Pending work
     if (totalChars < maxTotal) {
       const pendingSection = buildPendingWorkSection(params.channelId);
       if (pendingSection) {
@@ -445,7 +578,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
       }
     }
 
-    // Priority 9: Autonomous work queue status
+    // Priority 10: Autonomous work queue status
     if (totalChars < maxTotal) {
       const workQueueSection = buildWorkQueueSection();
       if (workQueueSection) {
@@ -539,7 +672,14 @@ function extractTagsFromFrontmatter(fullPath: string): string[] {
 async function buildLearningsSection(
   prompt: string,
   keywords: string[],
-  params: { agentName: string; channelId: string; taskId: string; projectName?: string },
+  params: {
+    agentName: string;
+    channelId: string;
+    taskId: string;
+    projectName?: string;
+    preferTopicPage?: boolean;
+    topicSourcePaths?: Set<string>;
+  },
 ): Promise<string | null> {
   // Try hybrid search (semantic + keyword) first, fall back to keyword-only
   let results: SearchResult[] = [];
@@ -547,9 +687,17 @@ async function buildLearningsSection(
     results = await hybridSearch(prompt, keywords, 10);
   } catch {
     // Ollama unavailable — fall back to keyword-only via old searchVault
-    const entries = searchVault(keywords, 5);
+    const entries = prioritizeTopicFallbackItems(
+      searchVault(keywords, 8),
+      params.topicSourcePaths,
+      (entry) => entry.path,
+      5,
+    );
     if (entries.length === 0) return null;
     const lines: string[] = ["## Relevant Knowledge"];
+    if (params.preferTopicPage) {
+      lines.push("Topic page already injected above; raw learnings below are fallback evidence.");
+    }
     for (const entry of entries) {
       lines.push(`- [${entry.id}] ${entry.summary}`);
     }
@@ -603,8 +751,7 @@ async function buildLearningsSection(
       return { ...r, compositeScore: relevance };
     })
     .filter((r) => r.compositeScore > 0.25)
-    .sort((a, b) => b.compositeScore - a.compositeScore)
-    .slice(0, 8); // Fewer but higher-quality results
+    .sort((a, b) => b.compositeScore - a.compositeScore);
 
   if (relevant.length === 0) return null;
 
@@ -645,7 +792,16 @@ async function buildLearningsSection(
   }
 
   const lines: string[] = ["## Relevant Knowledge"];
-  for (const r of relevant) {
+  if (params.preferTopicPage) {
+    lines.push("Topic page already injected above; raw learnings below are fallback evidence.");
+  }
+  const orderedRelevant = prioritizeTopicFallbackItems(
+    relevant,
+    params.topicSourcePaths,
+    (result) => result.path,
+    8,
+  );
+  for (const r of orderedRelevant) {
     const fileName = r.path.split("/").pop()?.replace(".md", "") || r.path;
     const matchTag = r.matchType === "hybrid" ? " [hybrid]"
       : r.matchType === "semantic" ? " [semantic]"
@@ -1126,7 +1282,7 @@ function searchVault(keywords: string[], limit: number): VaultEntry[] {
         const heading = body.match(/^#\s+(.+)$/m);
         const summary = heading ? heading[1] : body.slice(0, 100).trim();
 
-        entries.push({ id, title: summary, tags, patternKey, type, status, summary, score });
+        entries.push({ id, path: `learnings/${file}`, title: summary, tags, patternKey, type, status, summary, score });
       }
     } catch {
       // Skip malformed files
