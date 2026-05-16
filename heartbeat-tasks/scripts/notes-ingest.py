@@ -541,7 +541,7 @@ def main():
             lines.append(f"\nUse `/academics study <topic>` to generate study material.")
             notify("\n".join(lines), channel=channel)
 
-    remaining = len(to_process) - len(batch)
+    remaining = len(candidates) - len(batch)
     if remaining > 0:
         print(f"{remaining} PDFs remaining — will process on next run")
 

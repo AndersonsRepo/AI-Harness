@@ -165,7 +165,7 @@ IP addresses, ports, gateways, TCP vs UDP, clients/servers, protocols, encryptio
 - No textbook required — the course website is the only material
 - Practice exercises are ungraded but are the primary study resource
 - One make-up quiz available on final exam day (missed quizzes only)
-""".format(date=datetime.datetime.now().strftime('%Y-%m-%d'))
+""".format(date=datetime.datetime.now().strftime('%Y-%m-%d'), url=COURSE_URL)
 
     with open(schedule_path, "w") as f:
         f.write(content)
