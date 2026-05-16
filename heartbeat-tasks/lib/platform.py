@@ -520,7 +520,16 @@ class _Scheduler:
         home = paths.home()
         harness_symlink = os.path.join(home, ".local", "ai-harness")
         label = self.task_label(task_name)
-        log_path = f"{harness_symlink}/heartbeat-tasks/logs/{task_name}.log"
+        # launchd's xpcproxy opens StandardOutPath/StandardErrorPath BEFORE
+        # exec'ing the program, so it can't borrow FDA from python3. If the
+        # path canonicalizes to ~/Desktop, the TCC check (file-read-data on
+        # SystemPolicyDesktopFolder) denies and the whole spawn fails with
+        # exit 78 (EX_CONFIG) — no log entry, no Python error to debug. Use
+        # ~/Library/Logs which xpcproxy can always access. Python's own log()
+        # still writes to heartbeat-tasks/logs/ via its own FDA.
+        launchd_log_dir = os.path.join(home, "Library", "Logs", "ai-harness")
+        os.makedirs(launchd_log_dir, exist_ok=True)
+        log_path = os.path.join(launchd_log_dir, f"{task_name}.launchd.log")
         python_path = paths.python()
 
         # Determine scheduling
