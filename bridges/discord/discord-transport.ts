@@ -91,8 +91,9 @@ import {
   unlinkSync,
   appendFileSync,
   renameSync,
+  statSync,
 } from "fs";
-import { join } from "path";
+import { basename, join } from "path";
 import {
   submitTask,
   spawnTask,
@@ -938,15 +939,56 @@ export class DiscordTransport implements TransportAdapter {
             : task.includes("email") || task.includes("emails") || task.includes("calendar") ? 0x0078D4
             : 0x2B2D31;
 
-          await this.sendEmbed(channelId, {
-            title: task.replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase()),
-            description: summary.slice(0, 4000),
-            color,
-            footer: "AI Harness Heartbeat",
-            timestamp: new Date(notif.timestamp || Date.now()),
-          });
+          // Optional file attachments — notif.files may be an array of
+          // string paths or {path, name} objects. Files are validated for
+          // existence and Discord's 25 MB non-boosted upload ceiling.
+          const attachments: Array<{ attachment: string; name: string }> = [];
+          const rawFiles = Array.isArray(notif.files) ? notif.files : [];
+          for (const f of rawFiles) {
+            const p = typeof f === "string" ? f : (f && f.path);
+            if (!p || typeof p !== "string") continue;
+            if (!existsSync(p)) {
+              console.log(`[DISCORD] Notify: file missing, skipping: ${p}`);
+              continue;
+            }
+            let size = 0;
+            try { size = statSync(p).size; } catch { continue; }
+            if (size > 25 * 1024 * 1024) {
+              console.log(`[DISCORD] Notify: file too large (${size} B), skipping: ${p}`);
+              continue;
+            }
+            const n = (typeof f !== "string" && f && f.name) ? f.name : basename(p);
+            attachments.push({ attachment: p, name: n });
+          }
 
-          console.log(`[DISCORD] Sent '${task}' to #${channelName}`);
+          if (attachments.length === 0) {
+            await this.sendEmbed(channelId, {
+              title: task.replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase()),
+              description: summary.slice(0, 4000),
+              color,
+              footer: "AI Harness Heartbeat",
+              timestamp: new Date(notif.timestamp || Date.now()),
+            });
+          } else {
+            // Send embed + files together in one Discord message
+            const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
+            if (!channel) {
+              failed.push(line);
+              continue;
+            }
+            const builder = new EmbedBuilder()
+              .setTitle(task.replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase()))
+              .setDescription(summary.slice(0, 4000))
+              .setColor(color)
+              .setFooter({ text: "AI Harness Heartbeat" })
+              .setTimestamp(new Date(notif.timestamp || Date.now()));
+            await channel.send({ embeds: [builder], files: attachments });
+          }
+
+          console.log(
+            `[DISCORD] Sent '${task}' to #${channelName}` +
+            (attachments.length > 0 ? ` (+${attachments.length} file${attachments.length === 1 ? "" : "s"})` : "")
+          );
         } catch (err: any) {
           console.error(`[DISCORD] Notify parse failed: ${err.message}`);
           failed.push(line);
