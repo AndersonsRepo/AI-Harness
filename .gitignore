@@ -27,6 +27,16 @@ harness.db-wal
 harness.db-shm
 *.json.bak
 
+# Pre-edit backups (Claude/Codex sometimes create *.bak.<descriptive-suffix>)
+*.bak
+*.bak.*
+
+# Vendored dependencies (regenerated locally; too large for git)
+vendor/
+
+# Notifications queue (sometimes drained to project root)
+pending-notifications.jsonl
+
 # Generated caches
 __pycache__/
 heartbeat-tasks/.cs2600-cache/
@@ -46,6 +56,8 @@ heartbeat-tasks/*.state-files.json
 heartbeat-tasks/*.vercel-state.json
 heartbeat-tasks/*.json
 heartbeat-tasks/pending-notifications.jsonl
+bridges/discord/pending-notifications.jsonl
+heartbeat-tasks/semantic-dedup-audit.jsonl
 heartbeat-tasks/logs/*.log
 heartbeat-tasks/projects.json
 !heartbeat-tasks/projects.example.json
