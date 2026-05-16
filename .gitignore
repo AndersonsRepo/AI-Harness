@@ -92,6 +92,11 @@ vault/shared/regression-replay/calibration/pair-[0-9]*.json
 .claude/agents/*.md
 !.claude/agents/.gitkeep
 
+# Skill symlinks into external companion repos (e.g. cptc-toolkit).
+# Local convenience for tandem development; the skills themselves
+# live in their own repos and shouldn't be re-tracked here.
+.claude/skills/cptc-report
+
 # Development planning docs contain personal project references
 PLAN.md
 PLAN-*.md
