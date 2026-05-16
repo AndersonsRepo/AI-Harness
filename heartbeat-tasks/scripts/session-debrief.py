@@ -612,7 +612,17 @@ def write_vault_entry(item, existing_keys, supersedes=None):
 
 
 def append_to_project_knowledge(project_name, items):
-    """Append session learnings to a project's knowledge file.
+    """DEPRECATED — replaced by regen-project-knowledge.py.
+
+    Project-knowledge files are now LLM-regenerated from vault entries (see
+    LRN-20260516-004). Vault entries are the addressable source of truth;
+    project-knowledge is derived. This append path remains active during the
+    transition so that any project not yet covered by a regen run still gets
+    fresh content. Remove once regen has run cleanly on every project in
+    projects.json for ≥1 week.
+
+    Migration:
+      python3 heartbeat-tasks/scripts/regen-project-knowledge.py --project <slug> --apply
 
     Also checks for recurring project-specific patterns and promotes them
     to the Conventions section when they recur 2+ times.
@@ -875,9 +885,30 @@ def process_transcript(transcript_path, existing_keys, existing_entries, dry_run
             })
             print(f"  Created: {entry_id} — {item.get('title', '?')}", file=sys.stderr)
 
-    # 6. Append to project knowledge files (deterministic)
+    # 6. Regenerate project-knowledge pages for affected projects.
+    # Replaces the old append_to_project_knowledge (see LRN-20260515-039).
+    # `--auto` uses a dirty-bit check: if vault max(last-seen) <= page
+    # last_synthesized_at, the regen is a no-op (no LLM call). Each project
+    # is regenerated at most once per day in practice.
+    regen_script = os.path.join(HARNESS_ROOT, "heartbeat-tasks", "scripts",
+                                "regen-project-knowledge.py")
     for project in projects:
-        append_to_project_knowledge(project, items)
+        try:
+            result = subprocess.run(
+                ["python3", regen_script, "--project", project, "--auto"],
+                env={**os.environ, "HARNESS_ROOT": HARNESS_ROOT},
+                capture_output=True, text=True, timeout=300,
+            )
+            # Script logs to stderr; surface it to debrief output.
+            if result.stderr.strip():
+                for line in result.stderr.strip().splitlines():
+                    print(f"  regen: {line}", file=sys.stderr)
+            if result.returncode != 0:
+                print(f"  regen: [{project}] exit {result.returncode}", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print(f"  regen: [{project}] TIMEOUT after 300s — skipped", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 — never block debrief on regen failure
+            print(f"  regen: [{project}] error: {e}", file=sys.stderr)
 
     return created
 
