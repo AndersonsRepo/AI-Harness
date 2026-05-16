@@ -350,6 +350,7 @@ def regen_one(
     auto: bool = False,
     force: bool = False,
     check_only: bool = False,
+    min_entries: int = 1,
 ) -> int:
     if project_slug not in projects:
         print(f"[{project_slug}] unknown project (not in projects.json)", file=sys.stderr)
@@ -375,6 +376,13 @@ def regen_one(
     entries = select_project_entries(project_slug)
     if not entries:
         print(f"[{project_slug}] no vault entries matched — skipping", file=sys.stderr)
+        return 0
+    if len(entries) < min_entries:
+        print(
+            f"[{project_slug}] only {len(entries)} vault entries "
+            f"(min {min_entries}) — skipping to avoid thin page",
+            file=sys.stderr,
+        )
         return 0
 
     out_path = os.path.join(KNOWLEDGE_DIR, f"{project_slug}.md")
@@ -456,6 +464,11 @@ def main() -> int:
     ap.add_argument("--check", action="store_true",
                     help="report dirty/clean status without regenerating; "
                          "exit 1 if dirty, 0 if clean")
+    ap.add_argument("--min-entries", type=int, default=1,
+                    help="skip projects with fewer than N vault entries "
+                         "(avoids generating thin pages from sparsely-tagged "
+                         "projects). Default 1 (off). Set to 3+ for periodic "
+                         "--all runs.")
     args = ap.parse_args()
 
     if not args.project and not args.all:
@@ -472,6 +485,7 @@ def main() -> int:
             auto=args.auto,
             force=args.force,
             check_only=args.check,
+            min_entries=args.min_entries,
         )
 
     if args.all:
