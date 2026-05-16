@@ -629,10 +629,45 @@ def append_to_project_knowledge(project_name, items):
     with open(knowledge_file, "r") as f:
         content = f.read()
 
-    # Append session learnings
+    # Layer 1 (exact-title dedup): skip items whose title is already present as a
+    # bolded bullet anywhere in the file. Cheap, catches verbatim duplicates.
+    # See ERR-20260516-001.
+    new_items = []
+    for item in project_items:
+        title = item.get("title", "?")
+        if f"**{title}**" in content:
+            continue
+        new_items.append(item)
+    if not new_items:
+        return  # all items already covered in the file
+
+    # Layer 2 (semantic-dedup NOOP): for items that survived exact-title, check
+    # if they're semantically equivalent to an existing bullet. Catches the
+    # rephrasing problem documented in LRN-20260516-003. Best-effort — on any
+    # failure (Ollama down, reviewer LLM error), falls through and writes.
+    try:
+        sys.path.insert(0, os.path.join(HARNESS_ROOT, "heartbeat-tasks", "lib"))
+        from semantic_dedup import is_project_knowledge_duplicate  # noqa: PLC0415
+
+        kept = []
+        for item in new_items:
+            if is_project_knowledge_duplicate(
+                new_title=item.get("title", "?"),
+                new_body=item.get("body", ""),
+                file_content=content,
+                context_label=f"append_to_project_knowledge:{project_name}",
+            ):
+                continue  # audit log records the skip
+            kept.append(item)
+        new_items = kept
+        if not new_items:
+            return
+    except Exception:  # noqa: BLE001 — never block the writer on dedup failure
+        pass
+
     today = datetime.date.today().isoformat()
     section = f"\n## Session Learnings ({today})\n\n"
-    for item in project_items:
+    for item in new_items:
         section += f"- **{item.get('title', '?')}**: {item.get('body', '').split('.')[0]}.\n"
 
     with open(knowledge_file, "a") as f:
@@ -771,9 +806,33 @@ def process_transcript(transcript_path, existing_keys, existing_entries, dry_run
 
     # 5. Write to vault — dedup + conflict resolution against existing entries
     created = []
+
+    # Lazy-import the semantic finder so missing optional deps don't break
+    # the heartbeat. Falls through to Jaccard-only behavior on import failure.
+    _semantic_find = None
+    try:
+        sys.path.insert(0, os.path.join(HARNESS_ROOT, "heartbeat-tasks", "lib"))
+        from semantic_dedup import find_vault_match_semantic as _semantic_find  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        pass
+
     for item in items:
-        # Check for semantic similarity with existing entries
+        # Layer 1: Jaccard match on pattern-key/title/tags (cheap, catches lexical matches)
         match, score = find_similar_entry(item, existing_entries)
+
+        # Layer 2: semantic match via precomputed vault-embeddings.json
+        # (catches paraphrased entries with different pattern-keys — see
+        # ERR-20260515-019 / ERR-20260515-020 / LRN-20260516-005).
+        if not match and _semantic_find is not None:
+            try:
+                match, score = _semantic_find(
+                    item.get("title", ""),
+                    item.get("body", ""),
+                    existing_entries,
+                )
+            except Exception:  # noqa: BLE001 — never block writer on dedup failure
+                match, score = None, 0.0
+
         if match:
             # P2: Decide action via conflict resolution
             action = decide_conflict_action(item, match, score)

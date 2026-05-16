@@ -588,5 +588,7 @@ Course channels auto-assign the `education` agent via `setChannelConfig()` on cr
 
 ## Promoted Learnings
 
-<!-- Learnings that recur 3+ times get added here automatically -->
+<!-- Learnings that recur 3+ times get added here after promotion-reviewer approval -->
 <!-- Format: - **[Area]**: Learning description (promoted YYYY-MM-DD, from LRN-XXXXXXXX-XXX) -->
+
+- **[Vault Schema]**: The `type` field in `vault/learnings/*.md` is binary — only `error` or `learning`. Writing `feature_request` or any other value creates non-standard entries that session-debrief and the context assembler won't handle correctly. (promoted 2026-05-16, from LRN-20260506-029)

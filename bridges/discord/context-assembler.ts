@@ -29,10 +29,10 @@ const PROJECT_KNOWLEDGE_DIR = join(SHARED_DIR, "project-knowledge");
 const HEARTBEAT_DIR = join(HARNESS_ROOT, "heartbeat-tasks");
 const NOTIFICATIONS_FILE = join(HEARTBEAT_DIR, "pending-notifications.jsonl");
 
-// Token budget: ~5000-6000 tokens for most agents.
-// Orchestrator/builder get expanded budgets (1M context available on Max plan).
+// Token budget: ~12500 tokens for most agents (was ~6000).
+// Matched to what orchestrator/builder already use in prod — 1M context available.
 // Learnings get the lion's share — that's the whole point of the system.
-const MAX_TOTAL_CHARS = 25000; // ~6000 tokens (default)
+const MAX_TOTAL_CHARS = 50000; // ~12500 tokens (default)
 const COURSE_NOTES_DIR = join(SHARED_DIR, "course-notes");
 const LIVE_STATE_FILE = join(VAULT_DIR, "LIVE_STATE.md");
 
@@ -41,6 +41,12 @@ const SECTION_LIMITS: Record<string, number> = {
   project: 600,
   channelState: 400,
   learnings: 12000,
+  // topicPage: safety cap only. The wiki-maintainer prompt owns the size
+  // target — pages reflect their project's natural load-bearing state.
+  // This 20K cap doubles as a promotion tripwire: if a project's natural
+  // page exceeds ~18K, that signals sub-topics should be promoted rather
+  // than the page being trimmed.
+  topicPage: 20000,
   projectKnowledge: 3000,
   taskHistory: 1200,
   recentOutlook: 800,
@@ -59,6 +65,7 @@ const SECTION_LIMITS: Record<string, number> = {
  */
 const AGENT_LIMIT_OVERRIDES: Record<string, { limits: Partial<Record<string, number>>; maxTotal: number }> = {
   orchestrator: {
+    // topicPage uses the 15K default — generous and safer than uncapped
     limits: { liveState: Infinity, learnings: Infinity, projectKnowledge: 6000, taskHistory: 3000 },
     maxTotal: 50000,
   },
@@ -147,15 +154,36 @@ function normalizeTopicKey(value: string): string {
 }
 
 function parseGeneratedFromFrontmatter(frontmatter: string): Set<string> {
-  const match = frontmatter.match(/^generated_from:\s*\[(.*?)\]\s*$/m);
-  if (!match) return new Set();
-  return new Set(
-    match[1]
-      .split(",")
-      .map((item) => item.trim().replace(/^["']|["']$/g, ""))
-      .filter(Boolean)
-      .map(normalizeTopicPath),
-  );
+  // Inline array form: generated_from: ["a", "b"]
+  const inlineMatch = frontmatter.match(/^generated_from:\s*\[(.*?)\]\s*$/m);
+  if (inlineMatch) {
+    return new Set(
+      inlineMatch[1]
+        .split(",")
+        .map((item) => item.trim().replace(/^["']|["']$/g, ""))
+        .filter(Boolean)
+        .map(normalizeTopicPath),
+    );
+  }
+  // YAML block-list form:
+  //   generated_from:
+  //     - path/a
+  //     - path/b
+  const lines = frontmatter.split("\n");
+  const startIdx = lines.findIndex((line) => /^generated_from:\s*$/.test(line));
+  if (startIdx === -1) return new Set();
+  const items: string[] = [];
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const itemMatch = lines[i].match(/^\s*-\s*(.+?)\s*$/);
+    if (itemMatch) {
+      items.push(itemMatch[1].replace(/^["']|["']$/g, ""));
+      continue;
+    }
+    if (lines[i].trim() === "") continue;
+    // Hit another frontmatter key — block ended
+    break;
+  }
+  return new Set(items.map(normalizeTopicPath));
 }
 
 function stripLeadingTitle(content: string): { title: string; body: string } {
@@ -467,7 +495,7 @@ export async function assembleContext(params: AssembleContextParams): Promise<st
     const topicPage = buildTopicPageSection(project?.name, keywords);
     if (topicPage && totalChars < maxTotal) {
       const topicSection = `## Topic Page: ${topicPage.title}\n${topicPage.content}`;
-      const truncated = agentTruncate(topicSection, "projectKnowledge", "context:topic-page");
+      const truncated = agentTruncate(topicSection, "topicPage", "context:topic-page");
       sections.push(truncated);
       totalChars += truncated.length;
     }
