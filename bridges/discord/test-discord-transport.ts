@@ -15,7 +15,7 @@
  */
 
 import { writeFileSync, existsSync, unlinkSync, mkdirSync, renameSync, readFileSync } from "fs";
-import { join, resolve, dirname } from "path";
+import { join, resolve } from "path";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || resolve(dirname(new URL(import.meta.url).pathname), "../..");
 process.env.HARNESS_ROOT = HARNESS_ROOT;
@@ -198,7 +198,7 @@ async function testGatewayPostOutputHook() {
   });
 
   // Test hook registration
-  let hookCalled = false;
+  let hookCalled = false as boolean;
   let hookChannelId = "";
   let hookResponse = "";
   let hookAgentName: string | undefined;
