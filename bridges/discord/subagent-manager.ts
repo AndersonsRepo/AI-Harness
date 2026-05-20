@@ -15,6 +15,10 @@ import { proc } from "./platform.js";
 import { HARNESS_ROOT } from "./claude-config.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
 import { getAdapter } from "./runtime-adapter.js";
+import {
+  classifyRuntimeFailureForFailover,
+  runtimeFailoverMessage,
+} from "./runtime-failover.js";
 
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const SUBAGENT_TIMEOUT = parseInt(process.env.SUBAGENT_TIMEOUT || "300", 10);
@@ -42,8 +46,6 @@ export function setSubagentSpawnProcessForTests(
 
 export async function spawnSubagent(options: SpawnOptions): Promise<registry.SubagentEntry | null> {
   const id = `sa-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  const outputFile = join(TEMP_DIR, `subagent-${id}.json`);
-  let promptFile: string | null = null;
 
   try {
     mkdirSync(TEMP_DIR, { recursive: true });
@@ -57,15 +59,47 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
     agentName,
   }).selectedRuntime;
 
+  const baseEntry: registry.SubagentEntry = {
+    id,
+    parentChannelId: options.channelId,
+    description: options.description,
+    agent: agentName,
+    runtime,
+    outputFile: "",
+    pid: 0,
+    status: "running",
+    startedAt: new Date().toISOString(),
+  };
+
+  const entry = await startSubagentRuntime(baseEntry, runtime, { register: true });
+
+  // Post to activity stream (async, don't block)
+  postStart(entry).then((msgId) => {
+    if (msgId) {
+      registry.update(id, { streamMessageId: msgId });
+    }
+  });
+
+  console.log(`[SUBAGENT] Spawned ${id}: "${options.description}" (PID ${entry.pid})`);
+  return entry;
+}
+
+async function startSubagentRuntime(
+  entry: registry.SubagentEntry,
+  runtime: AgentRuntime,
+  opts: { register: boolean },
+): Promise<registry.SubagentEntry> {
+  const outputFile = join(TEMP_DIR, `subagent-${entry.id}-${runtime}-${Date.now()}.json`);
+  let promptFile: string | null = null;
   const adapter = getAdapter(runtime);
   const promptFilePath =
-    runtime === "codex" ? join(TEMP_DIR, `subagent-${id}.prompt.txt`) : undefined;
+    runtime === "codex" ? join(TEMP_DIR, `subagent-${entry.id}-${Date.now()}.prompt.txt`) : undefined;
   const spawnArgs = await adapter.buildSpawnArgs({
-    channelId: options.channelId,
-    prompt: options.description,
-    agentName: agentName ?? null,
-    sessionKey: options.channelId,
-    taskId: `subagent-${Date.now()}`,
+    channelId: entry.parentChannelId,
+    prompt: entry.description,
+    agentName: entry.agent ?? null,
+    sessionKey: entry.parentChannelId,
+    taskId: `subagent-${entry.id}-${Date.now()}`,
     outputFile,
     timeoutSecs: SUBAGENT_TIMEOUT,
     skipSessionResume: true,
@@ -81,26 +115,24 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
   });
   childProc.unref();
 
-  const entry: registry.SubagentEntry = {
-    id,
-    parentChannelId: options.channelId,
-    description: options.description,
-    agent: agentName,
+  const runningEntry: registry.SubagentEntry = {
+    ...entry,
     runtime,
     outputFile,
     pid: childProc.pid!,
     status: "running",
-    startedAt: new Date().toISOString(),
   };
 
-  registry.register(entry);
-
-  // Post to activity stream (async, don't block)
-  postStart(entry).then((msgId) => {
-    if (msgId) {
-      registry.update(id, { streamMessageId: msgId });
-    }
-  });
+  if (opts.register) {
+    registry.register(runningEntry);
+  } else {
+    registry.update(entry.id, {
+      runtime,
+      outputFile,
+      pid: runningEntry.pid,
+      status: "running",
+    });
+  }
 
   // Set up FileWatcher instead of polling
   const watcher = new FileWatcher({
@@ -110,8 +142,8 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
       if (promptFile && existsSync(promptFile)) {
         unlinkSync(promptFile);
       }
-      handleSubagentOutput(entry, content).catch((err) =>
-        console.error(`[SUBAGENT] Output handler error for ${id}: ${err.message}`)
+      handleSubagentOutput(runningEntry, content).catch((err) =>
+        console.error(`[SUBAGENT] Output handler error for ${entry.id}: ${err.message}`)
       );
     },
     onTimeout: () => {
@@ -119,14 +151,14 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
       if (promptFile && existsSync(promptFile)) {
         unlinkSync(promptFile);
       }
-      console.log(`[SUBAGENT] ${id} timed out after ${SUBAGENT_TIMEOUT}s`);
-      registry.update(id, {
+      console.log(`[SUBAGENT] ${entry.id} timed out after ${SUBAGENT_TIMEOUT}s`);
+      registry.update(entry.id, {
         status: "failed",
         completedAt: new Date().toISOString(),
       });
-      postError(entry, `Timed out after ${SUBAGENT_TIMEOUT}s`).catch(() => {});
+      postError(runningEntry, `Timed out after ${SUBAGENT_TIMEOUT}s`).catch(() => {});
       if (notifyCallback) {
-        notifyCallback({ ...entry, status: "failed" }, `Timed out after ${SUBAGENT_TIMEOUT}s`);
+        notifyCallback({ ...runningEntry, status: "failed" }, `Timed out after ${SUBAGENT_TIMEOUT}s`);
       }
     },
     timeoutMs: SUBAGENT_TIMEOUT * 1000,
@@ -136,8 +168,7 @@ export async function spawnSubagent(options: SpawnOptions): Promise<registry.Sub
   trackWatcher(watcher);
   watcher.start();
 
-  console.log(`[SUBAGENT] Spawned ${id}: "${options.description}" (PID ${childProc.pid})`);
-  return entry;
+  return runningEntry;
 }
 
 async function handleSubagentOutput(entry: registry.SubagentEntry, content: string): Promise<void> {
@@ -152,6 +183,23 @@ async function handleSubagentOutput(entry: registry.SubagentEntry, content: stri
 
     if (returncode !== 0) {
       const errorMsg = stderr?.trim() || `Exited with code ${returncode}`;
+      const failover = classifyRuntimeFailureForFailover({
+        channelId: entry.parentChannelId,
+        agentName: entry.agent,
+        explicitRuntime: entry.runtime,
+        failedRuntime: entry.runtime || "claude",
+        stdout,
+        stderr,
+        returncode,
+      });
+      if (failover?.shouldFailover && failover.nextRuntime) {
+        const message = runtimeFailoverMessage(entry.runtime || "claude", failover.nextRuntime);
+        console.log(`[SUBAGENT] ${entry.id} ${message}`);
+        await postUpdate(entry, `${message}: ${failover.reason.slice(0, 500)}`).catch(() => {});
+        await startSubagentRuntime(entry, failover.nextRuntime, { register: false });
+        return;
+      }
+
       registry.update(entry.id, {
         status: "failed",
         completedAt: new Date().toISOString(),

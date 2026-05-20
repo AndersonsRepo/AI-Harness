@@ -25,10 +25,21 @@ import {
   finalizeInstance,
 } from "./instance-monitor.js";
 import { persistTaskTelemetry } from "./task-telemetry.js";
+import {
+  classifyRuntimeFailureForFailover,
+  runtimeFailoverMessage,
+} from "./runtime-failover.js";
 
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const MAX_CONTEXT_MESSAGES = 15;
 const MAX_MSG_LENGTH = 500;
+let spawnProcess = spawn;
+
+export function setHandoffSpawnProcessForTests(
+  impl: typeof spawn | null,
+): void {
+  spawnProcess = impl || spawn;
+}
 
 export interface HandoffDirective {
   targetAgent: string;
@@ -586,7 +597,7 @@ export async function executeHandoffCore(
   const promptFile = spawnArgs.promptFilePath;
 
   return new Promise<ExecuteHandoffCoreResult>((resolve) => {
-    const childProc = spawn("python3", spawnArgs.pythonArgs, {
+    const childProc = spawnProcess("python3", spawnArgs.pythonArgs, {
       cwd: spawnArgs.cwd,
       env: spawnArgs.env,
       detached: true,
@@ -658,6 +669,31 @@ export async function executeHandoffCore(
 
           if (returncode !== 0) {
             const errorMsg = stderr?.trim() || `Agent exited with code ${returncode}`;
+            const failover = classifyRuntimeFailureForFailover({
+              channelId,
+              agentName: toAgent,
+              explicitRuntime: runtime,
+              failedRuntime: runtime,
+              stdout: result.stdout || "",
+              stderr,
+              returncode,
+            });
+            if (failover?.shouldFailover && failover.nextRuntime) {
+              const message = runtimeFailoverMessage(runtime, failover.nextRuntime);
+              console.log(`[HANDOFF] ${toAgent} ${message}`);
+              try {
+                adapter.recordResult(chainTaskId, result);
+              } catch (err: any) {
+                console.error(`[HANDOFF] Failed to record failed-attempt telemetry for ${chainTaskId}: ${err.message}`);
+              }
+              finalizeInstance(chainTaskId, "failed");
+              const fallbackResult = await executeHandoffCore({
+                ...params,
+                runtime: failover.nextRuntime,
+              });
+              resolve(fallbackResult);
+              return;
+            }
             finalize({ ok: false, reason: "exit-nonzero", errorMessage: errorMsg }, envelopeForTelemetry);
             return;
           }

@@ -1,15 +1,21 @@
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { dirname } from "path";
+import { mkdirSync, writeFileSync } from "fs";
+import type { ChildProcess } from "child_process";
 import { getDb } from "../db.js";
 import { setChannelConfig } from "../channel-config-store.js";
+import { clearChannelSessions, getSession } from "../session-store.js";
 import {
   buildPostChainGateRequests,
   resolveHandoffRuntime,
+  executeHandoffCore,
   executeChainCore,
   buildHandoffPrompt,
   dequeueHandoff,
   DiscordSink,
   NullSink,
+  setHandoffSpawnProcessForTests,
   type AgentExecutor,
   type ChainEntry,
   type ChainSink,
@@ -17,9 +23,15 @@ import {
   type HandoffResult,
 } from "../handoff-router.js";
 
+interface SpawnCall {
+  command: string;
+  args: string[];
+}
+
 function cleanupChannel(channelId: string): void {
   const db = getDb();
   db.prepare("DELETE FROM channel_configs WHERE channel_id = ?").run(channelId);
+  clearChannelSessions(channelId);
 }
 
 function cleanupHandoffQueue(sessionKey: string): void {
@@ -596,5 +608,72 @@ describe("Handoff Router — Runtime Resolution", () => {
     // ops is the post-D3.1 Claude-default sentinel — no role-policy override,
     // no codex frontmatter. If it flips, role-policy or agent file changed.
     assert.equal(resolveHandoffRuntime("handoff-runtime-agent", "ops"), "claude");
+  });
+});
+
+describe("Handoff Router — Claude usage-limit failover", () => {
+  const channelId = "handoff-runtime-fallback";
+  const sessionKey = `${channelId}:ops`;
+  const spawnCalls: SpawnCall[] = [];
+
+  afterEach(() => {
+    setHandoffSpawnProcessForTests(null);
+    cleanupChannel(channelId);
+  });
+
+  it("reroutes a handoff step from Claude to Codex on usage-limit failure", async () => {
+    spawnCalls.length = 0;
+    setHandoffSpawnProcessForTests(((command: string, args: readonly string[]) => {
+      const callArgs = [...args].map(String);
+      spawnCalls.push({ command, args: callArgs });
+
+      const outputFile = callArgs[1];
+      const isCodex = callArgs[0]?.endsWith("codex-runner.py");
+      const payload = isCodex
+        ? {
+            stdout: '{"type":"thread","thread_id":"handoff-fallback-thread"}\n{"type":"message","content":"Handoff Codex fallback result"}\n',
+            stderr: "",
+            returncode: 0,
+            threadId: "handoff-fallback-thread",
+            lastMessage: "Handoff Codex fallback result",
+          }
+        : {
+            stdout: JSON.stringify({
+              type: "result",
+              is_error: true,
+              api_error_status: 403,
+              result: "API Error: monthly usage limit reached",
+            }),
+            stderr: "",
+            returncode: 1,
+          };
+
+      setTimeout(() => {
+        mkdirSync(dirname(outputFile), { recursive: true });
+        writeFileSync(outputFile, JSON.stringify(payload));
+      }, 25);
+
+      return {
+        pid: isCodex ? 4602 : 4601,
+        unref() {},
+      } as ChildProcess;
+    }) as typeof import("child_process").spawn);
+
+    const result = await executeHandoffCore({
+      channelId,
+      toAgent: "ops",
+      prompt: "Continue this handoff despite Claude usage limits",
+      sessionKey,
+      runtime: "claude",
+      timeoutMs: 6000,
+      skipSessionResume: true,
+    });
+
+    assert.equal(spawnCalls.length, 2);
+    assert.equal(spawnCalls[0]?.args[0].endsWith("claude-runner.py"), true);
+    assert.equal(spawnCalls[1]?.args[0].endsWith("codex-runner.py"), true);
+    assert.equal(result.ok, true);
+    assert.equal(result.ok ? result.response : null, "Handoff Codex fallback result");
+    assert.equal(getSession(sessionKey, "codex"), "handoff-fallback-thread");
   });
 });

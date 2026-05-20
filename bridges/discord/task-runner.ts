@@ -8,9 +8,13 @@ import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { isHoldingContinuation, getInterventionNote, clearInterventionNote, registerInstance } from "./instance-monitor.js";
 import { proc } from "./platform.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
-import { HARNESS_ROOT, classifyClaudeError } from "./claude-config.js";
+import { HARNESS_ROOT } from "./claude-config.js";
 import { getAdapter } from "./runtime-adapter.js";
 import type { AgentRuntime } from "./agent-loader.js";
+import {
+  classifyRuntimeFailureForFailover,
+  runtimeFailoverMessage,
+} from "./runtime-failover.js";
 
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const STREAM_DIR = join(TEMP_DIR, "streams");
@@ -190,6 +194,31 @@ export function resolveTaskRuntime(task: Pick<TaskRecord, "runtime" | "agent" | 
     agentName: task.agent,
     explicitRuntime: task.runtime,
   }).selectedRuntime;
+}
+
+async function failoverTaskRuntime(
+  task: TaskRecord,
+  failedRuntime: AgentRuntime,
+  nextRuntime: AgentRuntime,
+  reason: string,
+): Promise<boolean> {
+  const nextAttempt = task.attempt + 1;
+  const message = runtimeFailoverMessage(failedRuntime, nextRuntime);
+
+  console.log(`[TASK] ${task.id} ${message}`);
+  clearLoopHistory(task.id);
+  taskStreamDirs.delete(task.id);
+  taskPromptFiles.delete(task.id);
+  updateTask(task.id, {
+    runtime: nextRuntime,
+    status: "pending",
+    step_count: 0,
+    attempt: nextAttempt,
+    last_error: `${message}: ${reason.slice(0, 500)}`,
+    next_retry_at: null,
+  });
+  await spawnTask(task.id);
+  return true;
 }
 
 /** Detect if Claude needs another step */
@@ -425,12 +454,22 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
       let errorMsg = stderr?.trim() || `${runtimeLabel} exited with code ${returncode}`;
       let permanent = false;
 
-      if (runtime === "claude") {
-        const classified = classifyClaudeError(stdout || "", stderr || "", returncode);
-        if (classified) {
-          errorMsg = classified.message;
-          permanent = !classified.retryable;
-          console.log(`[TASK] ${taskId} classified: retryable=${classified.retryable} raw=${classified.raw.slice(0, 120)}`);
+      const failover = classifyRuntimeFailureForFailover({
+        channelId: task.channel_id,
+        agentName: task.agent,
+        explicitRuntime: task.runtime,
+        failedRuntime: runtime,
+        stdout,
+        stderr,
+        returncode,
+      });
+      if (failover) {
+        errorMsg = failover.message;
+        permanent = !failover.retryable;
+        console.log(`[TASK] ${taskId} classified: kind=${failover.classification.kind} retryable=${failover.retryable} raw=${failover.reason.slice(0, 120)}`);
+        if (failover.shouldFailover && failover.nextRuntime) {
+          const didFailover = await failoverTaskRuntime(task, runtime, failover.nextRuntime, failover.reason);
+          if (didFailover) return;
         }
       }
 

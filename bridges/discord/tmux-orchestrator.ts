@@ -31,6 +31,10 @@ import { registerInstance, processMonitorEvent, getCompletedSummary, finalizeIns
 import { HARNESS_ROOT } from "./claude-config.js";
 import { getAdapter } from "./runtime-adapter.js";
 import { persistTaskTelemetry } from "./task-telemetry.js";
+import {
+  classifyRuntimeFailureForFailover,
+  runtimeFailoverMessage,
+} from "./runtime-failover.js";
 
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const STREAM_DIR = join(TEMP_DIR, "streams");
@@ -254,6 +258,7 @@ async function spawnParallelAgent(
   winName: string,
   parentTaskId?: string,
   worktreePath?: string | null,
+  options: { forcedRuntime?: AgentRuntime; updateExisting?: boolean } = {},
 ): Promise<void> {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const outputFile = join(TEMP_DIR, `response-${requestId}.json`);
@@ -262,7 +267,7 @@ async function spawnParallelAgent(
 
   // Resolve numbered labels (e.g., "builder-1" → "builder") for agent personality/tools
   const resolvedAgent = resolveAgentName(agent);
-  const runtime = resolveRuntimePolicy({
+  const runtime = options.forcedRuntime ?? resolveRuntimePolicy({
     channelId,
     agentName: resolvedAgent,
   }).selectedRuntime;
@@ -298,12 +303,25 @@ async function spawnParallelAgent(
   tmux.createWindow(winName, `echo "PID: ${pid} | Agent: ${agent} | Group: ${groupId}" && sleep infinity`);
 
   // Record in database
-  insertParallelTask({
-    group_id: groupId, task_id: taskId, parent_task_id: parentTaskId || null,
-    channel_id: channelId, agent, runtime, description, tmux_window: winName,
-    status: "running", result: null, error: null,
-    started_at: new Date().toISOString(), completed_at: null,
-  });
+  const startedAt = new Date().toISOString();
+  if (options.updateExisting) {
+    updateParallelTask(groupId, taskId, {
+      runtime,
+      tmux_window: winName,
+      status: "running",
+      result: null,
+      error: null,
+      started_at: startedAt,
+      completed_at: null,
+    });
+  } else {
+    insertParallelTask({
+      group_id: groupId, task_id: taskId, parent_task_id: parentTaskId || null,
+      channel_id: channelId, agent, runtime, description, tmux_window: winName,
+      status: "running", result: null, error: null,
+      started_at: startedAt, completed_at: null,
+    });
+  }
 
   console.log(`[PARALLEL] Spawned ${agent} (${taskId}) PID ${pid}, window: ${winName}`);
 
@@ -418,6 +436,39 @@ async function handleParallelOutput(
   if (returncode !== 0) {
     const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
     const errorMsg = stderr.trim() || `${runtimeLabel} exited with code ${returncode}`;
+    const status = getGroupStatus(groupId);
+    const taskRecord = status?.tasks.find((task) => task.task_id === taskId);
+    const failover = taskRecord
+      ? classifyRuntimeFailureForFailover({
+          channelId: taskRecord.channel_id,
+          agentName: resolveAgentName(agent),
+          explicitRuntime: runtime,
+          failedRuntime: runtime,
+          stdout,
+          stderr,
+          returncode,
+        })
+      : null;
+    if (taskRecord && failover?.shouldFailover && failover.nextRuntime) {
+      const message = runtimeFailoverMessage(runtime, failover.nextRuntime);
+      console.log(`[PARALLEL] ${agent} (${taskId}) ${message}`);
+      finalizeInstance(taskId, "failed");
+      tmux.killWindow(winName);
+      const wt = getWorktreeForGroup(groupId) as any;
+      await spawnParallelAgent(
+        groupId,
+        taskId,
+        taskRecord.channel_id,
+        agent,
+        taskRecord.description,
+        winName,
+        taskRecord.parent_task_id ?? undefined,
+        wt?.worktree_path ?? null,
+        { forcedRuntime: failover.nextRuntime, updateExisting: true },
+      );
+      return;
+    }
+
     console.error(`[PARALLEL] ${agent} (${taskId}) failed: ${errorMsg.slice(0, 100)}`);
     updateParallelTask(groupId, taskId, {
       status: "failed",

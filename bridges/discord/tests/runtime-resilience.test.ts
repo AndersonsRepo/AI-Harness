@@ -294,6 +294,126 @@ describe("Task Runner — Codex stale-session retry", () => {
   });
 });
 
+// ─── End-to-end: Claude usage-limit failover ─────────────────────────
+
+describe("Task Runner — Claude usage-limit failover", () => {
+  const usageChannel = "resilience-claude-usage-failover";
+  const authChannel = "resilience-claude-auth-no-failover";
+
+  beforeEach(() => {
+    cleanupChannel(usageChannel);
+    cleanupChannel(authChannel);
+  });
+
+  afterEach(() => {
+    setSpawnProcessForTests(null);
+    cleanupChannel(usageChannel);
+    cleanupChannel(authChannel);
+  });
+
+  it("reroutes a Claude usage-limit failure to the next runtime", async () => {
+    let spawnCount = 0;
+    const runnersSeen: string[] = [];
+
+    setSpawnProcessForTests(((command: string, args: readonly string[]) => {
+      spawnCount++;
+      const callArgs = [...args].map(String);
+      const runnerPath = callArgs[0]!;
+      const outputFile = callArgs[1]!;
+      runnersSeen.push(runnerPath);
+
+      const isFirstAttempt = spawnCount === 1;
+      const payload = isFirstAttempt
+        ? {
+            stdout: JSON.stringify({
+              type: "result",
+              is_error: true,
+              api_error_status: 403,
+              result: "API Error: monthly usage limit reached",
+            }),
+            stderr: "",
+            returncode: 1,
+          }
+        : {
+            stdout: '{"type":"thread","thread_id":"codex-after-usage-limit"}\n',
+            stderr: "",
+            returncode: 0,
+            threadId: "codex-after-usage-limit",
+            lastMessage: "Codex handled the fallback",
+          };
+
+      setTimeout(() => writeFileSync(outputFile, JSON.stringify(payload)), 25);
+      return { pid: 7000 + spawnCount, unref() {} } as ChildProcess;
+    }) as typeof import("child_process").spawn);
+
+    const taskId = submitTask({
+      channelId: usageChannel,
+      prompt: "do work despite claude limit",
+      agent: "researcher",
+      runtime: "claude",
+      sessionKey: usageChannel,
+    });
+
+    const outputPromise = waitForTaskOutput(taskId);
+    await spawnTask(taskId);
+    const out = await outputPromise;
+    const task = getTask(taskId);
+
+    assert.equal(spawnCount, 2, "expected Claude failure followed by fallback spawn");
+    assert.equal(runnersSeen[0]?.endsWith("claude-runner.py"), true);
+    assert.equal(runnersSeen[1]?.endsWith("codex-runner.py"), true);
+    assert.equal(out.response, "Codex handled the fallback");
+    assert.equal(out.error, null);
+    assert.equal(out.sessionId, "codex-after-usage-limit");
+    assert.equal(task?.runtime, "codex");
+    assert.equal(task?.attempt, 1);
+    assert.equal(task?.status, "completed");
+    assert.equal(getSession(usageChannel, "codex"), "codex-after-usage-limit");
+  });
+
+  it("does not reroute non-usage permanent Claude errors", async () => {
+    let spawnCount = 0;
+
+    setSpawnProcessForTests(((command: string, args: readonly string[]) => {
+      spawnCount++;
+      const callArgs = [...args].map(String);
+      const outputFile = callArgs[1]!;
+      const payload = {
+        stdout: JSON.stringify({
+          type: "result",
+          is_error: true,
+          api_error_status: 401,
+          result: "authentication_error: invalid authentication",
+        }),
+        stderr: "",
+        returncode: 1,
+      };
+
+      setTimeout(() => writeFileSync(outputFile, JSON.stringify(payload)), 25);
+      return { pid: 7100 + spawnCount, unref() {} } as ChildProcess;
+    }) as typeof import("child_process").spawn);
+
+    const taskId = submitTask({
+      channelId: authChannel,
+      prompt: "auth should not fallback",
+      agent: "researcher",
+      runtime: "claude",
+      sessionKey: authChannel,
+    });
+
+    const outputPromise = waitForTaskOutput(taskId);
+    await spawnTask(taskId);
+    const out = await outputPromise;
+    const task = getTask(taskId);
+
+    assert.equal(spawnCount, 1, "auth failure should dead-letter without fallback");
+    assert.equal(out.response, null);
+    assert.match(out.error || "", /authentication failed/i);
+    assert.equal(task?.runtime, "claude");
+    assert.equal(task?.status, "dead");
+  });
+});
+
 // ─── End-to-end: [CONTINUE] under Codex ──────────────────────────────
 
 describe("Task Runner — Codex [CONTINUE] bounded-step", () => {

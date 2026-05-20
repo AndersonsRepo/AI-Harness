@@ -18,6 +18,16 @@ function cleanupChannel(channelId: string): void {
   db.prepare("DELETE FROM subagents WHERE parent_channel_id = ?").run(channelId);
 }
 
+async function waitForSubagentStatus(id: string, status: string, timeoutMs: number = 6000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const stored = get(id);
+    if (stored?.status === status) return stored;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for subagent ${id} to reach ${status}`);
+}
+
 describe("Subagent Manager — Mixed Runtime Dispatch", () => {
   const channelId = "subagent-runtime-codex";
   const spawnCalls: SpawnCall[] = [];
@@ -66,6 +76,57 @@ describe("Subagent Manager — Mixed Runtime Dispatch", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 75));
     const stored = entry ? get(entry.id) : null;
+    assert.equal(stored?.runtime, "codex");
+  });
+
+  it("reroutes Claude usage-limit failures to the next subagent runtime", async () => {
+    spawnCalls.length = 0;
+    setChannelConfig(channelId, { runtime: "claude", agent: "ops" });
+    setSubagentSpawnProcessForTests(((command: string, args: readonly string[]) => {
+      const callArgs = [...args].map(String);
+      spawnCalls.push({ command, args: callArgs });
+
+      const outputFile = callArgs[1];
+      const isCodex = callArgs[0]?.endsWith("codex-runner.py");
+      const payload = isCodex
+        ? {
+            stdout: '{"type":"thread","thread_id":"subagent-fallback-thread"}\n{"type":"message","content":"Codex subagent fallback complete"}\n',
+            stderr: "",
+            returncode: 0,
+            threadId: "subagent-fallback-thread",
+            lastMessage: "Codex subagent fallback complete",
+          }
+        : {
+            stdout: JSON.stringify({
+              type: "result",
+              is_error: true,
+              api_error_status: 403,
+              result: "API Error: monthly usage limit reached",
+            }),
+            stderr: "",
+            returncode: 1,
+          };
+
+      setTimeout(() => {
+        writeFileSync(outputFile, JSON.stringify(payload));
+      }, 25);
+
+      return {
+        pid: isCodex ? 4403 : 4402,
+        unref() {},
+      } as ChildProcess;
+    }) as typeof import("child_process").spawn);
+
+    const entry = await spawnSubagent({
+      channelId,
+      description: "Verify fallback handling",
+    });
+
+    assert.ok(entry);
+    const stored = await waitForSubagentStatus(entry!.id, "completed");
+    assert.equal(spawnCalls.length, 2);
+    assert.equal(spawnCalls[0]?.args[0].endsWith("claude-runner.py"), true);
+    assert.equal(spawnCalls[1]?.args[0].endsWith("codex-runner.py"), true);
     assert.equal(stored?.runtime, "codex");
   });
 });

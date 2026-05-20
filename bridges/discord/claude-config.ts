@@ -25,6 +25,17 @@ export const GLOBAL_DISALLOWED_TOOLS = claudeDisallowedToolArgs().join(",");
 // ─── Error Classification ───────────────────────────────────────────
 
 export interface ClassifiedError {
+  /** Machine-readable category for control flow (retry, failover, dead-letter). */
+  kind:
+    | "usage_limit"
+    | "credit_balance"
+    | "auth"
+    | "safety"
+    | "overload"
+    | "service_unavailable"
+    | "gateway"
+    | "stream_timeout"
+    | "rate_limit";
   /** User-facing message. Begins with an emoji marker so core-gateway can
    *  render it without a generic "Something went wrong" code-block wrapper. */
   message: string;
@@ -38,7 +49,7 @@ export interface ClassifiedError {
 
 // Detected via String.startsWith on the message. Exported so other modules
 // (e.g. core-gateway) can decide whether an error is already user-facing.
-export const CLASSIFIED_ERROR_PREFIXES = ["🚫", "⏳", "🌐", "🔑", "💳", "⚠️"];
+export const CLASSIFIED_ERROR_PREFIXES = ["🚫", "⏳", "🌐", "🔑", "💳", "⚠️", "🛑"];
 
 export function isClassifiedErrorMessage(msg: string): boolean {
   return CLASSIFIED_ERROR_PREFIXES.some((p) => msg.startsWith(p));
@@ -90,6 +101,7 @@ export function classifyClaudeError(
   if (usageLimitHit) {
     const apiText = (resultText || "").trim() || "no detail";
     return {
+      kind: "usage_limit",
       message:
         "🚫 **Anthropic usage limit reached.** Skipping retries.\n" +
         `> ${apiText}\n` +
@@ -104,6 +116,7 @@ export function classifyClaudeError(
   }
   if (haystack.includes("credit balance") && haystack.includes("low")) {
     return {
+      kind: "credit_balance",
       message: "💳 **Anthropic credit balance is too low.** Add credits at console.anthropic.com → Settings → Plans & Billing.",
       retryable: false,
       raw,
@@ -113,7 +126,33 @@ export function classifyClaudeError(
   // Auth — caller has to fix.
   if (apiStatus === 401 || haystack.includes("authentication_error") || haystack.includes("invalid authentication")) {
     return {
+      kind: "auth",
       message: "🔑 **Anthropic authentication failed.** Re-run `claude /login` or check `ANTHROPIC_API_KEY`.",
+      retryable: false,
+      raw,
+    };
+  }
+
+  // Anthropic cyber-misuse safety classifier refusal. Surfaced by the CLI
+  // as a synthetic assistant text turn ("API Error: …This request triggered
+  // cyber-related safeguards") with stop_reason=stop_sequence, NOT as a
+  // structured is_error result — so substring-match against the full stdout
+  // rather than relying only on the result chunk. See LRN-20260516-018: the
+  // common cause is that this channel's resumed session JSONL contains
+  // prior exploit / pentest content; the classifier scores the whole
+  // messages array, so every new turn in that channel keeps getting
+  // refused until the session_id is rotated.
+  const stdoutLower = (stdout || "").toLowerCase();
+  if (
+    haystack.includes("cyber-related safeguards") ||
+    stdoutLower.includes("cyber-related safeguards")
+  ) {
+    return {
+      kind: "safety",
+      message:
+        "🛑 **Anthropic refused this request — cyber-classifier triggered.**\n" +
+        "Usually this means prior conversation in this channel has security/exploit content baked into the resumed session history (the classifier reads the whole resumed thread, not just your last message).\n" +
+        "Run `/new` to rotate this channel's session and try again. For authorized pentest work, switch to the `cptc-operator` repo (`/cptc-operate` skill + `scope.yml`).",
       retryable: false,
       raw,
     };
@@ -122,6 +161,7 @@ export function classifyClaudeError(
   // Overload class — transient. Retry will likely succeed.
   if (apiStatus === 529 || haystack.includes("overloaded")) {
     return {
+      kind: "overload",
       message: "⏳ Anthropic API is currently overloaded. Backing off and retrying...",
       retryable: true,
       raw,
@@ -129,6 +169,7 @@ export function classifyClaudeError(
   }
   if (apiStatus === 503 || haystack.includes("service unavailable")) {
     return {
+      kind: "service_unavailable",
       message: "⏳ Anthropic service unavailable. Backing off and retrying...",
       retryable: true,
       raw,
@@ -136,6 +177,7 @@ export function classifyClaudeError(
   }
   if (apiStatus === 502 || haystack.includes("bad gateway")) {
     return {
+      kind: "gateway",
       message: "⏳ Anthropic gateway error (502). Backing off and retrying...",
       retryable: true,
       raw,
@@ -143,6 +185,7 @@ export function classifyClaudeError(
   }
   if (haystack.includes("stream idle timeout") || haystack.includes("stream") && haystack.includes("timeout")) {
     return {
+      kind: "stream_timeout",
       message: "🌐 Anthropic streaming connection went idle. Retrying...",
       retryable: true,
       raw,
@@ -151,6 +194,7 @@ export function classifyClaudeError(
   // 429 *not* matched as a quota above — generic rate limiting.
   if (apiStatus === 429 || haystack.includes("rate limit")) {
     return {
+      kind: "rate_limit",
       message: "⏳ Rate limited by Anthropic. Backing off and retrying...",
       retryable: true,
       raw,

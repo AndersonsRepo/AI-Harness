@@ -113,6 +113,63 @@ describe("tmux Orchestrator — Mixed Runtime Dispatch", () => {
     assert.equal(spawnCalls[0]?.args[0].endsWith("codex-runner.py"), true);
     assert.equal(status?.tasks[0]?.runtime, "codex");
   });
+
+  it("reroutes Claude usage-limit failures to the next parallel runtime", async () => {
+    spawnCalls.length = 0;
+    setChannelConfig(channelId, { runtime: "claude" });
+    setParallelSpawnProcessForTests(((command: string, args: readonly string[]) => {
+      const callArgs = [...args].map(String);
+      spawnCalls.push({ command, args: callArgs });
+
+      const outputFile = callArgs[1];
+      const isCodex = callArgs[0]?.endsWith("codex-runner.py");
+      const payload = isCodex
+        ? {
+            stdout: '{"type":"thread","thread_id":"parallel-fallback-thread"}\n{"type":"message","content":"Parallel Codex fallback result"}\n',
+            stderr: "",
+            returncode: 0,
+            threadId: "parallel-fallback-thread",
+            lastMessage: "Parallel Codex fallback result",
+          }
+        : {
+            stdout: JSON.stringify({
+              type: "result",
+              is_error: true,
+              api_error_status: 403,
+              result: "API Error: monthly usage limit reached",
+            }),
+            stderr: "",
+            returncode: 1,
+          };
+
+      setTimeout(() => {
+        writeFileSync(outputFile, JSON.stringify(payload));
+      }, 25);
+
+      return {
+        pid: isCodex ? 4504 : 4503,
+        unref() {},
+      } as ChildProcess;
+    }) as typeof import("child_process").spawn);
+
+    const directive: ParallelDirective = {
+      agents: ["ops"],
+      tasks: new Map([["ops", "Run operational fallback task"]]),
+    };
+
+    const groupId = await spawnParallelGroup({
+      channelId,
+      directive,
+    });
+
+    const status = await waitForGroupCompletion(groupId);
+    assert.equal(spawnCalls.length, 2);
+    assert.equal(spawnCalls[0]?.args[0].endsWith("claude-runner.py"), true);
+    assert.equal(spawnCalls[1]?.args[0].endsWith("codex-runner.py"), true);
+    assert.equal(status?.tasks[0]?.runtime, "codex");
+    assert.equal(status?.tasks[0]?.status, "completed");
+    assert.equal(getSession(`${channelId}:ops`, "codex"), "parallel-fallback-thread");
+  });
 });
 
 // TODO-7: tmux-orchestrator's StreamPoller is dead-wired for Codex (codex-runner
