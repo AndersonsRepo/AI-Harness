@@ -79,11 +79,6 @@ vault/agents/*
 !vault/agents/.gitkeep
 vault/shared/*digest.md
 
-# Regression-replay private artifacts (templates and code ship; captured data does not)
-vault/shared/regression-replay/baselines/
-vault/shared/regression-replay/runs/
-vault/shared/regression-replay/calibration/pair-[0-9]*.json
-
 # Local/private Claude agent definitions
 .claude/agents/client-project.md
 .claude/agents/mento.md
@@ -115,3 +110,10 @@ bridges/discord/harness.db-wal
 bridges/discord/bot.log
 bridges/discord/bot.log.*
 bridges/discord/projects.json.bak
+.worktrees/
+.bg-jobs/
+
+# Control-panel AI autorun kill-switch (transient runtime state)
+.autorun-mode
+.usage-state.json
+.usage-limits.json

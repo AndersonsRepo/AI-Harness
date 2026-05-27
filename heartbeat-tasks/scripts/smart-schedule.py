@@ -13,6 +13,7 @@ import os
 import sys
 import json
 import re
+import hashlib
 import sqlite3
 import subprocess
 import datetime
@@ -66,8 +67,8 @@ def scan_email_events(days: int = 7) -> dict[str, list[dict]]:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            "SELECT subject, sender, snippet, date FROM email_index "
-            "WHERE date >= ? ORDER BY date DESC",
+            "SELECT subject, sender_name AS sender, snippet, received_at AS date "
+            "FROM email_index WHERE received_at >= ? ORDER BY received_at DESC",
             (cutoff,),
         )
         rows = cur.fetchall()
@@ -146,8 +147,14 @@ def notify(channel: str, message: str):
         f.write(json.dumps(entry) + "\n")
 
 
-def get_calendar_events(start: datetime.datetime, end: datetime.datetime) -> list[dict]:
-    """Fetch events from Calendar.app via AppleScript."""
+def get_calendar_events(start: datetime.datetime, end: datetime.datetime) -> list[dict] | None:
+    """Fetch events from Calendar.app via AppleScript.
+
+    Returns a list (possibly empty) on success, or None if Calendar.app couldn't
+    be reached (timeout, AppleScript error, TCC denial). Empty-list and None must
+    be distinguished by the caller — empty means "calendar is empty"; None means
+    "we don't know what's on the calendar."
+    """
     # Ensure Calendar.app is running (launchd may not have it open)
     # osascript 'launch' fails with -600 if app isn't running; 'open -a' works reliably
     subprocess.run(
@@ -200,10 +207,10 @@ end tell
         )
         if result.returncode != 0:
             print(f"AppleScript error: {result.stderr.strip()}")
-            return []
+            return None
     except subprocess.TimeoutExpired:
         print("AppleScript timed out")
-        return []
+        return None
 
     events = []
     for line in result.stdout.strip().split("%%REC%%"):
@@ -339,22 +346,18 @@ def main():
 
     # Fetch events for today + tomorrow
     events = get_calendar_events(today_start, tomorrow_end)
-    print(f"Found {len(events)} calendar events")
 
-    if not events:
-        print("Warning: no calendar events found — Calendar.app may not be accessible")
-
-    today_events = [e for e in events if e["start"].date() == now.date()]
-    tomorrow_events = [e for e in events if e["start"].date() == tomorrow.date()]
-
-    today_blocks = find_free_blocks(today_events, today_start, today_end)
-    tomorrow_blocks = find_free_blocks(tomorrow_events, tomorrow_start, tomorrow_end)
-
-    # If zero events were found, don't report the entire day as "free" —
-    # it likely means Calendar.app failed to respond, not that you have no plans
-    if not events:
-        today_blocks = []
-        tomorrow_blocks = []
+    if events is None:
+        # Couldn't reach Calendar.app — don't claim the day is free.
+        print("Calendar.app inaccessible (TCC, timeout, or AppleScript error) — skipping free-block suggestions")
+        today_blocks: list[dict] = []
+        tomorrow_blocks: list[dict] = []
+    else:
+        print(f"Found {len(events)} calendar events")
+        today_events = [e for e in events if e["start"].date() == now.date()]
+        tomorrow_events = [e for e in events if e["start"].date() == tomorrow.date()]
+        today_blocks = find_free_blocks(today_events, today_start, today_end)
+        tomorrow_blocks = find_free_blocks(tomorrow_events, tomorrow_start, tomorrow_end)
 
     # Get upcoming assignments
     assignments = get_upcoming_assignments(days=3)
@@ -421,7 +424,38 @@ def main():
         return
 
     message = "\n\n".join(parts)
+
+    # Dedup: skip if message content matches the last one we sent.
+    # Calendar.app TCC blocks + static Canvas data make every fire identical otherwise.
+    notify_state_path = os.path.join(TASKS_DIR, "smart-schedule.notify-state.json")
+    msg_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()
+    last_hash = None
+    last_sent_at = None
+    if os.path.exists(notify_state_path):
+        try:
+            ns = json.load(open(notify_state_path))
+            last_hash = ns.get("last_hash")
+            last_sent_at = ns.get("last_sent_at")
+        except Exception:
+            pass
+    # Re-send the same content at most once every 24h, even if unchanged.
+    stale = True
+    if last_sent_at:
+        try:
+            last_dt = datetime.datetime.fromisoformat(last_sent_at)
+            stale = (datetime.datetime.now() - last_dt) > datetime.timedelta(hours=24)
+        except Exception:
+            stale = True
+    if last_hash == msg_hash and not stale:
+        print("Notification matches last sent (and <24h old) — skipping duplicate")
+        return
+
     notify("calendar", message)
+    json.dump(
+        {"last_hash": msg_hash, "last_sent_at": datetime.datetime.now().isoformat()},
+        open(notify_state_path, "w"),
+        indent=2,
+    )
     print(f"Notification sent to #calendar")
     print(message)
 
