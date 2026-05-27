@@ -245,7 +245,11 @@ def main():
         # Format as wikilinks — use YAML list-style, not inline array,
         # to avoid triple-bracket issue ([[[id]]] from [, [[id]], ])
         wikilink_items = "\n".join(f"  - \"[[{rid}]]\"" for rid in related_ids)
-        new_related_line = f"related:\n{wikilink_items}"
+        # Trailing \n is load-bearing: the multi-line list branch of the
+        # regex below consumes the final item's newline, so without it the
+        # closing `---` (or next frontmatter line) gets glued to the last
+        # wikilink — invalid YAML.
+        new_related_line = f"related:\n{wikilink_items}\n"
 
         # Find and update the file
         md_file = learnings_dir / f"{entry_id}.md"
@@ -262,9 +266,13 @@ def main():
         except Exception:
             continue
 
-        # Replace the related: field in frontmatter (inline [...] or multi-line list)
+        # Replace the related: field in frontmatter (inline [...] or multi-line list).
+        # The trailing \n? in both alternatives matches the newline that the
+        # replacement string also provides, so we don't introduce blank lines
+        # when collapsing `related: []` and don't drop newlines when replacing
+        # an existing list.
         updated = re.sub(
-            r"^related:\s*\[.*?\]|^related:\n(?:\s+-\s+.*\n?)*",
+            r"^related:[ \t]*\[.*?\]\n?|^related:\n(?:[ \t]+-[ \t]+.*\n?)*",
             new_related_line,
             text,
             count=1,

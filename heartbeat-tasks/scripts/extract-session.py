@@ -5,11 +5,17 @@ Strips image content (which causes dimension-limit errors) and produces a
 clean markdown digest that can be summarized or pasted into a fresh session.
 
 Usage:
+    extract-session.py                            # Current session (most-recent .jsonl in cwd's project dir)
     extract-session.py <session-id-or-channel-id> [output-path]
-    extract-session.py --channel-name <name>      # Resolve by channel name via DB
     extract-session.py --list                     # List recent sessions with sizes
 
 If output-path is omitted, writes to vault/shared/<session-id>-digest.md.
+
+Session resolution order with no identifier:
+  1. Most recently modified .jsonl across the cwd's project dir AND its ancestors'
+     project dirs (so running from a subdir like bridges/discord still resolves to
+     the active session, which is the one being written and wins by mtime).
+  2. (Nothing — DB sessions are bot-spawned, not the terminal session you're in)
 """
 import argparse
 import json
@@ -63,6 +69,46 @@ def find_transcript(session_id: str) -> Path | None:
     return matches[0] if matches else None
 
 
+def candidate_project_dirs() -> list[Path]:
+    """Project dirs for the cwd AND its ancestors (up to $HOME), cwd-first.
+
+    Claude Code slugifies the cwd by replacing '/' with '-' (leading '-' since
+    absolute paths start with '/'): /Users/foo/Bar -> -Users-foo-Bar. It creates
+    a SEPARATE project dir per cwd, so running from a subdir (e.g. bridges/discord)
+    stores transcripts under a different slug than the repo root. Walking ancestors
+    keeps resolution scoped to the current project tree while tolerating subdir
+    cwds — the active session wins by mtime regardless of which dir holds it.
+    """
+    if not CLAUDE_PROJECTS.exists():
+        return []
+    home = Path.home().resolve()
+    root = HARNESS_ROOT.resolve()
+    dirs: list[Path] = []
+    cwd = Path.cwd().resolve()
+    for d in [cwd, *cwd.parents]:
+        slug = str(d).replace("/", "-")
+        candidate = CLAUDE_PROJECTS / slug
+        if candidate.is_dir():
+            dirs.append(candidate)
+        # Stop at the project root (or $HOME as a fallback) so we never walk up
+        # into ~/Desktop or ~ and pull in unrelated projects' sessions.
+        if d == root or d == home:
+            break
+    return dirs
+
+
+def current_session_transcript() -> Path | None:
+    """Most recently modified .jsonl across the cwd's project dir and its
+    ancestors' — the session actively being written. Robust to running from a
+    subdirectory of the project root (the historical wrong-session bug)."""
+    jsonls: list[Path] = []
+    for proj in candidate_project_dirs():
+        jsonls.extend(proj.glob("*.jsonl"))
+    if not jsonls:
+        return None
+    return max(jsonls, key=lambda p: p.stat().st_mtime)
+
+
 def resolve_channel(channel_ref: str) -> tuple[str, str] | None:
     """Resolve a channel ID or partial match to (channel_id, session_id)."""
     if not DB_PATH.exists():
@@ -82,9 +128,29 @@ def resolve_channel(channel_ref: str) -> tuple[str, str] | None:
 
 
 def list_recent(limit: int = 10):
-    """List recent sessions with transcript sizes."""
+    """List recent sessions with transcript sizes.
+
+    Shows current-project Claude Code transcripts first (the terminal sessions
+    you're actually in), then DB-tracked bot sessions.
+    """
+    cand_dirs = candidate_project_dirs()
+    proj_jsonls: list[Path] = []
+    for d in cand_dirs:
+        proj_jsonls.extend(d.glob("*.jsonl"))
+    proj_jsonls = sorted(proj_jsonls, key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    if proj_jsonls:
+        print("Current project sessions (terminal — handoff with NO args targets the newest):")
+        print(f"{'SESSION':<40} {'SIZE':<10} {'MODIFIED'}")
+        print("-" * 80)
+        from datetime import datetime
+        for p in proj_jsonls:
+            st = p.stat()
+            mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            size = f"{st.st_size / 1024:.1f}KB"
+            print(f"{p.stem:<40} {size:<10} {mtime}")
+        print()
+
     if not DB_PATH.exists():
-        print("No database found.")
         return
     conn = sqlite3.connect(DB_PATH, timeout=5)
     try:
@@ -96,12 +162,14 @@ def list_recent(limit: int = 10):
     finally:
         conn.close()
 
-    print(f"{'CHANNEL':<25} {'SESSION':<40} {'SIZE':<10} {'LAST USED'}")
-    print("-" * 100)
-    for channel_id, session_id, last_used in rows:
-        transcript = find_transcript(session_id)
-        size = f"{transcript.stat().st_size / 1024:.1f}KB" if transcript else "missing"
-        print(f"{channel_id:<25} {session_id:<40} {size:<10} {last_used}")
+    if rows:
+        print("Bot sessions (Discord channels):")
+        print(f"{'CHANNEL':<25} {'SESSION':<40} {'SIZE':<10} {'LAST USED'}")
+        print("-" * 100)
+        for channel_id, session_id, last_used in rows:
+            transcript = find_transcript(session_id)
+            size = f"{transcript.stat().st_size / 1024:.1f}KB" if transcript else "missing"
+            print(f"{channel_id:<25} {session_id:<40} {size:<10} {last_used}")
 
 
 def build_digest(transcript_path: Path) -> tuple[str, int]:
@@ -162,17 +230,23 @@ def main():
         list_recent()
         return
 
-    if not args.identifier:
-        print("Usage: extract-session.py <session-id-or-channel-id> [output-path]")
-        print("       extract-session.py --list")
-        sys.exit(1)
-
-    # Determine if identifier is a session UUID (has dashes) or channel ID (digits)
     ident = args.identifier
     session_id = None
     channel_id = None
+    transcript = None
 
-    if "-" in ident and len(ident) > 20:
+    if not ident:
+        # Default: most recently modified .jsonl in the cwd's project dir —
+        # the actual terminal session this command was invoked from. The DB
+        # only tracks bot-spawned sessions, which are not the current one.
+        transcript = current_session_transcript()
+        if not transcript:
+            print("No current-project Claude Code transcript found.")
+            print("Pass a session UUID or channel ID explicitly, or run --list.")
+            sys.exit(1)
+        session_id = transcript.stem
+        print(f"Using current session: {session_id} ({transcript.stat().st_size / 1024:.1f}KB)")
+    elif "-" in ident and len(ident) > 20:
         session_id = ident
     else:
         resolved = resolve_channel(ident)
@@ -182,7 +256,8 @@ def main():
         channel_id, session_id = resolved
         print(f"Resolved channel {channel_id} → session {session_id}")
 
-    transcript = find_transcript(session_id)
+    if transcript is None:
+        transcript = find_transcript(session_id)
     if not transcript:
         print(f"No transcript file found for session {session_id}")
         sys.exit(1)

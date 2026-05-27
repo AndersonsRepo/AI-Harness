@@ -47,7 +47,7 @@ if os.path.exists(_env_path):
                     os.environ[_key] = _val
 
 # Max entries to compress per run (cost control)
-MAX_PER_RUN = 20
+MAX_PER_RUN = 50
 # Min body length (chars) to qualify for compression
 MIN_BODY_CHARS = 800
 # Min age (days) before compressing — give entries time to be useful in full form
@@ -168,7 +168,8 @@ def find_qualifying_entries() -> list[dict]:
             continue
 
         # Must have a status representing a live entry. `new` was the
-        # original convention; later curated entries use `active`.
+        # original convention; later curated entries use `active`,
+        # which was being skipped and never compressed.
         if fm.get("status", "") not in ("new", "active"):
             continue
 
@@ -180,7 +181,10 @@ def find_qualifying_entries() -> list[dict]:
         # newer curated entries use `created`.
         logged_str = fm.get("logged") or fm.get("created") or ""
         try:
-            logged = datetime.datetime.fromisoformat(logged_str)
+            # Normalize tz-aware ('Z' suffix) to naive UTC to match `now`.
+            logged = datetime.datetime.fromisoformat(logged_str.rstrip("Z"))
+            if logged.tzinfo is not None:
+                logged = logged.replace(tzinfo=None)
         except (ValueError, TypeError):
             continue
 

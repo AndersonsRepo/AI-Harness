@@ -19,8 +19,11 @@ import {
   writeFileSync,
   readdirSync,
   mkdirSync,
+  lstatSync,
+  readlinkSync,
+  renameSync,
 } from "fs";
-import { join, basename } from "path";
+import { join, basename, isAbsolute, dirname } from "path";
 import Database from "better-sqlite3";
 
 // ─── Configuration ───────────────────────────────────────────────────
@@ -86,8 +89,29 @@ function loadEmbeddings(): EmbeddingEntry[] {
   }
 }
 
+// Resolve through the symlink so the atomic rename replaces the real target in
+// the shared state dir, not the symlink itself (which is shared by all trees).
+function resolveEmbeddingsTarget(): string {
+  try {
+    if (lstatSync(EMBEDDINGS_FILE).isSymbolicLink()) {
+      const link = readlinkSync(EMBEDDINGS_FILE);
+      return isAbsolute(link) ? link : join(dirname(EMBEDDINGS_FILE), link);
+    }
+  } catch {
+    // missing — create it at the configured path
+  }
+  return EMBEDDINGS_FILE;
+}
+
 function saveEmbeddings(entries: EmbeddingEntry[]): void {
-  writeFileSync(EMBEDDINGS_FILE, JSON.stringify(entries, null, 2));
+  const target = resolveEmbeddingsTarget();
+  const tmp = `${target}.tmp`;
+  // Compact JSON + 6-decimal float rounding (~halve the file) + atomic
+  // .tmp→rename so a failed write never truncates the live store. Must stay in
+  // sync with bridges/discord/embeddings.ts saveStore.
+  const rounded = entries.map((e) => ({ ...e, embedding: roundVec(e.embedding) }));
+  writeFileSync(tmp, JSON.stringify(rounded));
+  renameSync(tmp, target);
 }
 
 function simpleHash(content: string): string {
@@ -113,12 +137,19 @@ async function generateEmbedding(text: string): Promise<number[] | null> {
   }
 }
 
+// 6-decimal precision: lossless for cosine ranking (~1e-5 perturbation),
+// ~halves the float-JSON. Must match bridges/discord/embeddings.ts.
+const EMBED_PRECISION = 1e6;
+function roundVec(v: number[]): number[] {
+  return v.map((x) => Math.round(x * EMBED_PRECISION) / EMBED_PRECISION);
+}
+
 function normalizeVector(v: number[]): number[] {
   let mag = 0;
   for (const x of v) mag += x * x;
   mag = Math.sqrt(mag);
   if (mag === 0) return v;
-  return v.map((x) => x / mag);
+  return roundVec(v.map((x) => x / mag));
 }
 
 function dotProduct(a: number[], b: number[]): number {
@@ -392,6 +423,13 @@ server.tool(
       const content = readFileSync(join(LEARNINGS_DIR, file), "utf-8");
       const fm = parseFrontmatter(content);
       if (!fm) continue;
+
+      // Exclude statuses that are documented false-positive sources for promotion:
+      // superseded (has a replacement) / resolved (fix already in code) /
+      // promoted (already in CLAUDE.md) / archived. Mirrors the promotion-check
+      // heartbeat filter so both paths agree (see ERR-20260515-014).
+      const status = (fm.status || "").trim();
+      if (["promoted", "archived", "superseded", "resolved"].includes(status)) continue;
 
       const count = parseInt(fm["recurrence-count"] || "0", 10);
       if (count >= 3) {

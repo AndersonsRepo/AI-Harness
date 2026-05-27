@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import json
+import argparse
 import sqlite3
 import datetime
 from pathlib import Path
@@ -33,7 +34,9 @@ VAULT_LEARNINGS = os.path.join(HARNESS_ROOT, "vault", "learnings")
 DB_PATH = os.path.join(HARNESS_ROOT, "bridges", "discord", "harness.db")
 
 
-def notify(message: str):
+def notify(message: str, dry_run: bool = False):
+    if dry_run:
+        return
     entry = {
         "task": "learning-pruner",
         "channel": "notifications",
@@ -70,12 +73,15 @@ def parse_frontmatter(filepath: Path) -> dict | None:
     return fm
 
 
-def update_status(filepath: Path, old_status: str, new_status: str) -> bool:
+def update_status(filepath: Path, old_status: str, new_status: str, *, dry_run: bool = False) -> bool:
     """Update status field in YAML frontmatter."""
     try:
         text = filepath.read_text(encoding="utf-8")
-        updated = text.replace(f"status: {old_status}", f"status: {new_status}", 1)
-        if updated != text:
+        pattern = re.compile(rf"(^status:\s*){re.escape(old_status)}(\s*$)", re.MULTILINE)
+        updated, count = pattern.subn(rf"\1{new_status}\2", text, count=1)
+        if count:
+            if dry_run:
+                return True
             filepath.write_text(updated, encoding="utf-8")
             return True
     except Exception:
@@ -110,10 +116,21 @@ def get_retrieval_counts(days: int = 30) -> dict | None:
         return None
 
 
-def main():
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Archive stale or low-value vault learnings.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run selection/reporting without rewriting vault entries or notifications.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None):
+    args = parse_args(argv)
     if not os.path.isdir(VAULT_LEARNINGS):
         print("Vault learnings directory not found")
-        return
+        return 0
 
     now = datetime.datetime.now()
     files = list(Path(VAULT_LEARNINGS).glob("*.md"))
@@ -146,7 +163,11 @@ def main():
             continue
 
         try:
-            logged = datetime.datetime.fromisoformat(logged_str)
+            # Some vault entries use 'Z' UTC suffix (tz-aware); others are naive.
+            # Normalize to naive by stripping any tz info before subtracting from naive `now`.
+            logged = datetime.datetime.fromisoformat(logged_str.rstrip("Z"))
+            if logged.tzinfo is not None:
+                logged = logged.replace(tzinfo=None)
         except (ValueError, TypeError):
             continue
 
@@ -164,9 +185,41 @@ def main():
         elif status == "new" and priority == "medium" and age_days > 30:
             should_archive = True
             reason = "new/medium >30d"
+        # --- Rule 7 (added 2026-05-06): freshness-driven archival ---
+        # Entries flagged by vault-freshness or vault-reverify that go
+        # >30 days unrevalidated lose their seat in the active corpus.
+        # Archived (recoverable), not deleted.
+        elif status == "stale-citation":
+            stale_at = e.get("stale_detected_at", "")
+            try:
+                stale_dt = datetime.datetime.fromisoformat(stale_at.rstrip("Z"))
+                if stale_dt.tzinfo is not None:
+                    stale_dt = stale_dt.replace(tzinfo=None)
+                if (now - stale_dt).days > 30:
+                    should_archive = True
+                    reason = "stale-citation >30d unrevalidated"
+            except (ValueError, TypeError):
+                # No timestamp → use logged as fallback
+                if age_days > 30:
+                    should_archive = True
+                    reason = "stale-citation (no timestamp, logged >30d)"
+        elif status == "needs-reverify":
+            needs_at = e.get("needs_reverify_at", "")
+            try:
+                needs_dt = datetime.datetime.fromisoformat(needs_at.rstrip("Z"))
+                if needs_dt.tzinfo is not None:
+                    needs_dt = needs_dt.replace(tzinfo=None)
+                if (now - needs_dt).days > 30:
+                    should_archive = True
+                    reason = "needs-reverify >30d unrevalidated"
+            except (ValueError, TypeError):
+                if age_days > 30:
+                    should_archive = True
+                    reason = "needs-reverify (no timestamp, logged >30d)"
 
         if should_archive:
-            if update_status(e["_path"], status, "archived"):
+            if update_status(e["_path"], status, "archived", dry_run=args.dry_run):
+                e["status"] = "archived"
                 archived_count += 1
                 reasons[reason] += 1
 
@@ -190,7 +243,8 @@ def main():
         for dupe in group[1:]:  # Archive all but newest
             if dupe.get("status") in ("promoted", "archived"):
                 continue
-            if update_status(dupe["_path"], dupe["status"], "archived"):
+            if update_status(dupe["_path"], dupe["status"], "archived", dry_run=args.dry_run):
+                dupe["status"] = "archived"
                 dedup_count += 1
 
     # --- Rule 6: Zero-retrieval-hit archival ---
@@ -204,7 +258,9 @@ def main():
 
             logged_str = e.get("logged", "")
             try:
-                logged = datetime.datetime.fromisoformat(logged_str)
+                logged = datetime.datetime.fromisoformat(logged_str.rstrip("Z"))
+                if logged.tzinfo is not None:
+                    logged = logged.replace(tzinfo=None)
             except (ValueError, TypeError):
                 continue
 
@@ -216,7 +272,8 @@ def main():
             entry_path = f"learnings/{e['_path'].name}"
             hits = retrieval_counts.get(entry_path, 0)
             if hits == 0:
-                if update_status(e["_path"], status, "archived"):
+                if update_status(e["_path"], status, "archived", dry_run=args.dry_run):
+                    e["status"] = "archived"
                     zero_hit_count += 1
                     reasons["0 hits >14d"] += 1
 
@@ -224,11 +281,13 @@ def main():
 
     # Report
     remaining = len(entries) - total_archived - by_status.get("archived", 0)
-    msg_parts = [f"**Vault Pruning Complete**"]
+    header = "**Vault Pruning Complete (dry-run)**" if args.dry_run else "**Vault Pruning Complete**"
+    archive_label = "Would archive" if args.dry_run else "Archived"
+    msg_parts = [header]
     msg_parts.append(f"Scanned: {len(entries)} entries")
 
     if total_archived > 0:
-        msg_parts.append(f"Archived: {total_archived} ({archived_count} stale, {dedup_count} duplicates)")
+        msg_parts.append(f"{archive_label}: {total_archived} ({archived_count} stale, {dedup_count} duplicates)")
         if reasons:
             reason_str = ", ".join(f"{r}: {c}" for r, c in reasons.items())
             msg_parts.append(f"Reasons: {reason_str}")
@@ -239,10 +298,11 @@ def main():
     message = "\n".join(msg_parts)
 
     if total_archived > 0:
-        notify(message)
+        notify(message, dry_run=args.dry_run)
 
     print(message)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
