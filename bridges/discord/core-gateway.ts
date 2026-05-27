@@ -30,6 +30,8 @@ import {
   onTaskOutput,
   onTaskDeadLetter,
   recoverCrashedTasks,
+  startTaskReaper,
+  stopTaskReaper,
   type DeadLetterRecord,
 } from "./task-runner.js";
 
@@ -152,11 +154,17 @@ export class Gateway {
       console.log(`[GATEWAY] Recovered ${recovered} crashed tasks`);
     }
 
+    // Mid-session orphan reaper: crash-recovery above only runs once at
+    // startup; this keeps reclaiming concurrency slots from runners that die
+    // without writing their envelope while the bot stays up.
+    startTaskReaper();
+
     this.started = true;
     console.log("[GATEWAY] Core started");
   }
 
   async stop(): Promise<void> {
+    stopTaskReaper();
     for (const poller of this.activeStreamPollers.values()) {
       poller.stop();
     }
@@ -250,6 +258,7 @@ export class Gateway {
         // Submit to task runner
         const taskId = submitTask({
           channelId,
+          channelName: msg.channelName,
           prompt,
           agent: agentName || undefined,
           sessionKey,

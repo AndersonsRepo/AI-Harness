@@ -31,6 +31,7 @@ import {
   getGlobalRunningCount,
   type TaskRecord,
 } from "./task-runner.js";
+import { isAutonomousPaused } from "./autorun-mode.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -476,6 +477,11 @@ function promoteGatedItems(): number {
 
 /** Pick the next eligible work item and spawn it through task-runner */
 async function dispatchNext(): Promise<boolean> {
+  // Autorun kill-switch (control panel): the work-queue is autonomous AI, so
+  // hold all dispatch while autonomous mode is paused. Items stay pending and
+  // resume when the panel switches back to normal.
+  if (isAutonomousPaused()) return false;
+
   const pending = getPendingWork();
   if (pending.length === 0) return false;
 

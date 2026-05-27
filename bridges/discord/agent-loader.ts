@@ -16,15 +16,20 @@ const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 
 // --- Agent Loading ---
 
-export type AgentRuntime = "claude" | "codex";
+export type AgentRuntime = "claude" | "codex" | "ollama";
 export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
 
 export interface AgentMetadata {
   runtime: AgentRuntime;
-  sandbox?: CodexSandbox;
+  sandbox?: CodexSandbox;  // codex-only; ignored when runtime === "claude"
   raw: Record<string, string>;
 }
 
+/**
+ * Parse simple YAML frontmatter from the top of an agent .md file.
+ * Only `key: value` pairs are supported — no nested structures or lists.
+ * If frontmatter is absent or malformed, returns empty fields + full body.
+ */
 function parseFrontmatter(text: string): { fields: Record<string, string>; body: string } {
   if (!text.startsWith("---\n") && !text.startsWith("---\r\n")) {
     return { fields: {}, body: text };
@@ -52,6 +57,8 @@ export function readAgentPrompt(name: string): string | null {
   if (!existsSync(agentFile)) return null;
   const raw = readFileSync(agentFile, "utf-8");
   const { body, fields } = parseFrontmatter(raw);
+  // If frontmatter was present, return body (stripped of frontmatter). If not,
+  // return the full file as before.
   return Object.keys(fields).length > 0 ? body : raw;
 }
 
@@ -60,9 +67,16 @@ export function readAgentMetadata(name: string): AgentMetadata | null {
   if (!existsSync(agentFile)) return null;
   const raw = readFileSync(agentFile, "utf-8");
   const { fields } = parseFrontmatter(raw);
-  const runtime: AgentRuntime = fields.runtime === "codex" ? "codex" : "claude";
+  const runtime: AgentRuntime =
+    fields.runtime === "codex" ? "codex" : fields.runtime === "ollama" ? "ollama" : "claude";
   const sandbox = fields.sandbox as CodexSandbox | undefined;
   return { runtime, sandbox, raw: fields };
+}
+
+export function getAgentRuntime(name?: string | null): AgentRuntime {
+  if (!name) return "claude";
+  const meta = readAgentMetadata(name);
+  return meta?.runtime ?? "claude";
 }
 
 export function listAgentNames(): string[] {
@@ -71,13 +85,6 @@ export function listAgentNames(): string[] {
   return readdirSync(agentsDir)
     .filter((f) => f.endsWith(".md"))
     .map((f) => f.replace(".md", ""));
-}
-
-export function getAgentRuntime(agentName?: string | null): AgentRuntime {
-  if (!agentName) return "claude";
-  const meta = readAgentMetadata(agentName);
-  if (meta) return meta.runtime;
-  return agentName.startsWith("codex-") ? "codex" : "claude";
 }
 
 // --- Tool Restriction Definitions ---

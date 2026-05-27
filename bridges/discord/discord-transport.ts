@@ -55,6 +55,10 @@ import {
   type ChainResult,
 } from "./handoff-router.js";
 import {
+  formatManualHandoffNotice,
+  isProjectAutoChainEnabled,
+} from "./project-chain-policy.js";
+import {
   initActivityStream,
   postAgentStart,
   postAgentComplete,
@@ -76,6 +80,13 @@ import {
   onInstanceCompleted,
 } from "./monitor-ui.js";
 import { handleMonitorInteraction } from "./monitor-interventions.js";
+import {
+  CONTROL_CHANNEL_NAME,
+  ensureControlPanel,
+  handleControlInteraction,
+} from "./control-panel.js";
+import { isFullyFrozen } from "./autorun-mode.js";
+import { reapOrphanedRunners, formatReapReport } from "./process-reaper.js";
 import {
   setMonitorUpdateCallback,
   setMonitorCompletionCallback,
@@ -340,6 +351,15 @@ export class DiscordTransport implements TransportAdapter {
         // legacy/dead and never runs this — see ERR-20260429-003.
         await this.ensureChannels();
 
+        // One-shot deterministic reap of wedged runners left by a previous
+        // instance (orphans survive restarts). No AI, no tokens.
+        try {
+          const report = reapOrphanedRunners();
+          if (report.reaped.length) console.log(`[DISCORD] ${formatReapReport(report)}`);
+        } catch (err: any) {
+          console.error(`[DISCORD] Startup reaper failed: ${err.message}`);
+        }
+
         // Notification drain polling
         const notifyFile = join(this.config.harnessRoot, "heartbeat-tasks", "pending-notifications.jsonl");
         this.notifyInterval = setInterval(() => this.drainNotifications(notifyFile), 60_000);
@@ -350,9 +370,13 @@ export class DiscordTransport implements TransportAdapter {
       // Message routing
       this.client.on("messageCreate", (msg) => this.handleMessage(msg));
 
-      // Monitor interactions (buttons, modals)
+      // Component interactions (buttons, selects, modals). Control-panel
+      // interactions are checked FIRST and are deterministic — they spawn no AI
+      // and are never gated by autorun mode, so the panel can always switch the
+      // kill-switch back off even under full freeze.
       this.client.on("interactionCreate", async (interaction) => {
         try {
+          if (await handleControlInteraction(interaction)) return;
           await handleMonitorInteraction(interaction);
         } catch (err: any) {
           console.error(`[DISCORD] Interaction error: ${err.message}`);
@@ -460,6 +484,15 @@ export class DiscordTransport implements TransportAdapter {
     if (content.startsWith("/")) {
       const handled = await this.handleDiscordCommand(message, content);
       if (handled) return;
+    }
+
+    // Autorun kill-switch (control panel): under FULL freeze, the bot stops
+    // responding to messages with AI. Deterministic commands above (/commands,
+    // lifecycle, approvals) already ran; only the AI gateway is gated. Switch
+    // back via the #control-panel buttons (interactions are never frozen).
+    if (isFullyFrozen()) {
+      await message.react("🧊").catch(() => {});
+      return;
     }
 
     // Delegate to Gateway
@@ -742,6 +775,18 @@ export class DiscordTransport implements TransportAdapter {
         }
       }
 
+      if (!isProjectAutoChainEnabled()) {
+        const noticeChunks = monitor.splitForDiscord(
+          formatManualHandoffNotice(agentName, handoff),
+          this.maxMessageLength,
+          "handoff:auto-chain-disabled",
+        );
+        for (const chunk of noticeChunks) {
+          await channel.send(chunk);
+        }
+        return true;
+      }
+
       const chainResult = await runHandoffChain(
         channel, agentName, response,
         { originAgent: agentName, initialHandoff: queuedHandoff ?? undefined }
@@ -799,14 +844,18 @@ export class DiscordTransport implements TransportAdapter {
   // See: LRN-do-not-task-the-bot-with-self-affecting-actions.
 
   private async handleLifecycleCommand(message: Message, content: string): Promise<void> {
-    const scriptName = {
-      "!stop-heartbeats": "stop-heartbeats.sh",
-      "!stop-bot": "stop-bot.sh",
-      "!stop-harness": "stop-harness.sh",
+    // Map each command to its script. Narrow scripts (bot-only, heartbeats-only)
+    // live in scripts/; the comprehensive harness-stop is the existing one in
+    // bridges/discord/scripts/ which uses `launchctl disable` for durability
+    // across login/reboot and also kills orphaned runner subprocesses.
+    const scriptRel = {
+      "!stop-heartbeats": "scripts/stop-heartbeats.sh",
+      "!stop-bot": "scripts/stop-bot.sh",
+      "!stop-harness": "bridges/discord/scripts/harness-stop.sh",
     }[content];
-    if (!scriptName) return;
+    if (!scriptRel) return;
 
-    const scriptPath = join(this.config.harnessRoot, "scripts", scriptName);
+    const scriptPath = join(this.config.harnessRoot, scriptRel);
     if (!existsSync(scriptPath)) {
       await message.reply(`Script not found: \`${scriptPath}\``);
       return;
@@ -817,8 +866,8 @@ export class DiscordTransport implements TransportAdapter {
     // signal that the command was accepted.
     const willKillSelf = content === "!stop-bot" || content === "!stop-harness";
     const ack = willKillSelf
-      ? `Running \`${scriptName}\`. The bot will go offline shortly. Restart with \`./scripts/start-harness.sh\` from a terminal.`
-      : `Running \`${scriptName}\`. Bot remains online; heartbeats will stop.`;
+      ? `Running \`${scriptRel}\`. The bot will go offline shortly. Restart with \`./scripts/start-harness.sh\` from a terminal.`
+      : `Running \`${scriptRel}\`. Bot remains online; heartbeats will stop.`;
     await message.reply(ack);
 
     console.log(`[LIFECYCLE] User ${message.author.id} triggered ${content} → ${scriptPath}`);
@@ -1102,6 +1151,23 @@ export class DiscordTransport implements TransportAdapter {
           });
           console.log(`[DISCORD] Created #performance`);
         }
+
+        // Control panel (top-level) — human-operated deterministic ops surface.
+        let controlCh = guild.channels.cache.find(
+          (c) => c.name === CONTROL_CHANNEL_NAME && c.type === ChannelType.GuildText
+        );
+        if (!controlCh) {
+          controlCh = await guild.channels.create({
+            name: CONTROL_CHANNEL_NAME,
+            type: ChannelType.GuildText,
+            topic: "Human-operated controls: AI autorun kill-switch, heartbeat toggles, process reaper — no AI tokens",
+            reason: "AI Harness control panel",
+          });
+          console.log(`[DISCORD] Created #${CONTROL_CHANNEL_NAME}`);
+        }
+        if (controlCh?.type === ChannelType.GuildText) {
+          await ensureControlPanel(controlCh as TextChannel);
+        }
       } catch (err: any) {
         console.error(`[DISCORD] Channel setup failed: ${err.message}`);
       }
@@ -1114,6 +1180,8 @@ export class DiscordTransport implements TransportAdapter {
     return {
       id: message.id,
       channelId: message.channel.id,
+      // TextChannels have a `name`; DMs don't — leave undefined there.
+      channelName: (message.channel as { name?: string }).name || undefined,
       userId: message.author.id,
       text: message.content,
       attachmentPaths: attachmentPaths || [],

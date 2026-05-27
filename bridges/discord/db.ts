@@ -196,6 +196,12 @@ export function runMigrations(database: Database.Database): void {
     database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(20);
     console.log("[DB] Applied schema v20 (sessions.last_response_at for stale-resume detection)");
   }
+
+  if (version < 21) {
+    applyV21(database);
+    database.prepare("INSERT INTO schema_version (version) VALUES (?)").run(21);
+    console.log("[DB] Applied schema v21 (task_queue.channel_name for HARNESS_CHANNEL_NAME spawn env)");
+  }
 }
 
 function applyV1(database: Database.Database): void {
@@ -655,6 +661,18 @@ function applyV17(database: Database.Database): void {
   }
 }
 
+function applyV21(database: Database.Database): void {
+  // task_queue.channel_name — the human-readable Discord channel name captured
+  // at submit time, threaded into the spawn env as HARNESS_CHANNEL_NAME so a
+  // spawned agent/tool can notify its OWN channel (the live drain resolves by
+  // exact name, not id — see LRN-bgjob-notify-drain-and-channel-name-gap).
+  // Persisted on the row so it survives crash-recovery replay. Nullable: heartbeat
+  // / non-Discord spawns have no channel name.
+  if (!columnExists(database, "task_queue", "channel_name")) {
+    database.exec(`ALTER TABLE task_queue ADD COLUMN channel_name TEXT;`);
+  }
+}
+
 function applyV19(database: Database.Database): void {
   // Per-channel MCP server scoping. Without this, every Claude spawn inherits
   // the full user-scope mcpServers registry from ~/.claude.json — 11+ servers
@@ -719,6 +737,10 @@ function applyV18(database: Database.Database): void {
 }
 
 function applyV16(database: Database.Database): void {
+  // Recreate the sessions table with a compound (channel_id, runtime) primary
+  // key. Before v16 only channel_id was unique, which meant a Claude session
+  // and a Codex session for the same channel would clobber each other. The
+  // rebuild is a classic table-swap (copy → drop → rename).
   database.exec(`
     CREATE TABLE sessions_v2 (
       channel_id TEXT NOT NULL,

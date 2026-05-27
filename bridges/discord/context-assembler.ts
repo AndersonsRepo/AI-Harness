@@ -37,7 +37,10 @@ const COURSE_NOTES_DIR = join(SHARED_DIR, "course-notes");
 const LIVE_STATE_FILE = join(VAULT_DIR, "LIVE_STATE.md");
 
 const SECTION_LIMITS: Record<string, number> = {
-  liveState: 3000,
+  // 6000 fits the curated always-valuable state (Active Projects + Priorities +
+  // Infra + Courses ≈ 6000 chars after the 2026-05-26 thinning); the historical
+  // Recent Decisions changelog below it truncates gracefully from the bottom.
+  liveState: 6000,
   project: 600,
   channelState: 400,
   learnings: 12000,
@@ -83,7 +86,7 @@ function getAgentLimits(agentName: string): { limits: Record<string, number>; ma
   const overrides = AGENT_LIMIT_OVERRIDES[agentName];
   if (!overrides) return { limits: SECTION_LIMITS, maxTotal: MAX_TOTAL_CHARS };
   return {
-    limits: { ...SECTION_LIMITS, ...(overrides.limits as Record<string, number>) },
+    limits: { ...SECTION_LIMITS, ...overrides.limits } as Record<string, number>,
     maxTotal: overrides.maxTotal,
   };
 }
@@ -133,9 +136,27 @@ interface TopicPageContext {
   sourcePaths: Set<string>;
 }
 
+// Friendly-name → canonical-slug overrides. Only needed for topics whose slug
+// can't be reached by slugifying the project name or a single prompt keyword
+// (multi-word names, abbreviations, product nicknames). Single-token slugs that
+// match the project name (e.g. "mento") resolve on-disk without an alias.
 const TOPIC_SLUG_ALIASES: Record<string, string> = {
   "ai harness": "ai-harness",
   "ai-harness": "ai-harness",
+  "hey lexxi": "hey-lexxi",
+  "heylexxi": "hey-lexxi",
+  "lexxi": "hey-lexxi",
+  "sigmas": "sigmas-internship",
+  "sigmas internship": "sigmas-internship",
+  "lead gen": "lead-gen",
+  "leadgen": "lead-gen",
+  "website agency": "website-agency",
+  "cptc": "cptc-toolkit",
+  "cptc toolkit": "cptc-toolkit",
+  "prompt to app": "prompt-to-app",
+  "quome": "prompt-to-app",
+  "subscription spillover": "subscription-spillover",
+  "spillover": "subscription-spillover",
 };
 
 function normalizeTopicPath(value: string): string {
@@ -151,6 +172,21 @@ function normalizeTopicKey(value: string): string {
     .trim()
     .replace(/[_-]+/g, " ")
     .replace(/\s+/g, " ");
+}
+
+// Turn any candidate (project name, keyword, alias value) into a topic-page
+// slug: lowercase kebab-case. "Hey Lexxi" → "hey-lexxi", "codex_runtime" →
+// "codex-runtime".
+function slugifyTopicKey(value: string): string {
+  return normalizeTopicKey(value).replace(/\s+/g, "-");
+}
+
+// A topic page is reachable iff vault/topics/<slug>.md exists on disk. This is
+// what generalizes the router beyond the hardcoded ai-harness page: any page
+// that exists is automatically routable by its slug.
+function topicPageExists(slug: string): boolean {
+  if (!slug) return false;
+  return existsSync(join(TOPICS_DIR, `${slug}.md`));
 }
 
 function parseGeneratedFromFrontmatter(frontmatter: string): Set<string> {
@@ -199,20 +235,33 @@ function stripLeadingTitle(content: string): { title: string; body: string } {
   };
 }
 
+// Resolve the single topic page to inject for this spawn. Resolution order:
+//   1. Project name — strongest signal (the channel's project anchors the page).
+//      Alias first, then on-disk slug.
+//   2. Prompt keywords, in order — alias first, then on-disk slug.
+//   3. Legacy fallback: split "ai" + "harness" keywords → ai-harness.
+// Returns null when nothing matches (no page is injected — that's fine).
 export function resolveTopicSlug(projectName?: string, keywords: Iterable<string> = []): string | null {
-  const candidates: string[] = [];
-  if (projectName) candidates.push(projectName);
-  for (const keyword of keywords) candidates.push(keyword);
+  const keywordList = Array.from(keywords);
 
-  for (const candidate of candidates) {
-    const normalized = normalizeTopicKey(candidate);
-    if (TOPIC_SLUG_ALIASES[normalized]) {
-      return TOPIC_SLUG_ALIASES[normalized];
-    }
+  if (projectName) {
+    const aliased = TOPIC_SLUG_ALIASES[normalizeTopicKey(projectName)];
+    if (aliased) return aliased;
+    const slug = slugifyTopicKey(projectName);
+    if (topicPageExists(slug)) return slug;
   }
 
-  const keywordSet = new Set(Array.from(keywords, (keyword) => normalizeTopicKey(keyword)));
-  if (keywordSet.has("ai-harness") || (keywordSet.has("ai") && keywordSet.has("harness"))) {
+  for (const keyword of keywordList) {
+    const aliased = TOPIC_SLUG_ALIASES[normalizeTopicKey(keyword)];
+    if (aliased) return aliased;
+  }
+  for (const keyword of keywordList) {
+    const slug = slugifyTopicKey(keyword);
+    if (topicPageExists(slug)) return slug;
+  }
+
+  const keywordSet = new Set(keywordList.map((keyword) => normalizeTopicKey(keyword)));
+  if (keywordSet.has("ai") && keywordSet.has("harness") && topicPageExists("ai-harness")) {
     return "ai-harness";
   }
 
@@ -439,8 +488,12 @@ function buildLiveStateSection(keywords: Set<string>): string | null {
   try {
     let content = readFileSync(LIVE_STATE_FILE, "utf-8");
 
-    // Strip the instruction block (between > lines at the top)
-    content = content.replace(/^(?:>.*\n)+\n?/, "");
+    // Strip the leading "# Live State" H1 (the assembler adds its own
+    // "## Live State" header below) and the blockquote instruction block
+    // beneath it — both are editor guidance, not useful injected context.
+    content = content
+      .replace(/^#\s.*\n+/, "")
+      .replace(/^(?:>.*\n?)+\n?/, "");
 
     if (!content.trim()) return null;
 
@@ -666,18 +719,23 @@ function buildProjectSection(
   return lines.join("\n");
 }
 
-function resolveProjectAffinityTags(projectName?: string): string[] {
-  if (!projectName) return [];
-  const normalized = projectName.toLowerCase().trim();
-  const tags = new Set<string>();
-  const spaced = normalized.replace(/[_-]+/g, " ");
-  const kebab = spaced.replace(/\s+/g, "-");
+// Project-to-tag affinity: when assembling context for a given project,
+// learnings carrying any of these tags get a relevance boost even if the
+// query text doesn't mention the project by name. Extend as new projects
+// grow their own platform-level tag vocabulary.
+const PROJECT_TAG_AFFINITY: Record<string, string[]> = {
+  "aytm-pipeline": ["aytm", "aytm-pipeline"],
+  "aytm pipeline": ["aytm", "aytm-pipeline"],
+  "broncobot": ["broncobot"],
+  "ai-harness": ["ai-harness", "harness"],
+};
 
-  tags.add(kebab);
-  for (const token of spaced.split(/\s+/).filter((token) => token.length >= 3)) {
-    tags.add(token);
-  }
-  return [...tags];
+function resolveProjectTags(projectName?: string): string[] {
+  if (!projectName) return [];
+  const key = projectName.toLowerCase().trim();
+  if (PROJECT_TAG_AFFINITY[key]) return PROJECT_TAG_AFFINITY[key];
+  // Default: kebab-case the project name as a single tag.
+  return [key.replace(/\s+/g, "-")];
 }
 
 function extractTagsFromFrontmatter(fullPath: string): string[] {
@@ -690,14 +748,14 @@ function extractTagsFromFrontmatter(fullPath: string): string[] {
     if (!tagsMatch) return [];
     return tagsMatch[1]
       .split(",")
-      .map((tag) => tag.trim().replace(/['"]/g, "").toLowerCase())
+      .map((t) => t.trim().replace(/['"]/g, "").toLowerCase())
       .filter(Boolean);
   } catch {
     return [];
   }
 }
 
-async function buildLearningsSection(
+export async function buildLearningsSection(
   prompt: string,
   keywords: string[],
   params: {
@@ -708,7 +766,17 @@ async function buildLearningsSection(
     preferTopicPage?: boolean;
     topicSourcePaths?: Set<string>;
   },
+  opts: {
+    // When false, the call is observational: it does NOT write retrieval_hits
+    // rows and does NOT leave truncation events in the shared monitor (it
+    // drains and discards its own). Used by AgentContext memory population so
+    // a shadow/secondary caller can reuse this exact assembler without
+    // polluting the live assembleContext() drain or the retrieval log.
+    // Default true preserves the live execution path byte-for-byte.
+    recordSideEffects?: boolean;
+  } = {},
 ): Promise<string | null> {
+  const recordSideEffects = opts.recordSideEffects !== false;
   // Try hybrid search (semantic + keyword) first, fall back to keyword-only
   let results: SearchResult[] = [];
   try {
@@ -732,8 +800,8 @@ async function buildLearningsSection(
     return lines.join("\n");
   }
 
-  const projectTags = resolveProjectAffinityTags(params.projectName);
-  const loweredKeywords = keywords.map((keyword) => keyword.toLowerCase());
+  const projectTags = resolveProjectTags(params.projectName);
+  const loweredKeywords = keywords.map((k) => k.toLowerCase());
 
   // --- P3: Self-RAG relevance filter ---
   // Compute composite relevance score instead of flat threshold
@@ -747,22 +815,28 @@ async function buildLearningsSection(
       const keywordOverlap = keywords.length > 0 ? keywordHits / keywords.length : 0;
       relevance += keywordOverlap * 0.2;
 
-      // Project affinity boost
+      // Project affinity boost (body text match)
       if (params.projectName && resultText.includes(params.projectName.toLowerCase())) {
         relevance += 0.1;
       }
 
+      // Tag-based boosts (fix #3 + #4): read frontmatter tags once per result.
       const fullPath = join(VAULT_DIR, r.path);
       const resultTags = extractTagsFromFrontmatter(fullPath);
       if (resultTags.length > 0) {
-        const tagKeywordHits = resultTags.filter((tag) =>
-          loweredKeywords.some((keyword) => tag === keyword || tag.includes(keyword) || keyword.includes(tag)),
+        // #3 — tag ↔ keyword overlap (surfaces platform tags like `graphn`
+        // for queries that don't name-drop the project).
+        const tagKeywordHits = resultTags.filter((t) =>
+          loweredKeywords.some((k) => t === k || t.includes(k) || k.includes(t)),
         ).length;
         if (tagKeywordHits > 0) {
           relevance += Math.min(tagKeywordHits * 0.05, 0.15);
         }
 
-        if (projectTags.length > 0 && resultTags.some((tag) => projectTags.includes(tag))) {
+        // #4 — channel→project tag affinity. If we're in a project channel,
+        // boost learnings whose tags include the project's known affinity
+        // tags, independent of query text.
+        if (projectTags.length > 0 && resultTags.some((t) => projectTags.includes(t))) {
           relevance += 0.12;
         }
       }
@@ -784,16 +858,18 @@ async function buildLearningsSection(
   if (relevant.length === 0) return null;
 
   // --- P1: Log retrieval hits ---
-  logRetrievalHits(
-    relevant.map((r) => ({
-      path: r.path,
-      agent: params.agentName,
-      channelId: params.channelId,
-      taskId: params.taskId,
-      score: r.compositeScore,
-      matchType: r.matchType,
-    })),
-  );
+  if (recordSideEffects) {
+    logRetrievalHits(
+      relevant.map((r) => ({
+        path: r.path,
+        agent: params.agentName,
+        channelId: params.channelId,
+        taskId: params.taskId,
+        score: r.compositeScore,
+        matchType: r.matchType,
+      })),
+    );
+  }
 
   // --- P5: Graph neighbor expansion ---
   // For top results, pull 1-hop graph neighbors and add if not already present
@@ -853,24 +929,80 @@ async function buildLearningsSection(
           compressed = compressedMatch[1].trim();
         }
 
-        // Skip superseded entries (P2)
-        if (/^status:\s*superseded/m.test(frontmatter)) continue;
+        // Skip superseded entries (P2) and entries flagged by the freshness
+        // lint or weekly reverification — these are known-or-suspected stale.
+        // Surfacing them as authoritative context invites stale-info action.
+        // (They remain findable via explicit vault_search MCP calls, just
+        // not auto-injected.)
+        if (/^status:\s*(superseded|stale-citation|needs-reverify)\b/m.test(frontmatter)) continue;
       }
     } catch {}
 
+    // Freshness annotation — surfaces age and any reverification flags so
+    // the consuming agent knows to be skeptical of old/unverified entries.
+    const freshness = computeFreshness(frontmatter);
+
     if (compressed && compressed.length > 20) {
       // Use compressed version — fits more entries in budget
-      lines.push(`### [${fileName}]${matchTag} (score: ${r.compositeScore.toFixed(2)})`);
+      lines.push(`### [${fileName}]${matchTag} (score: ${r.compositeScore.toFixed(2)})${freshness}`);
       lines.push(compressed);
     } else if (body && body.length > 40) {
-      lines.push(`### [${fileName}]${matchTag} (score: ${r.compositeScore.toFixed(2)})`);
+      lines.push(`### [${fileName}]${matchTag} (score: ${r.compositeScore.toFixed(2)})${freshness}`);
       lines.push(monitor.truncate(body, 1500, "context:learnings"));
     } else {
-      lines.push(`- [${fileName}] ${r.text.slice(0, 200)}${matchTag}`);
+      lines.push(`- [${fileName}] ${r.text.slice(0, 200)}${matchTag}${freshness}`);
     }
   }
 
+  // Observational callers must not leave their truncation events in the shared
+  // monitor, or the next live assembleContext() drain would mis-report them as
+  // significant truncations. Discard what this call recorded.
+  if (!recordSideEffects) monitor.drainRecentEvents("context:learnings");
   return lines.join("\n");
+}
+
+// Surfaces age + reverification status as a compact suffix for displayed
+// learnings. Helps the consuming agent treat stale or unverified entries
+// with appropriate skepticism. Returns "" when nothing notable to flag.
+function computeFreshness(frontmatter: string): string {
+  if (!frontmatter) return "";
+  const parts: string[] = [];
+
+  // Age from `logged:` — only annotate when older than 7 days (recent
+  // entries don't need a label and would just add noise).
+  const loggedMatch = frontmatter.match(/^logged:\s*(.+?)\s*$/m);
+  if (loggedMatch) {
+    const loggedRaw = loggedMatch[1].replace(/^["']|["']$/g, "").trim();
+    const ts = Date.parse(loggedRaw);
+    if (!isNaN(ts)) {
+      const ageDays = Math.floor((Date.now() - ts) / 86_400_000);
+      if (ageDays >= 7) parts.push(`${ageDays}d old`);
+    }
+  }
+
+  // Reverification flags written by future heartbeats (vault-freshness
+  // SHA-lint, weekly reverification). Surface as warnings.
+  const statusMatch = frontmatter.match(/^status:\s*(.+?)\s*$/m);
+  if (statusMatch) {
+    const status = statusMatch[1].trim();
+    if (status === "stale-citation") parts.push("⚠ stale-citation");
+    else if (status === "needs-reverify") parts.push("⚠ needs-reverify");
+  }
+
+  // Positive reverification signal — vault-reverify wrote last_verified_at
+  // on a VALID outcome. Within 30d, surface so the consuming agent knows an
+  // older entry has been recently confirmed against current code.
+  const verifiedMatch = frontmatter.match(/^last_verified_at:\s*(.+?)\s*$/m);
+  if (verifiedMatch) {
+    const verifiedRaw = verifiedMatch[1].replace(/^["']|["']$/g, "").trim();
+    const ts = Date.parse(verifiedRaw);
+    if (!isNaN(ts)) {
+      const ageDays = Math.floor((Date.now() - ts) / 86_400_000);
+      if (ageDays <= 30) parts.push(`✓ verified ${ageDays}d ago`);
+    }
+  }
+
+  return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
 }
 
 // --- P1: Retrieval hit logging ---
@@ -1252,7 +1384,7 @@ function buildRecentAcademicSection(channelId: string): string | null {
 
 // ─── Keyword Extraction (deterministic, no LLM) ─────────────────────
 
-function extractKeywords(prompt: string): string[] {
+export function extractKeywords(prompt: string): string[] {
   // Split on non-word chars, lowercase, deduplicate
   const words = prompt
     .toLowerCase()

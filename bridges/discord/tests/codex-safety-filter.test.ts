@@ -6,7 +6,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { DESTRUCTIVE_BASH_PATTERNS, safetyPatternsJson, claudeDisallowedToolArgs } from "../safety.js";
 
-const HARNESS_ROOT = "/Users/andersonedmond/Desktop/AI-Harness-private-runtime";
+const HARNESS_ROOT = process.env.HARNESS_ROOT || process.cwd();
 const RUNNER = join(HARNESS_ROOT, "bridges/discord/codex-runner.py");
 
 describe("safety pattern definitions", () => {
@@ -138,5 +138,57 @@ sys.exit(0)
     assert.match(output.stderr, /SAFETY VIOLATION/);
     // The "should not be seen" event should not appear in captured stdout.
     assert.doesNotMatch(output.stdout, /should not be seen/);
+  });
+
+  it("mirrors Codex stdout JSONL events into stream-dir chunks", () => {
+    const streamWorkDir = mkdtempSync(join(tmpdir(), "harness-codex-stream-"));
+    const streamFakeCodex = join(streamWorkDir, "fake-codex");
+    const streamOutput = join(streamWorkDir, "out.json");
+    const streamPrompt = join(streamWorkDir, "prompt.txt");
+    const streamDir = join(streamWorkDir, "stream");
+    writeFileSync(streamPrompt, "test prompt");
+    writeFileSync(
+      streamFakeCodex,
+      `#!/usr/bin/env python3
+import sys, json
+sys.stdin.read()
+events = [
+  {"type": "item.completed", "item": {"type": "command_execution", "command": "echo hi", "output": "hi"}},
+  {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+  {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2, "cached_input_tokens": 1}},
+]
+for event in events:
+    sys.stdout.write(json.dumps(event) + "\\n")
+    sys.stdout.flush()
+`,
+    );
+    chmodSync(streamFakeCodex, 0o755);
+
+    try {
+      const result = spawnSync(
+        "python3",
+        [RUNNER, streamOutput, "--timeout", "20", "--stream-dir", streamDir, "--prompt-file", streamPrompt],
+        {
+          env: {
+            ...process.env,
+            CODEX_CLI_PATH: streamFakeCodex,
+            HARNESS_ROOT,
+          },
+          timeout: 15000,
+        },
+      );
+
+      assert.equal(result.status, 0, `runner exited ${result.status}: ${result.stderr?.toString()}`);
+      const output = JSON.parse(readFileSync(streamOutput, "utf-8"));
+      assert.equal(output.returncode, 0);
+      const chunk1 = JSON.parse(readFileSync(join(streamDir, "chunk-1.json"), "utf-8"));
+      const chunk2 = JSON.parse(readFileSync(join(streamDir, "chunk-2.json"), "utf-8"));
+      const chunk3 = JSON.parse(readFileSync(join(streamDir, "chunk-3.json"), "utf-8"));
+      assert.equal(chunk1.item.type, "command_execution");
+      assert.equal(chunk2.item.type, "agent_message");
+      assert.equal(chunk3.type, "turn.completed");
+    } finally {
+      rmSync(streamWorkDir, { recursive: true, force: true });
+    }
   });
 });

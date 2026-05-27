@@ -1,8 +1,8 @@
-import * as fs from "fs";
-import * as os from "os";
-import * as path from "path";
-import { marked } from "marked";
 import puppeteer from "puppeteer-core";
+import { marked } from "marked";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
 const CHROME_PATH =
   process.env.CHROME_PATH ||
@@ -146,7 +146,7 @@ export function cleanupPdf(filePath: string): void {
   try {
     fs.unlinkSync(filePath);
   } catch {
-    // already deleted or missing
+    // already deleted or doesn't exist
   }
 }
 

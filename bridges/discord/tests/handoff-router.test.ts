@@ -676,4 +676,135 @@ describe("Handoff Router — Claude usage-limit failover", () => {
     assert.equal(result.ok ? result.response : null, "Handoff Codex fallback result");
     assert.equal(getSession(sessionKey, "codex"), "handoff-fallback-thread");
   });
+
+  it("streams Claude chain-step events into the monitor while running", async () => {
+    const streamChannel = "handoff-stream-monitor";
+    const streamSessionKey = `${streamChannel}:ops`;
+    let streamDirSeen: string | null = null;
+
+    setHandoffSpawnProcessForTests(((command: string, args: readonly string[]) => {
+      const callArgs = [...args].map(String);
+      const outputFile = callArgs[1];
+      const streamDirIdx = callArgs.indexOf("--stream-dir");
+      streamDirSeen = streamDirIdx >= 0 ? callArgs[streamDirIdx + 1] : null;
+
+      setTimeout(() => {
+        assert.ok(streamDirSeen);
+        mkdirSync(streamDirSeen!, { recursive: true });
+        writeFileSync(`${streamDirSeen}/chunk-1.json`, JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [
+              { type: "text", text: "Inspecting files" },
+              { type: "tool_use", name: "Read", input: { file_path: "src/app.ts" } },
+            ],
+          },
+        }));
+      }, 25);
+
+      setTimeout(() => {
+        writeFileSync(outputFile, JSON.stringify({
+          stdout: '{"type":"assistant","message":{"content":[{"type":"text","text":"Handoff Claude result"}]}}\n{"type":"result","result":"Handoff Claude result","session_id":"handoff-stream-session"}\n',
+          stderr: "",
+          returncode: 0,
+          session_id: "handoff-stream-session",
+        }));
+      }, 150);
+
+      return {
+        pid: 4610,
+        unref() {},
+      } as ChildProcess;
+    }) as typeof import("child_process").spawn);
+
+    const result = await executeHandoffCore({
+      channelId: streamChannel,
+      toAgent: "ops",
+      prompt: "Stream monitor events during this handoff",
+      sessionKey: streamSessionKey,
+      runtime: "claude",
+      timeoutMs: 6000,
+      skipSessionResume: true,
+    });
+
+    assert.equal(result.ok, true);
+    assert.ok(streamDirSeen, "Claude chain step should pass --stream-dir");
+    const telemetry = getDb()
+      .prepare("SELECT task_id FROM task_telemetry WHERE channel_id = ? AND agent = ? ORDER BY completed_at DESC LIMIT 1")
+      .get(streamChannel, "ops") as { task_id: string } | undefined;
+    assert.ok(telemetry?.task_id);
+
+    const row = getDb()
+      .prepare("SELECT total_tools FROM task_telemetry WHERE task_id = ?")
+      .get(telemetry!.task_id) as { total_tools: number } | undefined;
+    assert.ok(row);
+    assert.ok(row!.total_tools >= 1, "streamed Read tool should be recorded before finalize");
+    cleanupChannel(streamChannel);
+  });
+
+  it("streams Codex chain-step events into the monitor while running", async () => {
+    const streamChannel = "handoff-codex-stream-monitor";
+    const streamSessionKey = `${streamChannel}:builder`;
+    let streamDirSeen: string | null = null;
+
+    setChannelConfig(streamChannel, { runtime: "codex" });
+    setHandoffSpawnProcessForTests(((command: string, args: readonly string[]) => {
+      const callArgs = [...args].map(String);
+      const outputFile = callArgs[1];
+      const streamDirIdx = callArgs.indexOf("--stream-dir");
+      streamDirSeen = streamDirIdx >= 0 ? callArgs[streamDirIdx + 1] : null;
+
+      setTimeout(() => {
+        assert.ok(streamDirSeen);
+        mkdirSync(streamDirSeen!, { recursive: true });
+        writeFileSync(`${streamDirSeen}/chunk-1.json`, JSON.stringify({
+          type: "item.completed",
+          item: { type: "command_execution", command: "echo codex", output: "codex" },
+        }));
+        writeFileSync(`${streamDirSeen}/chunk-2.json`, JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "Codex is working" },
+        }));
+      }, 25);
+
+      setTimeout(() => {
+        writeFileSync(outputFile, JSON.stringify({
+          stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"Codex chain result"}}\n{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3,"cached_input_tokens":1}}\n',
+          stderr: "",
+          returncode: 0,
+          threadId: "handoff-codex-stream-thread",
+          lastMessage: "Codex chain result",
+        }));
+      }, 150);
+
+      return {
+        pid: 4611,
+        unref() {},
+      } as ChildProcess;
+    }) as typeof import("child_process").spawn);
+
+    const result = await executeHandoffCore({
+      channelId: streamChannel,
+      toAgent: "builder",
+      prompt: "Stream Codex monitor events during this handoff",
+      sessionKey: streamSessionKey,
+      runtime: "codex",
+      timeoutMs: 6000,
+      skipSessionResume: true,
+    });
+
+    assert.equal(result.ok, true);
+    assert.ok(streamDirSeen, "Codex chain step should pass --stream-dir");
+    const telemetry = getDb()
+      .prepare("SELECT task_id FROM task_telemetry WHERE channel_id = ? AND agent = ? ORDER BY completed_at DESC LIMIT 1")
+      .get(streamChannel, "builder") as { task_id: string } | undefined;
+    assert.ok(telemetry?.task_id);
+
+    const row = getDb()
+      .prepare("SELECT total_tools FROM task_telemetry WHERE task_id = ?")
+      .get(telemetry!.task_id) as { total_tools: number } | undefined;
+    assert.ok(row);
+    assert.ok(row!.total_tools >= 1, "streamed Codex command should be recorded before finalize");
+    cleanupChannel(streamChannel);
+  });
 });

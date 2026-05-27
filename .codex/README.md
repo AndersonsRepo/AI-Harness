@@ -13,6 +13,7 @@ Current files:
 - `repository-guidelines.md` — concise contributor guide for Codex
 - `memory-system.md` — summary of the AI Harness memory pipeline, retrieval model, and maintenance jobs
 - `model-agnostic-roadmap.md` — phased plan for Claude + Codex mixed runtime and Codex-only degraded mode
+- `phase-1-2-execution-plan.md` — file-specific implementation checklist for the first mixed-runtime rollout
 
 Conventions:
 - Prefer `.codex/` for Codex-only notes instead of root-level `AGENTS.md`

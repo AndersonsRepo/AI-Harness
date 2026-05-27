@@ -17,6 +17,8 @@ export interface GatewayMessage {
   id: string;
   /** Channel/conversation identifier */
   channelId: string;
+  /** Human-readable channel name (e.g. Discord channel name), if available */
+  channelName?: string;
   /** Sender identifier */
   userId: string;
   /** Raw text content */

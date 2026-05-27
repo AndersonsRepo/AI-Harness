@@ -9,6 +9,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { executeCommand, type CommandContext } from "../core-commands.js";
+import {
+  getInstance,
+  registerInstance,
+  unregisterInstance,
+} from "../instance-monitor.js";
 
 function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
   return {
@@ -36,6 +41,29 @@ describe("Core Commands — Basic Commands", () => {
     const result = await executeCommand(makeCtx({ rawText: "/stop" }));
     assert.ok(result);
     assert.equal(result.text, "Nothing running in this channel.");
+  });
+
+  it("/stop kills active monitor instances for the channel", async () => {
+    const taskId = "chain-command-stop-test";
+    unregisterInstance(taskId);
+    registerInstance({
+      taskId,
+      channelId: "stop-monitor-channel",
+      agent: "builder",
+      runtime: "codex",
+      prompt: "test chain step",
+      pid: 0,
+    });
+
+    const result = await executeCommand(makeCtx({
+      rawText: "/stop",
+      channelId: "stop-monitor-channel",
+    }));
+
+    assert.ok(result);
+    assert.ok(result.text.includes("Stopped"));
+    assert.equal(getInstance(taskId)?.status, "killed");
+    unregisterInstance(taskId);
   });
 
   it("/agents lists agents", async () => {

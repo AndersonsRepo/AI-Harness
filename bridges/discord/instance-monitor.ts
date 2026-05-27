@@ -24,7 +24,7 @@ export interface MonitoredInstance {
   taskId: string;
   channelId: string;
   agent: string;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "ollama";
   prompt: string;
   startedAt: number;
   pid: number;
@@ -99,7 +99,7 @@ export function registerInstance(config: {
   taskId: string;
   channelId: string;
   agent: string;
-  runtime?: "claude" | "codex";
+  runtime?: "claude" | "codex" | "ollama";
   prompt: string;
   pid: number;
 }): MonitoredInstance {
@@ -280,6 +280,16 @@ export function processMonitorEvent(taskId: string, event: MonitorEvent): void {
       }
       break;
     }
+
+    case "item.completed": {
+      processCodexCompletedEvent(instance, event as any);
+      break;
+    }
+
+    case "turn.completed": {
+      processCodexTurnCompletedEvent(instance, event as any);
+      break;
+    }
   }
 
   if (onUpdateCallback) onUpdateCallback(instance);
@@ -316,6 +326,62 @@ function pushToolCall(instance: MonitoredInstance, tool: ToolCallEvent): void {
   }
 }
 
+function processCodexCompletedEvent(instance: MonitoredInstance, ev: any): void {
+  if (!ev.item || typeof ev.item !== "object") return;
+  const item = ev.item;
+  const itemType = String(item.type || "");
+
+  if (itemType === "mcp_tool_call") {
+    const server = String(item.server || "unknown");
+    const tool = String(item.tool || "unknown");
+    const toolName = `mcp__${server}__${tool}`;
+    const toolInput = (item.arguments && typeof item.arguments === "object")
+      ? item.arguments as Record<string, unknown>
+      : {};
+    let resultPreview: string;
+    if (item.error && typeof item.error === "object" && item.error.message) {
+      resultPreview = `Error: ${String(item.error.message).slice(0, 200)}`;
+    } else if (item.result !== undefined && item.result !== null) {
+      resultPreview = JSON.stringify(item.result).slice(0, 200);
+    } else {
+      resultPreview = "";
+    }
+    pushToolCall(instance, {
+      timestamp: Date.now(),
+      toolName,
+      toolInput,
+      displaySummary: formatToolSummary(toolName, toolInput),
+      resultPreview,
+    });
+  } else if (itemType === "command_execution") {
+    const command = String(item.command || "");
+    pushToolCall(instance, {
+      timestamp: Date.now(),
+      toolName: "Bash",
+      toolInput: { command },
+      displaySummary: formatToolSummary("Bash", { command }),
+      resultPreview: String(item.output || "").slice(0, 200),
+    });
+  } else if (itemType === "agent_message" && typeof item.text === "string") {
+    instance.assistantText += item.text;
+    instance.estimatedOutputTokens = Math.round(instance.assistantText.length / 4);
+    instance.thinkingText = item.text.slice(-500);
+  }
+}
+
+function processCodexTurnCompletedEvent(instance: MonitoredInstance, ev: any): void {
+  if (!ev.usage || typeof ev.usage !== "object") return;
+  if (typeof ev.usage.input_tokens === "number") {
+    instance.estimatedInputTokens = ev.usage.input_tokens;
+  }
+  if (typeof ev.usage.output_tokens === "number") {
+    instance.estimatedOutputTokens = ev.usage.output_tokens;
+  }
+  if (typeof ev.usage.cached_input_tokens === "number") {
+    instance.cachedInputTokens = ev.usage.cached_input_tokens;
+  }
+}
+
 // ─── Codex JSONL Parsing ────────────────────────────────────────────
 //
 // Codex emits a different event shape than Claude's stream-json. The
@@ -348,57 +414,10 @@ export function recordCodexResult(taskId: string, stdoutJsonl: string): void {
     }
     if (!ev || typeof ev !== "object") continue;
 
-    if (ev.type === "item.completed" && ev.item && typeof ev.item === "object") {
-      const item = ev.item;
-      const itemType = String(item.type || "");
-
-      if (itemType === "mcp_tool_call") {
-        const server = String(item.server || "unknown");
-        const tool = String(item.tool || "unknown");
-        const toolName = `mcp__${server}__${tool}`;
-        const toolInput = (item.arguments && typeof item.arguments === "object")
-          ? item.arguments as Record<string, unknown>
-          : {};
-        let resultPreview: string;
-        if (item.error && typeof item.error === "object" && item.error.message) {
-          resultPreview = `Error: ${String(item.error.message).slice(0, 200)}`;
-        } else if (item.result !== undefined && item.result !== null) {
-          resultPreview = JSON.stringify(item.result).slice(0, 200);
-        } else {
-          resultPreview = "";
-        }
-        pushToolCall(instance, {
-          timestamp: Date.now(),
-          toolName,
-          toolInput,
-          displaySummary: formatToolSummary(toolName, toolInput),
-          resultPreview,
-        });
-      } else if (itemType === "command_execution") {
-        const command = String(item.command || "");
-        pushToolCall(instance, {
-          timestamp: Date.now(),
-          toolName: "Bash",
-          toolInput: { command },
-          displaySummary: formatToolSummary("Bash", { command }),
-          resultPreview: String(item.output || "").slice(0, 200),
-        });
-      } else if (itemType === "agent_message" && typeof item.text === "string") {
-        instance.assistantText += item.text;
-        instance.estimatedOutputTokens = Math.round(instance.assistantText.length / 4);
-      }
-    } else if (ev.type === "turn.completed" && ev.usage && typeof ev.usage === "object") {
-      // Authoritative token counts from Codex itself — preferred over the
-      // text-length estimate maintained while accumulating agent_message.
-      if (typeof ev.usage.input_tokens === "number") {
-        instance.estimatedInputTokens = ev.usage.input_tokens;
-      }
-      if (typeof ev.usage.output_tokens === "number") {
-        instance.estimatedOutputTokens = ev.usage.output_tokens;
-      }
-      if (typeof ev.usage.cached_input_tokens === "number") {
-        instance.cachedInputTokens = ev.usage.cached_input_tokens;
-      }
+    if (ev.type === "item.completed") {
+      processCodexCompletedEvent(instance, ev);
+    } else if (ev.type === "turn.completed") {
+      processCodexTurnCompletedEvent(instance, ev);
     }
   }
 }
@@ -477,11 +496,12 @@ export function isHoldingContinuation(taskId: string): boolean {
 // gains a third value, add a row here or the cost will silently fall back
 // to Claude pricing.
 const PRICING_PER_MTOK_USD: Record<
-  "claude" | "codex",
+  "claude" | "codex" | "ollama",
   { input: number; cachedInput: number; output: number }
 > = {
   claude: { input: 3, cachedInput: 3, output: 15 },
   codex:  { input: 1.25, cachedInput: 0.125, output: 10 },
+  ollama: { input: 0, cachedInput: 0, output: 0 }, // local model — no token cost
 };
 
 function estimateCostCents(instance: MonitoredInstance): number {
@@ -535,6 +555,14 @@ export function updateInstanceStatus(taskId: string, status: MonitoredInstance["
   const instance = instances.get(taskId);
   if (instance) {
     instance.status = status;
+    if (onUpdateCallback) onUpdateCallback(instance);
+  }
+}
+
+export function updateInstancePid(taskId: string, pid: number): void {
+  const instance = instances.get(taskId);
+  if (instance) {
+    instance.pid = pid;
     if (onUpdateCallback) onUpdateCallback(instance);
   }
 }

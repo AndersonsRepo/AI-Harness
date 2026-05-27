@@ -2,7 +2,7 @@ import { getDb } from "./db.js";
 
 export interface ChannelConfig {
   agent?: string;
-  runtime?: "claude" | "codex";
+  runtime?: "claude" | "codex" | "ollama";
   permissionMode?: string;
   allowedTools?: string[];
   disallowedTools?: string[];
@@ -18,7 +18,11 @@ type ConfigMap = Record<string, ChannelConfig>;
 function rowToConfig(row: any): ChannelConfig {
   return {
     agent: row.agent || undefined,
-    runtime: row.runtime === "codex" ? "codex" : row.runtime === "claude" ? "claude" : undefined,
+    runtime:
+      row.runtime === "codex" ? "codex"
+      : row.runtime === "ollama" ? "ollama"
+      : row.runtime === "claude" ? "claude"
+      : undefined,
     permissionMode: row.permission_mode || undefined,
     allowedTools: row.allowed_tools ? JSON.parse(row.allowed_tools) : undefined,
     disallowedTools: row.disallowed_tools ? JSON.parse(row.disallowed_tools) : undefined,

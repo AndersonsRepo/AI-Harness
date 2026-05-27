@@ -123,7 +123,7 @@ export async function postError(
 export interface AgentActivity {
   channelId: string;
   agent: string;
-  runtime?: "claude" | "codex";
+  runtime?: "claude" | "codex" | "ollama";
   prompt: string;
   startedAt: number;
   streamMessageId?: string;

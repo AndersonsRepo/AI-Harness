@@ -52,6 +52,10 @@ import {
   dequeueHandoff,
   type ChainResult,
 } from "./handoff-router.js";
+import {
+  formatManualHandoffNotice,
+  isProjectAutoChainEnabled,
+} from "./project-chain-policy.js";
 import { listAgentNames, readAgentPrompt as loadAgentPrompt } from "./agent-loader.js";
 import {
   readFileSync,
@@ -151,6 +155,8 @@ import {
   isHoldingContinuation,
   getInterventionNote,
   clearInterventionNote,
+  getInstances,
+  updateInstanceStatus,
 } from "./instance-monitor.js";
 import {
   initMonitorUI,
@@ -382,6 +388,11 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
     } else {
       console.log(`[OUTPUT] No context for task ${taskId} — skipping (re-attached or orphaned)`);
     }
+    // ALWAYS release the channel lock — even on the orphaned/no-ctx path. Skipping this
+    // leaves the channel in the in-memory activeChannels set forever, so every future
+    // message in that channel silently queues behind a task that already finished
+    // (the "hung chat" bug). See ERR-bot-completed-task-not-delivered-channel-lock-leak-2026-05-24.
+    if (task?.channel_id) releaseChannel(task.channel_id);
     // Clean up monitor
     finalizeInstance(taskId, "completed");
     return;
@@ -542,6 +553,16 @@ onTaskOutput(async (taskId, response, error, sessionId, raw) => {
         try {
           await (channel as TextChannel).send(`*Failed to deliver agent response (${err.message})*`).catch(() => {});
         } catch {}
+      }
+
+      if (!isProjectAutoChainEnabled()) {
+        const noticeChunks = splitMessage(formatManualHandoffNotice(agentName, handoff));
+        for (const chunk of noticeChunks) {
+          await (channel as TextChannel).send(chunk);
+        }
+        postAgentComplete(ctx.activity, response).catch(() => {});
+        releaseChannel(channelId);
+        return;
       }
 
       const chainResult = await runHandoffChain(
@@ -851,11 +872,30 @@ async function handleCommand(message: Message, content: string): Promise<boolean
   // /stop — kill the active task in this channel
   if (content === "/stop") {
     const pid = getTaskPidForChannel(channelId);
-    if (!pid) {
+    let stopped = 0;
+    const stoppedIds = new Set<string>();
+
+    if (pid) {
+      proc.terminate(pid);
+      stopped++;
+    }
+
+    for (const instance of getInstances()) {
+      if (instance.channelId !== channelId) continue;
+      if (stoppedIds.has(instance.taskId)) continue;
+      if (instance.pid > 0) {
+        proc.terminate(instance.pid);
+        stopped++;
+      }
+      stoppedIds.add(instance.taskId);
+      updateInstanceStatus(instance.taskId, "killed");
+    }
+
+    if (stopped === 0 && stoppedIds.size === 0) {
       await message.reply("Nothing running in this channel.");
       return true;
     }
-    proc.terminate(pid);
+
     // Defense-in-depth: cancelChannelTasks touches SQLite. An uncaught
     // throw here previously crashed the bot, which launchd then
     // restarted, which triggered crash-recovery to RETRY the task —
@@ -867,7 +907,7 @@ async function handleCommand(message: Message, content: string): Promise<boolean
       console.error(`[STOP] cancelChannelTasks failed for ${channelId}:`, err);
     }
     releaseChannel(channelId);
-    await message.reply("Stopped the active request.");
+    await message.reply(`Stopped ${Math.max(stopped, stoppedIds.size)} active request(s) in this channel.`);
     return true;
   }
 
@@ -2316,6 +2356,36 @@ client.on("clientReady", async () => {
       }
     } catch (err: any) {
       console.error(`[LINKEDIN] Failed to create linkedin channel: ${err.message}`);
+    }
+  }
+
+  // website-agency channel — under the Projects category, mirrors the LinkedIn pattern
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const projectsCategoryName = getProjectsCategoryName().toLowerCase();
+      const projectsCategory = guild.channels.cache.find(
+        (c) =>
+          c.type === ChannelType.GuildCategory &&
+          c.name.toLowerCase() === projectsCategoryName
+      );
+      const websiteAgencyCh = guild.channels.cache.find(
+        (c) =>
+          c.name === "website-agency" &&
+          c.type === ChannelType.GuildText &&
+          (!projectsCategory || c.parentId === projectsCategory.id)
+      );
+      if (!websiteAgencyCh) {
+        await guild.channels.create({
+          name: "website-agency",
+          type: ChannelType.GuildText,
+          parent: projectsCategory ? projectsCategory.id : undefined,
+          topic: "website-agency project — hybrid Next.js / Astro 6 small-business site generator",
+          reason: "AI Harness website-agency project channel",
+        });
+        console.log(`[WEBSITE-AGENCY] Created #website-agency channel in ${guild.name}`);
+      }
+    } catch (err: any) {
+      console.error(`[WEBSITE-AGENCY] Failed to create website-agency channel: ${err.message}`);
     }
   }
 

@@ -1,5 +1,6 @@
+import { resolveRuntimePolicyCompatibility } from "./agent-profile.js";
 import { getChannelConfig } from "./channel-config-store.js";
-import { getAgentRuntime, type AgentRuntime } from "./agent-loader.js";
+import type { AgentRuntime } from "./agent-loader.js";
 
 export interface RuntimePolicy {
   selectedRuntime: AgentRuntime;
@@ -13,14 +14,11 @@ function uniqueRuntimes(items: AgentRuntime[]): AgentRuntime[] {
 }
 
 export function getPreferredRuntimeForAgent(agentName?: string | null): AgentRuntime {
-  return getAgentRuntime(agentName);
+  return resolveRuntimePolicyCompatibility(agentName).preferredRuntime;
 }
 
 export function getFallbackOrderForAgent(agentName?: string | null): AgentRuntime[] {
-  const preferred = getPreferredRuntimeForAgent(agentName);
-  return preferred === "codex"
-    ? ["codex", "claude"]
-    : ["claude", "codex"];
+  return resolveRuntimePolicyCompatibility(agentName).fallbackOrder;
 }
 
 export function resolveRuntimePolicy(opts: {
@@ -28,7 +26,10 @@ export function resolveRuntimePolicy(opts: {
   agentName?: string | null;
   explicitRuntime?: AgentRuntime | null;
 }): RuntimePolicy {
-  if (opts.explicitRuntime === "claude" || opts.explicitRuntime === "codex") {
+  // "ollama" (local, Phase H) is OPT-IN only: selectable when explicitly set
+  // on the task or channel, but deliberately absent from getFallbackOrderForAgent
+  // so it is NEVER auto-selected as a failover target.
+  if (opts.explicitRuntime === "claude" || opts.explicitRuntime === "codex" || opts.explicitRuntime === "ollama") {
     return {
       selectedRuntime: opts.explicitRuntime,
       preferredRuntime: opts.explicitRuntime,
@@ -38,7 +39,7 @@ export function resolveRuntimePolicy(opts: {
   }
 
   const channelRuntime = getChannelConfig(opts.channelId)?.runtime;
-  if (channelRuntime === "claude" || channelRuntime === "codex") {
+  if (channelRuntime === "claude" || channelRuntime === "codex" || channelRuntime === "ollama") {
     return {
       selectedRuntime: channelRuntime,
       preferredRuntime: channelRuntime,

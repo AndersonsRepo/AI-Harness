@@ -15,6 +15,7 @@ import { HARNESS_ROOT } from "./claude-config.js";
 import { safetyPatternsJson, agentToolPolicyJson } from "./safety.js";
 import { getSession, SESSION_RESUME_MAX_AGE_MS } from "./session-store.js";
 import { resolveAllowedMcps } from "./mcp-config-builder.js";
+import type { AgentContext } from "./agent-context.js";
 
 export interface CodexRunConfig {
   prompt: string;
@@ -25,6 +26,8 @@ export interface CodexRunConfig {
 
 export interface BuildCodexConfigOptions {
   channelId: string;
+  /** Human-readable channel name → HARNESS_CHANNEL_NAME (env + harness MCP). */
+  channelName?: string | null;
   prompt: string;
   agentName?: string | null;
   sessionKey?: string | null;
@@ -101,6 +104,7 @@ export function buildCodexMcpApprovalArgs(
 // because it's free and makes the helper robust if the call sites widen.
 export function buildCodexHarnessEnvArgs(opts: {
   channelId: string;
+  channelName?: string | null;
   sessionKey: string;
   fromAgent: string;
   registryPath?: string;
@@ -108,11 +112,15 @@ export function buildCodexHarnessEnvArgs(opts: {
   const registered = readCodexMcpRegistry(opts.registryPath);
   if (!registered.has("harness")) return [];
   const esc = (s: string) => s.replace(/"/g, '\\"');
-  return [
+  const args = [
     "-c", `mcp_servers.harness.env.HARNESS_CHANNEL_ID="${esc(opts.channelId)}"`,
     "-c", `mcp_servers.harness.env.HARNESS_SESSION_KEY="${esc(opts.sessionKey)}"`,
     "-c", `mcp_servers.harness.env.HARNESS_FROM_AGENT="${esc(opts.fromAgent)}"`,
   ];
+  if (opts.channelName) {
+    args.push("-c", `mcp_servers.harness.env.HARNESS_CHANNEL_NAME="${esc(opts.channelName)}"`);
+  }
+  return args;
 }
 
 function composePrompt(parts: {
@@ -169,12 +177,13 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
   const project = getProject(opts.channelId);
   const projectCwd = opts.worktreePath || (project ? resolveProjectWorkdir(project.name) : null);
   const workingDir = projectCwd || HARNESS_ROOT;
+
   const runnerArgs: string[] = [];
 
-  // Chain-context identity. Used both for session resume (below) and for
-  // env-var propagation to MCP tools (e.g. mcp-harness/harness_handoff)
-  // that need to know which session to attribute writes to. Mirrors
-  // claude-config.ts wiring so both runtimes carry the same chain identity.
+  // Chain-context identity. Used for both session resume (below) and env-var
+  // propagation to MCP tools (e.g. mcp-harness/harness_handoff) that need to
+  // know which session to attribute writes to. Mirrors claude-config.ts so
+  // both runtimes carry the same chain identity.
   const sessionKey = opts.sessionKey || opts.channelId;
   const fromAgent = agentName || "default";
 
@@ -205,6 +214,7 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
     "-s", sandbox,
     "-C", workingDir,
     "--skip-git-repo-check",
+    // Suppress approval prompts in headless mode.
     "-c", "approval_policy=\"never\"",
   );
 
@@ -220,6 +230,7 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
   runnerArgs.push(
     ...buildCodexHarnessEnvArgs({
       channelId: opts.channelId,
+      channelName: opts.channelName,
       sessionKey,
       fromAgent,
     }),
@@ -239,6 +250,7 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
     ...(process.env as Record<string, string>),
     HARNESS_ROOT,
     HARNESS_CHANNEL_ID: opts.channelId,
+    ...(opts.channelName ? { HARNESS_CHANNEL_NAME: opts.channelName } : {}),
     HARNESS_SESSION_KEY: sessionKey,
     HARNESS_FROM_AGENT: fromAgent,
     // codex-runner.py enforces these at the event-stream level, since
@@ -254,6 +266,39 @@ export async function buildCodexConfig(opts: BuildCodexConfigOptions): Promise<C
     env,
     cwd: workingDir,
   };
+}
+
+// ─── AgentContext → Codex config (Phase C: renderContext seam) ──────
+//
+// Mirror of contextToClaudeOpts/buildClaudeConfigFromContext for Codex. Maps
+// the durable AgentContext to BuildCodexConfigOptions and reuses the UNCHANGED
+// buildCodexConfig as an independent parity reference (only this scalar mapping
+// can differ; sandbox/MCP-approval/safety-env/prompt composition are re-derived
+// internally). outputFile/streamDir are spawn-meta, not config inputs, so they
+// are NOT mapped here. profile.name's "default" sentinel is parity-safe:
+// readAgentMetadata/readAgentPrompt("default") → null, agentAllowsWrite →
+// write-allowed, agentToolPolicyJson(undefined) → null — identical to legacy's
+// null agent. The project-only activeAgent fallback is out of scope (Phase B/C).
+
+export function contextToCodexOpts(context: AgentContext): BuildCodexConfigOptions {
+  return {
+    channelId: context.channelId,
+    channelName: context.channelName ?? null,
+    prompt: context.userPrompt,
+    agentName: context.profile.name,
+    sessionKey: context.sessionKey,
+    taskId: context.workflow.taskId,
+    extraSystemPrompts: context.operatorGuidance,
+    worktreePath: context.workflow.worktreePath ?? null,
+    skipSessionResume: context.workflow.skipSessionResume,
+    isContinuation: context.workflow.isContinuation,
+  };
+}
+
+export async function buildCodexConfigFromContext(
+  context: AgentContext,
+): Promise<CodexRunConfig> {
+  return buildCodexConfig(contextToCodexOpts(context));
 }
 
 export function extractCodexResponse(resultJson: any): string | null {

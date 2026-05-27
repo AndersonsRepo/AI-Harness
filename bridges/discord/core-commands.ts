@@ -22,6 +22,10 @@ import { existsSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
 import { proc } from "./platform.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
+import {
+  getInstances,
+  updateInstanceStatus,
+} from "./instance-monitor.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 
@@ -94,7 +98,7 @@ export async function executeCommand(ctx: CommandContext): Promise<CommandResult
   // /runtime <claude|codex>
   const runtimeMatch = text.match(/^\/runtime\s+(claude|codex)$/);
   if (runtimeMatch) {
-    return commandRuntimeSet(ctx, runtimeMatch[1] as "claude" | "codex");
+    return commandRuntimeSet(ctx, runtimeMatch[1] as "claude" | "codex" | "ollama");
   }
 
   // /config
@@ -183,8 +187,29 @@ export async function executeCommand(ctx: CommandContext): Promise<CommandResult
 
 function commandStop(ctx: CommandContext): CommandResult {
   const pid = getTaskPidForChannel(ctx.channelId);
-  if (!pid) return { text: "Nothing running in this channel." };
-  proc.terminate(pid);
+  let stopped = 0;
+  const stoppedIds = new Set<string>();
+
+  if (pid) {
+    proc.terminate(pid);
+    stopped++;
+  }
+
+  for (const instance of getInstances()) {
+    if (instance.channelId !== ctx.channelId) continue;
+    if (stoppedIds.has(instance.taskId)) continue;
+    if (instance.pid > 0) {
+      proc.terminate(instance.pid);
+      stopped++;
+    }
+    stoppedIds.add(instance.taskId);
+    updateInstanceStatus(instance.taskId, "killed");
+  }
+
+  if (stopped === 0 && stoppedIds.size === 0) {
+    return { text: "Nothing running in this channel." };
+  }
+
   // Wrap cancelChannelTasks: it touches SQLite + may throw on bind/SQL
   // errors, and an uncaught throw here used to crash the entire bot.
   try {
@@ -193,7 +218,7 @@ function commandStop(ctx: CommandContext): CommandResult {
     console.error(`[STOP] cancelChannelTasks failed for ${ctx.channelId}:`, err);
   }
   ctx.releaseChannel?.();
-  return { text: "Stopped the active request." };
+  return { text: `Stopped ${Math.max(stopped, stoppedIds.size)} active request(s) in this channel.` };
 }
 
 function commandNew(ctx: CommandContext): CommandResult {
@@ -255,7 +280,7 @@ function commandModelSet(ctx: CommandContext, model: string): CommandResult {
   return { text: `Channel model set to \`${model}\`.` };
 }
 
-function commandRuntimeSet(ctx: CommandContext, runtime: "claude" | "codex"): CommandResult {
+function commandRuntimeSet(ctx: CommandContext, runtime: "claude" | "codex" | "ollama"): CommandResult {
   setChannelConfig(ctx.channelId, { runtime });
   return { text: `Channel runtime override set to \`${runtime}\`.` };
 }
