@@ -113,7 +113,7 @@ async function main(): Promise<void> {
 
   const report: RunReport = {
     run_at: new Date().toISOString(),
-    rubric_version: 2,
+    rubric_version: 3,
     harness_version: 1,
     total_seeds: seeds.length,
     pinned_seeds: pinned.length,

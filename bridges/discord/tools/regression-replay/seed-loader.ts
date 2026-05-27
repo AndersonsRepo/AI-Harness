@@ -56,10 +56,31 @@ export interface Baseline {
   // The agent's actual response, captured at pin time. Required for tier 2
   // comparison; tier 1 ignores this field. Older baselines from before tier 2
   // existed may have this as null — tier 2 must skip those seeds and warn.
+  // For chain shapes (expected_agents.length > 1), this is null and
+  // chain_responses below carries the per-step output.
   agent_response: {
     text: string;
     duration_ms: number;
   } | null;
+  // Set by chain-aware pin-capture when expected_agents.length > 1. Records
+  // every agent that fired in the chain in order, including post-chain gate
+  // agents (reviewer, tester) auto-injected after builder. Single-agent
+  // shapes leave this undefined. Tier-2 chain replay compares per-step.
+  chain_responses?: ChainBaselineEntry[];
+}
+
+export interface ChainBaselineEntry {
+  agent: string;
+  response: string;
+  // Per-step wall clock (initial agent + each handoff). Captured by the
+  // pin-capture timing wrapper; not part of the production ChainEntry shape.
+  duration_ms: number;
+  // Order index in the chain (0 = initial agent). Stable across reorderings
+  // when judge needs to align step-by-step against current run.
+  step: number;
+  // True for entries auto-injected by POST_CHAIN_GATES (reviewer, tester
+  // after builder). The judge uses this to apply gate-specific criteria.
+  is_gate: boolean;
 }
 
 export function loadSeeds(): Seed[] {
