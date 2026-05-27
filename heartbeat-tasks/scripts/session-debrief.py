@@ -487,6 +487,14 @@ EXISTING ENTRY TITLES (reuse similar pattern-keys if the concept overlaps): {exi
 
 QUALITY BAR: Only extract knowledge that would change how you approach future work. Skip trivial observations, routine operations, and things obvious from reading the code. Ask: "If I encounter this situation again in 3 months, what do I wish I knew?"
 
+CITATION DISCIPLINE (mandatory):
+- Every concrete claim about code, paths, schemas, error messages, command output, or specific behavior MUST be grounded in something from this conversation (a Read/Edit/Bash tool call, a quoted error, a file the user pasted, etc.).
+- The "citations" field lists those grounding sources: array of {{"path": "<repo-relative>", "lines": "<optional N or N-M>", "evidence": "<one-line quote or paraphrase>"}}.
+- If a claim has no concrete grounding (no path, no error text, no quoted output), EITHER drop it OR wrap it in a `> TODO-VERIFY: ...` blockquote inside the body.
+- Vague references like "the bot", "the database", "the function" without a specific path → drop the claim.
+- Prefer quoting tool-call paths (e.g., `bridges/discord/bot.ts:1712`) over restating from memory.
+- Snapshots / log timestamps / commit SHAs / version strings all count as concrete grounding.
+
 Respond with ONLY a JSON array. Each item must have these fields:
 - "type": "learning" or "error"
 - "title": short descriptive title (max 10 words)
@@ -494,7 +502,8 @@ Respond with ONLY a JSON array. Each item must have these fields:
 - "area": one of "infra", "architecture", "security", "dependency-management", "ui", "api", "database", "testing", "deployment", "ai-ml"
 - "project": project name if specific to one, or "ai-harness" if general
 - "tags": array of 3-5 relevant tags
-- "body": 1-2 sentences max. Format: "WHAT happened/was decided. WHY it matters / HOW to apply it." No filler, no context that's obvious from the title.
+- "body": 1-2 sentences max. Format: "WHAT happened/was decided. WHY it matters / HOW to apply it." Cite specific paths inline as `path:lines` where relevant. Use `> TODO-VERIFY: <claim>` blockquotes for any sub-claim you couldn't ground.
+- "citations": array of objects with {{"path": "<repo-relative>", "lines": "<optional>", "evidence": "<one-line>"}}. Empty array allowed only if the entry has no code/path claims. REQUIRED FIELD — do not omit.
 - "severity": for errors only — "critical", "high", "medium", "low"
 - "priority": for learnings only — "critical", "medium", "low"
 
@@ -509,6 +518,7 @@ What to SKIP:
 - Routine operations (ran tests, restarted service, updated dependency)
 - Architecture that's already documented in CLAUDE.md
 - Anything where the "body" would just restate the "title"
+- Claims you cannot ground per the citation discipline above
 
 If nothing meets this bar, return an empty array: []
 
@@ -550,6 +560,51 @@ def extract_knowledge_via_llm(conversation_text, projects, existing_keys, existi
 
 # ─── Write Knowledge to Vault (Deterministic) ────────────────────────
 
+_GIT_SHA_CACHE: dict[str, str | None] = {}
+
+
+def _git_head_sha() -> str | None:
+    """Current HEAD SHA in HARNESS_ROOT, or None if unavailable."""
+    if "HEAD" in _GIT_SHA_CACHE:
+        return _GIT_SHA_CACHE["HEAD"]
+    try:
+        r = subprocess.run(
+            ["git", "-C", HARNESS_ROOT, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        sha = r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        sha = None
+    _GIT_SHA_CACHE["HEAD"] = sha
+    return sha
+
+
+def _git_blob_sha(path: str) -> str | None:
+    """Blob SHA of `path` at HEAD, or None if not tracked / git unavailable."""
+    if path in _GIT_SHA_CACHE:
+        return _GIT_SHA_CACHE[path]
+    try:
+        r = subprocess.run(
+            ["git", "-C", HARNESS_ROOT, "rev-parse", f"HEAD:{path}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        sha = r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        sha = None
+    _GIT_SHA_CACHE[path] = sha
+    return sha
+
+
+def _yaml_quote(s: str) -> str:
+    """Minimal YAML scalar quoting — wrap in double quotes if contains special chars."""
+    if not s:
+        return '""'
+    needs = any(c in s for c in ':#&*!|>%@`,[]{}\n"\'') or s.strip() != s or s[:1] in "-?"
+    if not needs:
+        return s
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def write_vault_entry(item, existing_keys, supersedes=None):
     """Write a single learning/error to the vault. Returns the ID or None if skipped."""
     pattern_key = item.get("pattern_key", "")
@@ -590,6 +645,32 @@ def write_vault_entry(item, existing_keys, supersedes=None):
         f"tags: [{tags_str}]",
         "related: []",
     ])
+
+    # Freshness anchors — write-time HEAD + per-citation blob SHA.
+    # vault-freshness heartbeat lints these later to flag stale citations.
+    head_sha = _git_head_sha()
+    if head_sha:
+        lines.append(f"verified_at_sha: {head_sha}")
+
+    citations = item.get("citations") or []
+    if isinstance(citations, list) and citations:
+        lines.append("citations:")
+        for c in citations:
+            if not isinstance(c, dict):
+                continue
+            path = c.get("path", "").strip()
+            if not path:
+                continue
+            lines.append(f"  - path: {_yaml_quote(path)}")
+            cl = c.get("lines")
+            if cl:
+                lines.append(f"    lines: {_yaml_quote(str(cl))}")
+            evidence = c.get("evidence")
+            if evidence:
+                lines.append(f"    evidence: {_yaml_quote(str(evidence))}")
+            blob = _git_blob_sha(path)
+            if blob:
+                lines.append(f"    blob_sha: {blob}")
 
     if supersedes:
         lines.append(f"supersedes: {supersedes}")

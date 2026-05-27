@@ -6,7 +6,7 @@ export interface SubagentEntry {
   parentChannelId: string;
   description: string;
   agent?: string;
-  runtime?: "claude" | "codex";
+  runtime?: "claude" | "codex" | "ollama";
   outputFile: string;
   pid: number;
   status: "running" | "completed" | "failed" | "cancelled";

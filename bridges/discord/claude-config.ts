@@ -14,6 +14,7 @@ import { getProject, resolveProjectWorkdir } from "./project-manager.js";
 import { getSession, SESSION_RESUME_MAX_AGE_MS } from "./session-store.js";
 import { claudeDisallowedToolArgs } from "./safety.js";
 import { buildMcpConfigFile } from "./mcp-config-builder.js";
+import type { AgentContext } from "./agent-context.js";
 
 export const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 
@@ -326,6 +327,8 @@ export interface ClaudeRunConfig {
 
 export interface BuildConfigOptions {
   channelId: string;
+  /** Human-readable channel name → HARNESS_CHANNEL_NAME in the spawn env. */
+  channelName?: string | null;
   prompt: string;
   agentName?: string | null;
   sessionKey?: string | null;
@@ -442,10 +445,48 @@ export async function buildClaudeConfig(opts: BuildConfigOptions): Promise<Claud
     ...process.env as Record<string, string>,
     HARNESS_ROOT,
     HARNESS_CHANNEL_ID: opts.channelId,
+    ...(opts.channelName ? { HARNESS_CHANNEL_NAME: opts.channelName } : {}),
     HARNESS_SESSION_KEY: sessionKey,
     HARNESS_FROM_AGENT: fromAgent,
     ...(projectCwd ? { PROJECT_CWD: projectCwd } : {}),
   };
 
   return { args, env, cwd: HARNESS_ROOT };
+}
+
+// ─── AgentContext → Claude config (Phase B: renderContext seam) ─────
+//
+// `renderContext` drives a spawn from the harness-owned AgentContext instead
+// of loose per-call params. These two helpers are the Claude implementation:
+// map the durable context to the existing BuildConfigOptions, then reuse the
+// UNCHANGED buildClaudeConfig. Keeping buildClaudeConfig untouched makes it an
+// independent parity reference (see tests/runtime-render-parity.test.ts) — the
+// only thing that can differ is this scalar mapping. buildClaudeConfig still
+// re-derives model/permission/tools/MCP/session/ambient-context from the
+// channelId internally, so this mapping only needs to carry the scalars.
+
+export function contextToClaudeOpts(context: AgentContext): BuildConfigOptions {
+  return {
+    channelId: context.channelId,
+    channelName: context.channelName ?? null,
+    prompt: context.userPrompt,
+    // profile.name is the resolved agent. For general-chat shapes this equals
+    // legacy's `opts.agentName || channelConfig.agent`. The "default" sentinel
+    // is parity-safe (no default.md, no default model/tool entries → behaves
+    // exactly like undefined). The project-only activeAgent fallback is
+    // explicitly out of Phase B scope.
+    agentName: context.profile.name,
+    sessionKey: context.sessionKey,
+    taskId: context.workflow.taskId,
+    isContinuation: context.workflow.isContinuation,
+    extraSystemPrompts: context.operatorGuidance,
+    worktreePath: context.workflow.worktreePath ?? null,
+    skipSessionResume: context.workflow.skipSessionResume,
+  };
+}
+
+export async function buildClaudeConfigFromContext(
+  context: AgentContext,
+): Promise<ClaudeRunConfig> {
+  return buildClaudeConfig(contextToClaudeOpts(context));
 }

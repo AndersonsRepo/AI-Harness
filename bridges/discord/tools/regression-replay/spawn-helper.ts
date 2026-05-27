@@ -27,11 +27,12 @@ import {
 const HARNESS_ROOT = process.env.HARNESS_ROOT ?? process.cwd();
 const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 
-export type Runtime = "claude" | "codex";
+export type Runtime = "claude" | "codex" | "ollama";
 
 const RUNNER_PATHS: Record<Runtime, string> = {
   claude: join(HARNESS_ROOT, "bridges", "discord", "claude-runner.py"),
   codex: join(HARNESS_ROOT, "bridges", "discord", "codex-runner.py"),
+  ollama: join(HARNESS_ROOT, "bridges", "discord", "local-runner.py"),
 };
 
 const validatedRunners = new Set<Runtime>();
@@ -258,6 +259,11 @@ export class HeadlessAgentExecutor implements AgentExecutor {
         chainContext?: { completedPhases: ChainEntry[]; currentTask: string },
       ) => Promise<string>;
       timeoutMs?: number;
+      // Optional observer fired with the raw SpawnAgentResult before it's
+      // mapped to HandoffResult. The chain primitive doesn't carry cost
+      // through ChainEntry, so replay/capture drivers use this to collect
+      // per-step cost (Claude only — codex-runner doesn't surface it).
+      onAgentResult?: (agent: string, result: SpawnAgentResult) => void;
     },
   ) {}
 
@@ -273,6 +279,7 @@ export class HeadlessAgentExecutor implements AgentExecutor {
       channelId: this.opts.channelId,
       timeoutMs: this.opts.timeoutMs,
     });
+    this.opts.onAgentResult?.(args.toAgent, result);
 
     if (!result.ok || !result.responseText) {
       return null;

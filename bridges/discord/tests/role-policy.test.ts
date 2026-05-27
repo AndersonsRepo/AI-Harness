@@ -10,19 +10,24 @@ function cleanupChannel(channelId: string): void {
 }
 
 describe("Role Policy — Runtime Selection", () => {
-  it("defaults builder/researcher/education/reviewer/tester/orchestrator to Codex; ops stays on Claude", () => {
-    assert.equal(getPreferredRuntimeForAgent("builder"), "codex");
-    assert.deepEqual(getFallbackOrderForAgent("builder"), ["codex", "claude"]);
-    assert.equal(getPreferredRuntimeForAgent("researcher"), "codex");
-    assert.deepEqual(getFallbackOrderForAgent("researcher"), ["codex", "claude"]);
-    assert.equal(getPreferredRuntimeForAgent("education"), "codex");
-    assert.deepEqual(getFallbackOrderForAgent("education"), ["codex", "claude"]);
-    assert.equal(getPreferredRuntimeForAgent("reviewer"), "codex");
-    assert.deepEqual(getFallbackOrderForAgent("reviewer"), ["codex", "claude"]);
-    assert.equal(getPreferredRuntimeForAgent("tester"), "codex");
-    assert.deepEqual(getFallbackOrderForAgent("tester"), ["codex", "claude"]);
-    assert.equal(getPreferredRuntimeForAgent("orchestrator"), "codex");
-    assert.deepEqual(getFallbackOrderForAgent("orchestrator"), ["codex", "claude"]);
+  it("preserves preferred runtime and fallback order for current agent profiles", () => {
+    const cases = [
+      ["builder", "codex", ["codex", "claude"]],
+      ["researcher", "codex", ["codex", "claude"]],
+      ["education", "codex", ["codex", "claude"]],
+      ["reviewer", "codex", ["codex", "claude"]],
+      ["tester", "codex", ["codex", "claude"]],
+      ["orchestrator", "codex", ["codex", "claude"]],
+      ["codex-builder", "codex", ["codex", "claude"]],
+      ["unknown-agent", "claude", ["claude", "codex"]],
+      [null, "claude", ["claude", "codex"]],
+    ] as const;
+
+    for (const [agentName, expectedRuntime, expectedFallbackOrder] of cases) {
+      assert.equal(getPreferredRuntimeForAgent(agentName), expectedRuntime, String(agentName));
+      assert.deepEqual(getFallbackOrderForAgent(agentName), expectedFallbackOrder, String(agentName));
+    }
+
     // ops has no role-policy override and no `runtime: codex` in its agent
     // frontmatter, so it falls through to the Claude default. Acts as a
     // sentinel — if this flips, the policy or agent file changed.
@@ -42,6 +47,39 @@ describe("Role Policy — Runtime Selection", () => {
     assert.equal(policy.selectedRuntime, "claude");
     assert.equal(policy.source, "channel");
     assert.deepEqual(policy.fallbackOrder, ["claude", "codex"]);
+    cleanupChannel(channelId);
+  });
+
+  it("uses explicit task runtime ahead of channel and role policy while preserving role fallback", () => {
+    const channelId = "role-policy-explicit-override";
+    setChannelConfig(channelId, { runtime: "claude", agent: "reviewer" });
+
+    const policy = resolveRuntimePolicy({
+      channelId,
+      agentName: "reviewer",
+      explicitRuntime: "codex",
+    });
+
+    assert.equal(policy.selectedRuntime, "codex");
+    assert.equal(policy.preferredRuntime, "codex");
+    assert.equal(policy.source, "task");
+    assert.deepEqual(policy.fallbackOrder, ["codex", "claude"]);
+    cleanupChannel(channelId);
+  });
+
+  it("keeps channel override ahead of role policy for Claude-default agents", () => {
+    const channelId = "role-policy-channel-override-ops";
+    setChannelConfig(channelId, { runtime: "codex", agent: "ops" });
+
+    const policy = resolveRuntimePolicy({
+      channelId,
+      agentName: "ops",
+    });
+
+    assert.equal(policy.selectedRuntime, "codex");
+    assert.equal(policy.preferredRuntime, "codex");
+    assert.equal(policy.source, "channel");
+    assert.deepEqual(policy.fallbackOrder, ["codex", "claude"]);
     cleanupChannel(channelId);
   });
 });

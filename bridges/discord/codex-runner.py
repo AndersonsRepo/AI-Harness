@@ -21,16 +21,16 @@ Output file shape (matches claude-runner except for id key name):
    "lastMessage": <final agent text or null>}
 """
 
-import json
-import os
-import re
-import resource
-import shutil
-import signal
 import subprocess
 import sys
+import os
+import re
+import json
+import shutil
+import signal
 import threading
 import time
+import resource
 
 
 # Substrings that mark a Codex stderr as transient and worth retrying.
@@ -369,12 +369,15 @@ def main():
     )
     cwd = os.environ.get("PROJECT_CWD", harness_root)
 
+    # Codex needs CODEX_HOME for auth (refresh tokens). Default ~/.codex.
     clean_env = plat_env.clean_env(
         passthrough=["XDG_CONFIG_HOME", "SSH_AUTH_SOCK", "CODEX_HOME", "CODEX_RUNNER_PATH"]
     )
     if os.environ.get("CODEX_RUNNER_PATH"):
         clean_env["PATH"] = os.environ["CODEX_RUNNER_PATH"]
 
+    # Shell default RLIMIT_FSIZE (50MB on some setups) is smaller than codex's
+    # session/log writes. Mirrors ~/.local/bin/codex-mcp.sh.
     try:
         resource.setrlimit(resource.RLIMIT_FSIZE, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
     except (ValueError, OSError):
@@ -382,8 +385,13 @@ def main():
 
     last_message_file = output_file + ".last"
 
+    # Compose invocation. `-` as the prompt arg tells codex to read from stdin.
     if session_id:
-        invocation = [codex_path, "exec", "resume", session_id] + codex_args + ["--output-last-message", last_message_file, "-"]
+        # `codex exec resume` inherits sandbox/cwd/profile from the original
+        # session and rejects the exec-only flags that set them. Strip them
+        # from codex_args so Clap does not fail with "unexpected argument".
+        resume_args = _strip_exec_only_flags(codex_args)
+        invocation = [codex_path, "exec", "resume", session_id] + resume_args + ["--output-last-message", last_message_file, "-"]
     else:
         invocation = [codex_path, "exec"] + codex_args + ["--output-last-message", last_message_file, "-"]
 
@@ -392,6 +400,7 @@ def main():
             with open(prompt_file, "rb") as f:
                 prompt_bytes = f.read()
         except OSError as e:
+            # Fall back to stdin so manual invocations still work
             sys.stderr.write(f"[codex-runner] Failed to read --prompt-file {prompt_file}: {e}\n")
             prompt_bytes = sys.stdin.buffer.read()
     else:
@@ -448,6 +457,11 @@ def main():
     signal.signal(signal.SIGINT, handle_cancel_signal)
 
     def extract_thread_id(jsonl: str):
+        """Scan codex --json event stream for the session/thread id.
+
+        Codex emits events of various shapes; check common keys at top level
+        and under 'msg'. Return the first match.
+        """
         for line in jsonl.split("\n"):
             line = line.strip()
             if not line:
@@ -468,6 +482,7 @@ def main():
         return None
 
     def collect_text(value):
+        """Extract text from common Codex event payload shapes."""
         if isinstance(value, str):
             return value.strip() or None
         if isinstance(value, list):
@@ -493,6 +508,7 @@ def main():
         return None
 
     def extract_last_message(jsonl: str):
+        """Scan codex event stream for the final agent message text."""
         last = None
         for line in jsonl.split("\n"):
             line = line.strip()
@@ -514,12 +530,38 @@ def main():
                         break
         return last
 
+    stream_counter = [0]
+
     if stream_dir:
-        # Created for compat; Stage 1 does not write chunks here.
         try:
             os.makedirs(stream_dir, exist_ok=True)
         except OSError:
             pass
+
+    def write_stream_chunk(line: str):
+        """Mirror each Codex JSONL stdout event into StreamPoller chunks."""
+        if not stream_dir:
+            return
+        stripped = line.strip()
+        if not stripped:
+            return
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            return
+        stream_counter[0] += 1
+        chunk_path = os.path.join(stream_dir, f"chunk-{stream_counter[0]}.json")
+        tmp_path = chunk_path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(event, f)
+            os.rename(tmp_path, chunk_path)
+        except OSError:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
 
     safety_patterns = _load_safety_patterns()
     tool_policy = _load_agent_tool_policy()
@@ -570,6 +612,7 @@ def main():
         for line in proc.stdout:
             decoded = line.decode("utf-8", errors="replace")
             stdout_chunks.append(decoded)
+            write_stream_chunk(decoded)
             # Each line resets the watchdog — active stream is not stalled.
             timer.cancel()
             timer = threading.Timer(timeout, watchdog)

@@ -15,9 +15,9 @@
  */
 
 import { writeFileSync, existsSync, unlinkSync, mkdirSync, renameSync, readFileSync } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, dirname as pathDirname } from "path";
 
-const HARNESS_ROOT = process.env.HARNESS_ROOT || resolve(dirname(new URL(import.meta.url).pathname), "../..");
+const HARNESS_ROOT = process.env.HARNESS_ROOT || resolve(pathDirname(new URL(import.meta.url).pathname), "../..");
 process.env.HARNESS_ROOT = HARNESS_ROOT;
 
 const REAL_DB = join(HARNESS_ROOT, "bridges", "discord", "harness.db");

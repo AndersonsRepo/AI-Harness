@@ -28,22 +28,35 @@
 
 import { writeFileSync } from "fs";
 import type { AgentRuntime } from "./agent-loader.js";
+import type { AgentContext } from "./agent-context.js";
 import {
   buildClaudeConfig,
+  buildClaudeConfigFromContext,
   extractResponse as extractClaudeResponse,
   extractSessionId as extractClaudeSessionId,
+  type ClaudeRunConfig,
 } from "./claude-config.js";
 import {
   buildCodexConfig,
+  buildCodexConfigFromContext,
   extractCodexResponse,
   extractCodexSessionId,
+  type CodexRunConfig,
 } from "./codex-config.js";
+import {
+  buildOllamaConfig,
+  buildOllamaConfigFromContext,
+  extractOllamaResponse,
+  type OllamaRunConfig,
+} from "./ollama-config.js";
 import { recordClaudeResult, recordCodexResult } from "./instance-monitor.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 
 export interface BuildSpawnInput {
   channelId: string;
+  /** Human-readable channel name → HARNESS_CHANNEL_NAME in the spawn env. */
+  channelName?: string | null;
   prompt: string;
   agentName: string | null;
   taskId: string;
@@ -70,6 +83,19 @@ export interface SpawnArgs {
   cwd: string;
   env: Record<string, string>;
   promptFilePath: string | null;
+}
+
+/**
+ * Ephemeral, per-spawn plumbing that is NOT part of the durable AgentContext.
+ * `renderContext` takes this alongside the context so the durable-agent layer
+ * never has to carry disposable spawn paths/timeouts.
+ */
+export interface RenderSpawnMeta {
+  outputFile: string;
+  streamDir?: string;
+  timeoutSecs?: number;
+  /** Codex-specific prompt-file path (caller-owned). Ignored by Claude. */
+  promptFilePath?: string;
 }
 
 /**
@@ -112,6 +138,17 @@ export interface RuntimeAdapter {
    * Codex prompt-file writing (required by codex-runner.py's input model).
    */
   buildSpawnArgs(input: BuildSpawnInput): Promise<SpawnArgs>;
+
+  /**
+   * Render a durable AgentContext into spawn args for this runtime. Consumes
+   * the harness-owned AgentContext (identity + memory + policy) plus ephemeral
+   * spawn plumbing, so the SAME agent drives every runtime. Optional during
+   * migration: when present and the HARNESS_RENDER_CONTEXT flag selects this
+   * workflow, callers use it instead of buildSpawnArgs. Must produce output
+   * equivalent to buildSpawnArgs for equivalent inputs — enforced by
+   * tests/runtime-render-parity.test.ts.
+   */
+  renderContext?(context: AgentContext, spawn: RenderSpawnMeta): Promise<SpawnArgs>;
 
   /** Pull final agent text from a parsed runner envelope. */
   extractResponse(envelope: ParsedEnvelope): string | null;
@@ -158,6 +195,35 @@ export function getAdapter(runtime: AgentRuntime): RuntimeAdapter {
 
 // ─── Claude Adapter ─────────────────────────────────────────────────────
 
+/**
+ * Wrap a built ClaudeRunConfig into the python runner argv + SpawnArgs.
+ * Shared by buildSpawnArgs (loose params) and renderContext (AgentContext) so
+ * the runner-invocation wrapping never drifts between the two paths.
+ */
+function wrapClaudeSpawnArgs(
+  config: ClaudeRunConfig,
+  spawn: { outputFile: string; streamDir?: string; timeoutSecs?: number },
+): SpawnArgs {
+  const pythonArgs: string[] = [
+    `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
+    spawn.outputFile,
+  ];
+  if (spawn.streamDir) {
+    pythonArgs.push("--stream-dir", spawn.streamDir);
+  }
+  if (typeof spawn.timeoutSecs === "number") {
+    pythonArgs.push("--timeout", String(spawn.timeoutSecs));
+  }
+  pythonArgs.push(...config.args);
+
+  return {
+    pythonArgs,
+    cwd: config.cwd,
+    env: config.env,
+    promptFilePath: null,
+  };
+}
+
 const claudeAdapter: RuntimeAdapter = {
   tag: "claude",
 
@@ -172,6 +238,7 @@ const claudeAdapter: RuntimeAdapter = {
   async buildSpawnArgs(input: BuildSpawnInput): Promise<SpawnArgs> {
     const config = await buildClaudeConfig({
       channelId: input.channelId,
+      channelName: input.channelName,
       prompt: input.prompt,
       agentName: input.agentName,
       sessionKey: input.sessionKey,
@@ -182,24 +249,12 @@ const claudeAdapter: RuntimeAdapter = {
       skipSessionResume: input.skipSessionResume,
     });
 
-    const pythonArgs: string[] = [
-      `${HARNESS_ROOT}/bridges/discord/claude-runner.py`,
-      input.outputFile,
-    ];
-    if (input.streamDir) {
-      pythonArgs.push("--stream-dir", input.streamDir);
-    }
-    if (typeof input.timeoutSecs === "number") {
-      pythonArgs.push("--timeout", String(input.timeoutSecs));
-    }
-    pythonArgs.push(...config.args);
+    return wrapClaudeSpawnArgs(config, input);
+  },
 
-    return {
-      pythonArgs,
-      cwd: config.cwd,
-      env: config.env,
-      promptFilePath: null,
-    };
+  async renderContext(context: AgentContext, spawn: RenderSpawnMeta): Promise<SpawnArgs> {
+    const config = await buildClaudeConfigFromContext(context);
+    return wrapClaudeSpawnArgs(config, spawn);
   },
 
   extractResponse(envelope: ParsedEnvelope): string | null {
@@ -227,7 +282,7 @@ const claudeAdapter: RuntimeAdapter = {
         const ev = JSON.parse(trimmed);
         if (ev?.type === "tool_use" || ev?.type === "tool_result") {
           const name = ev.name || ev.tool || "unknown";
-          const inputJson = JSON.stringify(ev.input || "").slice(0, 100);
+          const inputJson = JSON.stringify(ev.input || "").slice(-100);
           signatures.push(`${name}:${inputJson}`);
           continue;
         }
@@ -235,7 +290,7 @@ const claudeAdapter: RuntimeAdapter = {
         if (ev?.type === "assistant" && Array.isArray(ev?.message?.content)) {
           for (const block of ev.message.content) {
             if (block?.type === "tool_use" && block?.name) {
-              const inputJson = JSON.stringify(block.input || "").slice(0, 100);
+              const inputJson = JSON.stringify(block.input || "").slice(-100);
               signatures.push(`${block.name}:${inputJson}`);
             }
           }
@@ -257,6 +312,51 @@ const claudeAdapter: RuntimeAdapter = {
 
 // ─── Codex Adapter ──────────────────────────────────────────────────────
 
+/**
+ * Wrap a built CodexRunConfig into the python runner argv + SpawnArgs. Writes
+ * the composed prompt to the caller-provided prompt file (codex-runner.py reads
+ * the prompt from a file, not stdin/argv). Shared by buildSpawnArgs (loose
+ * params) and renderContext (AgentContext) so the wrapping never drifts.
+ */
+function wrapCodexSpawnArgs(
+  config: CodexRunConfig,
+  spawn: {
+    outputFile: string;
+    streamDir?: string;
+    timeoutSecs?: number;
+    promptFilePath?: string;
+  },
+): SpawnArgs {
+  if (!spawn.promptFilePath) {
+    throw new Error(
+      "codex adapter requires `promptFilePath` — codex-runner.py reads " +
+        "the prompt from a file, not stdin/argv. Caller must provide one " +
+        "and clean it up after spawn.",
+    );
+  }
+
+  writeFileSync(spawn.promptFilePath, config.prompt, "utf-8");
+
+  const pythonArgs: string[] = [
+    `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
+    spawn.outputFile,
+  ];
+  if (spawn.streamDir) {
+    pythonArgs.push("--stream-dir", spawn.streamDir);
+  }
+  if (typeof spawn.timeoutSecs === "number") {
+    pythonArgs.push("--timeout", String(spawn.timeoutSecs));
+  }
+  pythonArgs.push("--prompt-file", spawn.promptFilePath, ...config.runnerArgs);
+
+  return {
+    pythonArgs,
+    cwd: config.cwd,
+    env: config.env,
+    promptFilePath: spawn.promptFilePath,
+  };
+}
+
 const codexAdapter: RuntimeAdapter = {
   tag: "codex",
 
@@ -275,22 +375,16 @@ const codexAdapter: RuntimeAdapter = {
     // `codex exec resume <session-id>` works (with the narrow flag set
     // documented in cbbf8f3 / ERR-codex-exec-resume-sandbox-flag-rejected).
     sessionResume: true,
-    // codex-runner.py accepts --stream-dir for compat but never writes to
-    // it; Codex telemetry is replayed post-hoc from the final stdout.
-    streamingTelemetry: false,
+    // codex-runner.py mirrors each JSONL stdout event into --stream-dir so
+    // Monitor can show live chain/task progress. Final stdout is still
+    // replayed post-hoc for non-polled callers.
+    streamingTelemetry: true,
   },
 
   async buildSpawnArgs(input: BuildSpawnInput): Promise<SpawnArgs> {
-    if (!input.promptFilePath) {
-      throw new Error(
-        "codex adapter requires `promptFilePath` — codex-runner.py reads " +
-          "the prompt from a file, not stdin/argv. Caller must provide one " +
-          "and clean it up after spawn.",
-      );
-    }
-
     const config = await buildCodexConfig({
       channelId: input.channelId,
+      channelName: input.channelName,
       prompt: input.prompt,
       agentName: input.agentName,
       sessionKey: input.sessionKey,
@@ -302,27 +396,12 @@ const codexAdapter: RuntimeAdapter = {
       skipSessionResume: input.skipSessionResume,
       isContinuation: input.isContinuation,
     });
+    return wrapCodexSpawnArgs(config, input);
+  },
 
-    writeFileSync(input.promptFilePath, config.prompt, "utf-8");
-
-    const pythonArgs: string[] = [
-      `${HARNESS_ROOT}/bridges/discord/codex-runner.py`,
-      input.outputFile,
-    ];
-    if (input.streamDir) {
-      pythonArgs.push("--stream-dir", input.streamDir);
-    }
-    if (typeof input.timeoutSecs === "number") {
-      pythonArgs.push("--timeout", String(input.timeoutSecs));
-    }
-    pythonArgs.push("--prompt-file", input.promptFilePath, ...config.runnerArgs);
-
-    return {
-      pythonArgs,
-      cwd: config.cwd,
-      env: config.env,
-      promptFilePath: input.promptFilePath,
-    };
+  async renderContext(context: AgentContext, spawn: RenderSpawnMeta): Promise<SpawnArgs> {
+    const config = await buildCodexConfigFromContext(context);
+    return wrapCodexSpawnArgs(config, spawn);
   },
 
   extractResponse(envelope: ParsedEnvelope): string | null {
@@ -355,10 +434,10 @@ const codexAdapter: RuntimeAdapter = {
         if (itemType === "mcp_tool_call") {
           const name = `mcp__${item.server || "unknown"}__${item.tool || "unknown"}`;
           const args = item.arguments && typeof item.arguments === "object" ? item.arguments : {};
-          signatures.push(`${name}:${JSON.stringify(args).slice(0, 100)}`);
+          signatures.push(`${name}:${JSON.stringify(args).slice(-100)}`);
         } else if (itemType === "command_execution") {
           const command = String(item.command || "");
-          signatures.push(`Bash:${JSON.stringify({ command }).slice(0, 100)}`);
+          signatures.push(`Bash:${JSON.stringify({ command }).slice(-100)}`);
         }
       } catch {}
     }
@@ -387,5 +466,113 @@ const codexAdapter: RuntimeAdapter = {
   },
 };
 
+// ─── Ollama (local) Adapter — Phase H ───────────────────────────────────
+//
+// The third runtime: a session-less, tool-less local model over HTTP. Proves
+// the abstraction is model-neutral (not just Claude/Codex failover). Opt-in
+// only (role-policy never auto-selects it). Capabilities are honestly minimal.
+
+/**
+ * Wrap an OllamaRunConfig into the local-runner.py argv. local-runner.py reads
+ * its JSON payload (system + user + model + endpoint) from a file — same
+ * file-based pattern as codex-runner.py — so large ambient context never hits
+ * argv limits. Caller provides + cleans up the payload file.
+ */
+function wrapOllamaSpawnArgs(
+  config: OllamaRunConfig,
+  spawn: { outputFile: string; streamDir?: string; timeoutSecs?: number; promptFilePath?: string },
+): SpawnArgs {
+  if (!spawn.promptFilePath) {
+    throw new Error(
+      "ollama adapter requires `promptFilePath` — local-runner.py reads its " +
+        "JSON payload (system+user+model) from a file. Caller must provide one " +
+        "and clean it up after spawn.",
+    );
+  }
+
+  writeFileSync(
+    spawn.promptFilePath,
+    JSON.stringify({
+      system: config.systemPrompt,
+      user: config.userPrompt,
+      model: config.model,
+      endpoint: config.endpoint,
+    }),
+    "utf-8",
+  );
+
+  const pythonArgs: string[] = [
+    `${HARNESS_ROOT}/bridges/discord/local-runner.py`,
+    spawn.outputFile,
+  ];
+  if (spawn.streamDir) {
+    pythonArgs.push("--stream-dir", spawn.streamDir);
+  }
+  if (typeof spawn.timeoutSecs === "number") {
+    pythonArgs.push("--timeout", String(spawn.timeoutSecs));
+  }
+  pythonArgs.push("--payload-file", spawn.promptFilePath);
+
+  return {
+    pythonArgs,
+    cwd: config.cwd,
+    env: config.env,
+    promptFilePath: spawn.promptFilePath,
+  };
+}
+
+const ollamaAdapter: RuntimeAdapter = {
+  tag: "ollama",
+
+  capabilities: {
+    continuation: false, // no [CONTINUE] multi-step for the local model yet
+    loopDetection: false, // no tool calls to detect loops in
+    transientErrorRetry: true, // local server can be momentarily busy / loading the model
+    sessionResume: false, // session-LESS by design — prior turns are injected, not resumed
+    streamingTelemetry: false, // stream:false for now; no live chunk feed
+  },
+
+  async buildSpawnArgs(input: BuildSpawnInput): Promise<SpawnArgs> {
+    const config = await buildOllamaConfig({
+      channelId: input.channelId,
+      channelName: input.channelName,
+      prompt: input.prompt,
+      agentName: input.agentName,
+      sessionKey: input.sessionKey,
+      taskId: input.taskId,
+      extraSystemPrompts: input.extraSystemPrompts,
+      worktreePath: input.worktreePath ?? null,
+      isContinuation: input.isContinuation,
+    });
+    return wrapOllamaSpawnArgs(config, input);
+  },
+
+  async renderContext(context: AgentContext, spawn: RenderSpawnMeta): Promise<SpawnArgs> {
+    const config = await buildOllamaConfigFromContext(context);
+    return wrapOllamaSpawnArgs(config, spawn);
+  },
+
+  extractResponse(envelope: ParsedEnvelope): string | null {
+    return extractOllamaResponse(envelope);
+  },
+
+  extractSessionId(): string | null {
+    return null; // session-less
+  },
+
+  recordResult(): void {
+    // No streaming telemetry yet; nothing to record post-hoc.
+  },
+
+  parseToolCallSignatures(): string[] {
+    return []; // no tools → no loop signatures
+  },
+
+  isStaleSessionError(): boolean {
+    return false; // no sessions to go stale
+  },
+};
+
 registerAdapter(claudeAdapter);
 registerAdapter(codexAdapter);
+registerAdapter(ollamaAdapter);

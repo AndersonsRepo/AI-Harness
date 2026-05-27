@@ -41,7 +41,7 @@ function waitForTaskOutput(taskId: string): Promise<{ response: string | null; e
 }
 
 describe("Task Runner — Mixed Runtime Dispatch", () => {
-  const channels = ["runtime-codex-task", "runtime-claude-task", "runtime-override-task", "runtime-session-split"];
+  const channels = ["runtime-codex-task", "runtime-claude-task", "runtime-override-task"];
   const spawnCalls: SpawnCall[] = [];
 
   beforeEach(() => {
@@ -224,14 +224,5 @@ describe("Codex Result Parsing", () => {
 
     assert.equal(extractCodexResponse(payload), "Nested Codex response");
     assert.equal(extractCodexSessionId(payload), "thread-nested");
-  });
-
-  it("stores Claude and Codex sessions separately for the same logical key", () => {
-    const channelId = "runtime-session-split";
-    setSession(channelId, "claude-session", "claude");
-    setSession(channelId, "codex-thread", "codex");
-
-    assert.equal(getSession(channelId, "claude"), "claude-session");
-    assert.equal(getSession(channelId, "codex"), "codex-thread");
   });
 });

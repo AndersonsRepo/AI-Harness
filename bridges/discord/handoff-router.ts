@@ -1,7 +1,4 @@
 import { TextChannel, Message } from "discord.js";
-import { spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync, mkdirSync, readdirSync } from "fs";
-import { join } from "path";
 import { parseParallelDirective, spawnParallelGroup } from "./tmux-orchestrator.js";
 import {
   getProject,
@@ -12,33 +9,28 @@ import {
 } from "./project-manager.js";
 import { setSession } from "./session-store.js";
 import { getDb } from "./db.js";
-import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
 import { monitor } from "./truncation-monitor.js";
 import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, isGitRepo, captureArtifacts, commitWorktreeIfDirty, ArtifactBundle } from "./worktree-manager.js";
 import type { AgentRuntime } from "./agent-loader.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
-import { HARNESS_ROOT } from "./claude-config.js";
-import { getAdapter } from "./runtime-adapter.js";
-import {
-  registerInstance,
-  getCompletedSummary,
-  finalizeInstance,
-} from "./instance-monitor.js";
 import { persistTaskTelemetry } from "./task-telemetry.js";
 import {
   classifyRuntimeFailureForFailover,
   runtimeFailoverMessage,
 } from "./runtime-failover.js";
+import {
+  runRuntimeInvocation,
+  setRuntimeInvocationSpawnProcessForTests,
+} from "./runtime-invocation.js";
+import type { TelemetrySummary } from "./task-telemetry.js";
 
-const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
 const MAX_CONTEXT_MESSAGES = 15;
 const MAX_MSG_LENGTH = 500;
-let spawnProcess = spawn;
 
 export function setHandoffSpawnProcessForTests(
-  impl: typeof spawn | null,
+  impl: Parameters<typeof setRuntimeInvocationSpawnProcessForTests>[0],
 ): void {
-  spawnProcess = impl || spawn;
+  setRuntimeInvocationSpawnProcessForTests(impl);
 }
 
 export interface HandoffDirective {
@@ -522,14 +514,35 @@ export type ExecuteHandoffCoreResult =
   | { ok: false; reason: "timeout" }
   | { ok: false; reason: "parse-error"; errorMessage: string };
 
+function persistHandoffInvocationTelemetry(
+  invocation: { taskId: string; telemetry: TelemetrySummary | null },
+  params: ExecuteHandoffCoreParams,
+  status: "completed" | "failed",
+  error: string | null,
+): void {
+  if (!invocation.telemetry) return;
+  try {
+    persistTaskTelemetry({
+      taskId: invocation.taskId,
+      channelId: params.channelId,
+      agent: params.toAgent,
+      runtime: params.runtime,
+      prompt: params.prompt,
+      status,
+      telemetry: invocation.telemetry,
+      error,
+    });
+  } catch (err: any) {
+    console.error(`[HANDOFF] Telemetry persist failed for ${invocation.taskId}: ${err.message}`);
+  }
+}
+
 /**
  * Discord-decoupled spawn + parse for a single handoff step.
  *
- * Builds the runner config (codex or claude), spawns python3 detached,
- * watches for output via FileWatcher, parses the response, persists the
- * session ID, and returns a result variant. Does not touch Discord —
- * the caller is responsible for translating error variants into user-
- * facing notices.
+ * Runtime lifecycle is delegated to runtime-invocation.ts. This function
+ * owns handoff-specific policy: failover, session persistence, response
+ * validation, and parsing the next handoff directive.
  */
 export async function executeHandoffCore(
   params: ExecuteHandoffCoreParams,
@@ -550,198 +563,98 @@ export async function executeHandoffCore(
     skipSessionResume = false,
   } = params;
 
-  // Per-spawn telemetry id. Distinct prefix from task-runner's `task-` so
-  // role-telemetry consumers can identify chain-step rows specifically if
-  // ever needed. Matches the (taskId, channelId, agent, runtime) PK shape
-  // task_telemetry already uses for entry-point spawns. See ERR-20260430-002
-  // for the original gap that motivated this.
-  const chainTaskId = `chain-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  registerInstance({
-    taskId: chainTaskId,
-    channelId,
-    agent: toAgent,
-    runtime,
-    prompt,
-    pid: 0,
-  });
-
-  // Runner-level timeout (seconds) matches the watcher-level timeout (ms)
-  // so claude-runner.py / codex-runner.py kill their child agent BEFORE the
-  // FileWatcher gives up — the runner's timeout writes a structured error
-  // envelope which the watcher then reads, vs. the watcher firing first and
-  // leaving an orphan agent process.
-  const runnerTimeoutSecs = String(Math.max(1, Math.floor(timeoutMs / 1000)));
-
-  const outputFile = join(
-    TEMP_DIR,
-    `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
-  );
-
-  const adapter = getAdapter(runtime);
-  const promptFilePath =
-    runtime === "codex"
-      ? join(TEMP_DIR, `handoff-${Date.now()}-${Math.random().toString(36).slice(2)}.prompt.txt`)
-      : undefined;
-  const spawnArgs = await adapter.buildSpawnArgs({
+  const invocation = await runRuntimeInvocation({
     channelId,
     prompt,
     agentName: toAgent,
+    runtime,
     sessionKey,
-    taskId: "handoff",
-    outputFile,
+    taskIdPrefix: "chain",
+    runnerTaskId: "handoff",
+    outputPrefix: "handoff",
+    timeoutMs,
     worktreePath,
     skipSessionResume,
-    timeoutSecs: parseInt(runnerTimeoutSecs, 10),
-    promptFilePath,
+    requireResponse: true,
+    workflowKind: "handoff",
   });
-  const promptFile = spawnArgs.promptFilePath;
 
-  return new Promise<ExecuteHandoffCoreResult>((resolve) => {
-    const childProc = spawnProcess("python3", spawnArgs.pythonArgs, {
-      cwd: spawnArgs.cwd,
-      env: spawnArgs.env,
-      detached: true,
-      stdio: "ignore",
-    });
-    childProc.unref();
+  if (!invocation.ok) {
+    if (invocation.reason === "no-response" && invocation.sessionId) {
+      setSession(sessionKey, invocation.sessionId, runtime);
+    }
 
-    // Persist task_telemetry for this chain step before resolving. The
-    // entry-point spawn path (task-runner.ts → core-gateway.ts) already
-    // does this; the chain path historically did not, so role-telemetry
-    // weekly reports under-counted chain specialists by however much chain
-    // traffic those roles see. ERR-20260430-002 has the full diagnosis.
-    //
-    // Wrap resolve in a helper so every exit path goes through telemetry
-    // capture without duplicating the call sites. Errors during persist
-    // are logged but never throw — telemetry must not break the chain.
-    const finalize = (
-      coreResult: ExecuteHandoffCoreResult,
-      envelope: Record<string, unknown> | undefined,
-    ): void => {
-      try {
-        if (envelope) {
-          adapter.recordResult(chainTaskId, envelope as any);
-        }
-        const summary = getCompletedSummary(chainTaskId);
-        const status = coreResult.ok ? "completed" : "failed";
-        const errorMessage = coreResult.ok
-          ? undefined
-          : "errorMessage" in coreResult
-            ? coreResult.errorMessage
-            : coreResult.reason;
-        if (summary) {
-          persistTaskTelemetry({
-            taskId: chainTaskId,
-            channelId,
-            agent: toAgent,
-            runtime,
-            prompt,
-            status,
-            telemetry: summary,
-            error: errorMessage ?? null,
-          });
-        }
-      } catch (err: any) {
-        console.error(`[HANDOFF] Telemetry persist failed for ${chainTaskId}: ${err.message}`);
-      } finally {
-        finalizeInstance(chainTaskId, coreResult.ok ? "completed" : "failed");
+    if (invocation.reason === "exit-nonzero") {
+      const failover = classifyRuntimeFailureForFailover({
+        channelId,
+        agentName: toAgent,
+        explicitRuntime: runtime,
+        failedRuntime: runtime,
+        stdout: invocation.envelope.stdout || "",
+        stderr: invocation.envelope.stderr,
+        returncode: invocation.returncode,
+      });
+      if (failover?.shouldFailover && failover.nextRuntime) {
+        const message = runtimeFailoverMessage(runtime, failover.nextRuntime);
+        console.log(`[HANDOFF] ${toAgent} ${message}`);
+        return executeHandoffCore({
+          ...params,
+          runtime: failover.nextRuntime,
+        });
       }
-      resolve(coreResult);
+    }
+
+    const errorMessage =
+      "errorMessage" in invocation ? invocation.errorMessage : invocation.reason;
+    persistHandoffInvocationTelemetry(invocation, params, "failed", errorMessage);
+
+    if (invocation.reason === "exit-nonzero") {
+      return {
+        ok: false,
+        reason: "exit-nonzero",
+        errorMessage: invocation.errorMessage,
+      };
+    }
+    if (invocation.reason === "no-response") {
+      return { ok: false, reason: "no-response" };
+    }
+    if (invocation.reason === "timeout") {
+      return { ok: false, reason: "timeout" };
+    }
+    if (invocation.reason === "spawn-error") {
+      return {
+        ok: false,
+        reason: "exit-nonzero",
+        errorMessage: invocation.errorMessage,
+      };
+    }
+    return {
+      ok: false,
+      reason: "parse-error",
+      errorMessage: invocation.errorMessage,
     };
+  }
 
-    const watcher = new FileWatcher({
-      filePath: outputFile,
-      onFile: async (content: string) => {
-        untrackWatcher(watcher);
+  if (invocation.sessionId) {
+    setSession(sessionKey, invocation.sessionId, runtime);
+  }
 
-        let envelopeForTelemetry: Record<string, unknown> | undefined;
-        try {
-          if (promptFile && existsSync(promptFile)) {
-            unlinkSync(promptFile);
-          }
-          if (existsSync(outputFile)) {
-            unlinkSync(outputFile);
-          }
+  const responseText = invocation.responseText;
+  if (!responseText) {
+    // Defensive only: requireResponse should make runtime-invocation return
+    // a no-response failure before reaching this branch.
+    persistHandoffInvocationTelemetry(invocation, params, "failed", "no-response");
+    return { ok: false, reason: "no-response" };
+  }
 
-          const result = JSON.parse(content);
-          const { stderr, returncode } = result;
-          envelopeForTelemetry = result;
-
-          if (returncode !== 0) {
-            const errorMsg = stderr?.trim() || `Agent exited with code ${returncode}`;
-            const failover = classifyRuntimeFailureForFailover({
-              channelId,
-              agentName: toAgent,
-              explicitRuntime: runtime,
-              failedRuntime: runtime,
-              stdout: result.stdout || "",
-              stderr,
-              returncode,
-            });
-            if (failover?.shouldFailover && failover.nextRuntime) {
-              const message = runtimeFailoverMessage(runtime, failover.nextRuntime);
-              console.log(`[HANDOFF] ${toAgent} ${message}`);
-              try {
-                adapter.recordResult(chainTaskId, result);
-              } catch (err: any) {
-                console.error(`[HANDOFF] Failed to record failed-attempt telemetry for ${chainTaskId}: ${err.message}`);
-              }
-              finalizeInstance(chainTaskId, "failed");
-              const fallbackResult = await executeHandoffCore({
-                ...params,
-                runtime: failover.nextRuntime,
-              });
-              resolve(fallbackResult);
-              return;
-            }
-            finalize({ ok: false, reason: "exit-nonzero", errorMessage: errorMsg }, envelopeForTelemetry);
-            return;
-          }
-
-          const responseText = adapter.extractResponse(result);
-          const sessionId = adapter.extractSessionId(result);
-
-          if (sessionId) {
-            setSession(sessionKey, sessionId, runtime);
-          }
-
-          if (!responseText) {
-            finalize({ ok: false, reason: "no-response" }, envelopeForTelemetry);
-            return;
-          }
-
-          const nextHandoff = parseHandoff(responseText);
-          finalize(
-            {
-              ok: true,
-              agentName: toAgent,
-              response: responseText,
-              nextHandoff,
-              sessionId: sessionId ?? null,
-            },
-            envelopeForTelemetry,
-          );
-        } catch (err: any) {
-          console.error(`[HANDOFF] Error reading output: ${err.message}`);
-          finalize({ ok: false, reason: "parse-error", errorMessage: err.message }, envelopeForTelemetry);
-        }
-      },
-      onTimeout: async () => {
-        untrackWatcher(watcher);
-        if (promptFile && existsSync(promptFile)) {
-          unlinkSync(promptFile);
-        }
-        // Timeout path has no stdout — telemetry will reflect just the
-        // initial token estimate from registerInstance, marked failed.
-        finalize({ ok: false, reason: "timeout" }, undefined);
-      },
-      timeoutMs,
-      fallbackPollMs: 2000,
-      retryReadMs: 100,
-    });
-    trackWatcher(watcher);
-    watcher.start();
-  });
+  persistHandoffInvocationTelemetry(invocation, params, "completed", null);
+  return {
+    ok: true,
+    agentName: toAgent,
+    response: responseText,
+    nextHandoff: parseHandoff(responseText),
+    sessionId: invocation.sessionId,
+  };
 }
 
 export async function executeHandoff(

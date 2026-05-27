@@ -10,6 +10,7 @@ import { proc } from "./platform.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
 import { HARNESS_ROOT } from "./claude-config.js";
 import { getAdapter } from "./runtime-adapter.js";
+import { resolveSpawnArgs } from "./runtime-invocation.js";
 import type { AgentRuntime } from "./agent-loader.js";
 import {
   classifyRuntimeFailureForFailover,
@@ -110,6 +111,8 @@ export function setSpawnProcessForTests(
 
 export interface TaskConfig {
   channelId: string;
+  /** Human-readable Discord channel name (for HARNESS_CHANNEL_NAME spawn env). */
+  channelName?: string;
   prompt: string;
   agent?: string;
   runtime?: AgentRuntime;
@@ -121,6 +124,7 @@ export interface TaskConfig {
 export interface TaskRecord {
   id: string;
   channel_id: string;
+  channel_name: string | null;
   prompt: string;
   agent: string | null;
   runtime: AgentRuntime | null;
@@ -238,8 +242,8 @@ export function submitTask(config: TaskConfig): string {
   const now = new Date().toISOString();
 
   db.prepare(`
-    INSERT INTO task_queue (id, channel_id, prompt, agent, runtime, session_key, status, max_steps, max_attempts, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+    INSERT INTO task_queue (id, channel_id, prompt, agent, runtime, session_key, status, max_steps, max_attempts, created_at, updated_at, channel_name)
+    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
   `).run(
     id,
     config.channelId,
@@ -250,7 +254,8 @@ export function submitTask(config: TaskConfig): string {
     config.maxSteps ?? 10,
     config.maxAttempts ?? 3,
     now,
-    now
+    now,
+    config.channelName || null
   );
 
   return id;
@@ -341,21 +346,34 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
   const adapter = getAdapter(runtime);
   const isContinuation = adapter.capabilities.continuation && task.step_count > 0;
 
+  // codex reads its prompt from a file; ollama reads its JSON payload from one.
   const promptFilePath =
-    runtime === "codex" ? join(PROMPT_DIR, `prompt-${requestId}.txt`) : undefined;
-  const spawnArgs = await adapter.buildSpawnArgs({
-    channelId: task.channel_id,
-    prompt: task.prompt,
-    agentName: agentName ?? null,
-    sessionKey: task.session_key || task.channel_id,
-    taskId: task.id,
-    outputFile,
-    streamDir,
-    extraSystemPrompts,
-    worktreePath: opts?.worktreePath,
-    isContinuation,
-    promptFilePath,
-  });
+    runtime === "codex" || runtime === "ollama"
+      ? join(PROMPT_DIR, `prompt-${requestId}.txt`)
+      : undefined;
+  // Route through resolveSpawnArgs (shared with the subagent path) so the
+  // HARNESS_RENDER_CONTEXT gate (off | shadow | chat) lives in ONE place. At
+  // the default `off` this is byte-identical to the prior direct
+  // adapter.buildSpawnArgs(...) call; `chat`/`shadow` light up the rendered
+  // path (runtime-abstraction plan, Phase F). workflowKind="chat" is the value
+  // the `chat` flag selects.
+  const spawnArgs = await resolveSpawnArgs(
+    adapter,
+    {
+      channelId: task.channel_id,
+      channelName: task.channel_name ?? null,
+      prompt: task.prompt,
+      agentName: agentName ?? null,
+      runtime,
+      sessionKey: task.session_key || task.channel_id,
+      worktreePath: opts?.worktreePath,
+      isContinuation,
+      extraSystemPrompts,
+      workflowKind: "chat",
+    },
+    task.id,
+    { outputFile, streamDir, promptFilePath },
+  );
   if (spawnArgs.promptFilePath) {
     taskPromptFiles.set(taskId, spawnArgs.promptFilePath);
   }
@@ -406,7 +424,25 @@ export async function spawnTask(taskId: string, opts?: { reuseStreamDir?: string
   return { pid, outputFile, streamDir, runtime };
 }
 
+// Tasks whose runner output is actively being processed by the handler below.
+// handleTaskOutput unlinks the output file early (line ~422) and flips status
+// only at the very end, so without this guard the mid-session stuck-task reaper
+// could observe (dead pid, no output file, status='running') for a task that
+// actually succeeded and is still mid-delivery — and wrongly fail it. Held
+// across the whole handler, including any continuation/retry re-spawn awaited
+// inside it (the re-spawn installs a fresh live pid before the guard releases).
+const tasksBeingProcessed = new Set<string>();
+
 async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
+  tasksBeingProcessed.add(taskId);
+  try {
+    await handleTaskOutputInner(taskId, raw);
+  } finally {
+    tasksBeingProcessed.delete(taskId);
+  }
+}
+
+async function handleTaskOutputInner(taskId: string, raw: string): Promise<void> {
   const task = getTask(taskId);
   if (!task) return;
   const runtime = resolveTaskRuntime(task);
@@ -502,6 +538,16 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
 
     console.log(`[TASK] ${taskId} extractResponse: ${responseText ? responseText.length + ' chars' : 'NULL'}, sessionId: ${sessionId || 'null'}`);
 
+    // Save session BEFORE the loop check. A loop kill ends this turn, but
+    // the user usually wants to redirect ("no, try X instead"), and that
+    // requires the session id we just got from the runtime to remain in
+    // session-store for the next message in this channel. Dropping it here
+    // resets the conversation to zero.
+    if (sessionId) {
+      const sessionKey = task.session_key || task.channel_id;
+      setSession(sessionKey, sessionId, runtime);
+    }
+
     // Loop detection — adapter parses the runtime-specific event shape into
     // signatures; the threshold check itself is shared.
     const signatures = adapter.capabilities.loopDetection
@@ -521,12 +567,6 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
         await outputHandler(taskId, warningText, null, sessionId, raw);
       }
       return;
-    }
-
-    // Save session
-    if (sessionId) {
-      const sessionKey = task.session_key || task.channel_id;
-      setSession(sessionKey, sessionId, runtime);
     }
 
     // Check for continuation — adapter-gated. Both Claude and Codex
@@ -566,6 +606,11 @@ async function handleTaskOutput(taskId: string, raw: string): Promise<void> {
 
     if (outputHandler) {
       await outputHandler(taskId, responseText, null, sessionId, raw);
+    } else {
+      // Re-attached task after a bot restart can lose the registered handler. Don't drop
+      // silently — a "completed" task with no delivery + no channel release is the
+      // hung-chat bug. See ERR-bot-completed-task-not-delivered-channel-lock-leak-2026-05-24.
+      console.error(`[TASK] ${taskId} completed but NO outputHandler registered — response (${responseText ? responseText.length : 0} chars) NOT delivered; channel may stay locked (run /stop in the channel to recover).`);
     }
   } catch (err: any) {
     console.error(`[TASK] ${taskId} output processing error: ${err.message}`);
@@ -737,6 +782,96 @@ export function recoverCrashedTasks(): number {
   }
 
   return recovered;
+}
+
+// --- Mid-session stuck-task reaper ---
+//
+// recoverCrashedTasks() only runs at startup. Mid-session, a runner that dies
+// WITHOUT writing its output envelope (SIGKILL, OOM, a missed FileWatcher
+// event) leaves its task_queue row stuck status='running' with a dead PID,
+// holding a concurrency slot until the next bot restart. This periodic reaper
+// generalizes the dead-PID branch of crash-recovery to run continuously. It is
+// the row-side complement to process-reaper.ts, which kills the inverse case
+// (a live runner whose task is already gone). See ERR-20260425-063 (promoted
+// to CLAUDE.md "Promoted Learnings").
+
+const REAPER_INTERVAL_MS = 2 * 60 * 1000; // scan every 2 minutes
+// Ignore rows touched within this window so a just-spawned task is never
+// reaped during startup jitter. The liveness check is the real gate — a healthy
+// long-running task keeps an ALIVE pid and is never touched no matter how stale
+// updated_at is.
+export const REAPER_GRACE_MS = 90 * 1000;
+
+let reaperTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Pure decision: is this running/waiting_continue row a dead orphan that should
+ * be failed? Exported for tests — no DB access, no side effects.
+ */
+export function isStuckOrphan(task: TaskRecord, nowMs: number): boolean {
+  if (task.pid == null) return false;
+  if (tasksBeingProcessed.has(task.id)) return false; // output handler in flight
+  if (nowMs - Date.parse(task.updated_at) < REAPER_GRACE_MS) return false;
+  if (proc.isAlive(task.pid)) return false; // still running — leave it
+  // Dead pid, but if the envelope is on disk the FileWatcher (or its fallback
+  // poll) still delivers it — don't fail a task that actually produced output.
+  if (task.output_file && existsSync(task.output_file)) return false;
+  return true;
+}
+
+/**
+ * Scan running/waiting_continue rows and fail any whose runner process is dead
+ * and produced no output envelope, routing each through the normal
+ * retry/dead-letter path (handleFailure). Returns the number reaped.
+ */
+export function reapStuckTasks(): number {
+  const db = getDb();
+  const now = Date.now();
+  const rows = db.prepare(
+    "SELECT * FROM task_queue WHERE status IN ('running', 'waiting_continue') AND pid IS NOT NULL"
+  ).all() as TaskRecord[];
+
+  let reaped = 0;
+  for (const task of rows) {
+    if (!isStuckOrphan(task, now)) continue;
+    console.warn(
+      `[REAPER] task ${task.id} orphaned — PID ${task.pid} dead, no output envelope; failing → retry/dead-letter`
+    );
+    updateTask(task.id, {
+      status: "failed",
+      last_error: `orphaned: pid ${task.pid} exited without writing envelope`,
+    });
+    handleFailure(task.id, "process exited without writing envelope (reaper)").catch((err) =>
+      console.error(`[REAPER] failure handler error for ${task.id}: ${err.message}`)
+    );
+    reaped++;
+  }
+  return reaped;
+}
+
+/** Start the periodic reaper. Idempotent. */
+export function startTaskReaper(): void {
+  if (reaperTimer) return;
+  reaperTimer = setInterval(() => {
+    try {
+      reapStuckTasks();
+    } catch (err: any) {
+      console.error(`[REAPER] scan error: ${err.message}`);
+    }
+  }, REAPER_INTERVAL_MS);
+  // Don't keep the event loop alive solely for the reaper.
+  reaperTimer.unref();
+  console.log(
+    `[REAPER] stuck-task reaper started (every ${REAPER_INTERVAL_MS / 1000}s, grace ${REAPER_GRACE_MS / 1000}s)`
+  );
+}
+
+/** Stop the periodic reaper (clean shutdown / tests). */
+export function stopTaskReaper(): void {
+  if (reaperTimer) {
+    clearInterval(reaperTimer);
+    reaperTimer = null;
+  }
 }
 
 // --- Cancel ---

@@ -36,6 +36,18 @@ PYTHON = paths.python()
 CLAUDE_PATH = paths.claude_cli()
 
 
+def autorun_mode():
+    """Read the control-panel kill-switch. 'normal' | 'autonomous' | 'full'."""
+    try:
+        path = os.path.join(HARNESS_ROOT, ".autorun-mode")
+        if not os.path.exists(path):
+            return "normal"
+        value = open(path).read().strip()
+        return value if value in ("autonomous", "full") else "normal"
+    except Exception:
+        return "normal"
+
+
 def log(task_name, msg):
     """Append timestamped message to task log file."""
     log_file = os.path.join(TASKS_DIR, "logs", f"{task_name}.log")
@@ -197,6 +209,18 @@ def run_task(task_name):
     if not config.get("enabled", True):
         log(task_name, "Task is disabled, skipping")
         return
+
+    # Autorun kill-switch (control panel): skip AI-spawning heartbeats while
+    # autonomous AI is paused. Pure-Python (non-AI) tasks keep running.
+    if autorun_mode() in ("autonomous", "full"):
+        is_ai = (
+            config.get("type", "claude") != "script"
+            or config.get("provider")
+            or config.get("allowed_tools")
+        )
+        if is_ai:
+            log(task_name, "AI autorun paused via control panel, skipping AI heartbeat")
+            return
 
     # Check active hours — skip if outside configured window
     active_hours = config.get("activeHours")

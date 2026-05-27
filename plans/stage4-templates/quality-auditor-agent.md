@@ -29,7 +29,7 @@ You also read git log + git show for commits in the regressed window. Watched pa
 3. Cross-reference SHA(s) against `git log --oneline --since="N days ago"` to map commit windows to outcomes.
 4. Report: status of recent runs, any regression windows, candidate root causes, recommended next actions.
 
-### When invoked with a hint (e.g. "researcher feels off on retrieval tasks since last week")
+### When invoked with a hint (e.g. "researcher feels off on Hey Lexxi tasks since last week")
 
 1. Parse the hint for time window + agent role + project/topic signals.
 2. Filter timeline entries to that window.

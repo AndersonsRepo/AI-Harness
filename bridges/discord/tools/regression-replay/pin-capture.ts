@@ -12,7 +12,7 @@
 //     <seed-id> [--param key=value ...] [--no-agent-run]
 //
 // Example:
-//   ... pin-capture.ts shape-01 --param topic="distributed systems"
+//   ... pin-capture.ts shape-01 --param topic="GraphN reliability"
 
 import { assembleContext } from "../../context-assembler.js";
 import { extractMetrics } from "./metrics.js";
@@ -22,12 +22,18 @@ import {
   saveBaseline,
   updateSeedPin,
   type Baseline,
+  type ChainBaselineEntry,
 } from "./seed-loader.js";
 import { runAgent, type Runtime } from "./spawn-helper.js";
+import {
+  buildChainResponses,
+  captureChainBaseline,
+  POST_CHAIN_GATE_AGENTS,
+} from "./chain-baseline.js";
 
 const TIER1_CHANNEL_ID = "regression-replay-tier1";
 const HARNESS_VERSION = 1;
-const RUBRIC_VERSION = 2;
+const RUBRIC_VERSION = 3;
 
 // Real seed responses run several paragraphs. Anything below this is almost
 // always an apology, redirect, or empty stub — saving it as the pin would
@@ -110,26 +116,41 @@ async function main(): Promise<void> {
   const capturedAt = new Date().toISOString().slice(0, 10);
 
   let agentResponse: Baseline["agent_response"] = null;
+  let chainResponses: ChainBaselineEntry[] | undefined = undefined;
+  const isChainSeed = seed.expected_agents.length > 1;
+
   if (runAgentToo) {
-    console.error(`[pin-capture] Running ${runtime}/${agentName} for baseline output...`);
-    const result = await runAgent({
-      runtime,
-      agentName,
-      prompt,
-      channelId: TIER1_CHANNEL_ID,
-    });
-    if (result.ok && result.responseText) {
-      agentResponse = {
-        text: result.responseText,
-        duration_ms: result.durationMs,
-      };
-      console.error(
-        `[pin-capture] Agent response captured: ${result.responseText.length} chars, ${result.durationMs}ms`,
-      );
+    if (isChainSeed) {
+      const capture = await captureChainBaseline(seed, prompt, runtime, TIER1_CHANNEL_ID);
+      if (capture) {
+        chainResponses = buildChainResponses(capture, POST_CHAIN_GATE_AGENTS);
+        console.error(
+          `[pin-capture] Chain captured: ${chainResponses.length} steps (${chainResponses.map((e) => e.agent).join(" → ")})`,
+        );
+      } else {
+        console.error("[pin-capture] WARN: chain capture failed; proceeding with context-only baseline");
+      }
     } else {
-      console.error(
-        `[pin-capture] WARN: agent run failed (${result.error}); proceeding with context-only baseline`,
-      );
+      console.error(`[pin-capture] Running ${runtime}/${agentName} for baseline output...`);
+      const result = await runAgent({
+        runtime,
+        agentName,
+        prompt,
+        channelId: TIER1_CHANNEL_ID,
+      });
+      if (result.ok && result.responseText) {
+        agentResponse = {
+          text: result.responseText,
+          duration_ms: result.durationMs,
+        };
+        console.error(
+          `[pin-capture] Agent response captured: ${result.responseText.length} chars, ${result.durationMs}ms`,
+        );
+      } else {
+        console.error(
+          `[pin-capture] WARN: agent run failed (${result.error}); proceeding with context-only baseline`,
+        );
+      }
     }
   } else {
     console.error("[pin-capture] --no-agent-run set; skipping agent run (tier 2 will not work for this pin)");
@@ -180,6 +201,7 @@ async function main(): Promise<void> {
     context_block: contextBlock,
     metrics,
     agent_response: agentResponse,
+    chain_responses: chainResponses,
   };
 
   const baselinePath = saveBaseline(baseline);

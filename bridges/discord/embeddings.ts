@@ -11,8 +11,8 @@
  *   - Upgrade path: swap JSON store for sqlite-vec when vault exceeds 500 files
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, watch, FSWatcher } from "fs";
-import { join, relative } from "path";
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, watch, FSWatcher, lstatSync, readlinkSync, renameSync } from "fs";
+import { join, relative, isAbsolute, dirname } from "path";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT || ".";
 const VAULT_DIR = join(HARNESS_ROOT, "vault");
@@ -46,8 +46,36 @@ function loadStore(): EmbeddingEntry[] {
   }
 }
 
+/**
+ * Resolve EMBEDDINGS_FILE through any symlink. vault-embeddings.json is a
+ * symlink into the shared state dir; the atomic rename below must replace the
+ * real target, not the symlink itself (which would de-link the AI-Harness trees
+ * from the shared store).
+ */
+function resolveStoreTarget(): string {
+  try {
+    if (lstatSync(EMBEDDINGS_FILE).isSymbolicLink()) {
+      const link = readlinkSync(EMBEDDINGS_FILE);
+      return isAbsolute(link) ? link : join(dirname(EMBEDDINGS_FILE), link);
+    }
+  } catch {
+    // missing — fall through and create it at the configured path
+  }
+  return EMBEDDINGS_FILE;
+}
+
 function saveStore(entries: EmbeddingEntry[]): void {
-  writeFileSync(EMBEDDINGS_FILE, JSON.stringify(entries, null, 2));
+  const target = resolveStoreTarget();
+  const tmp = `${target}.tmp`;
+  // Compact JSON + 6-decimal float rounding (see roundVec): together ~halve the
+  // file vs pretty-printed full-precision. Rounding here too (not just at embed
+  // time) trims existing full-precision entries on the next save — e.g. the
+  // startup sync — without re-embedding.
+  const rounded = entries.map((e) => ({ ...e, embedding: roundVec(e.embedding) }));
+  writeFileSync(tmp, JSON.stringify(rounded));
+  // Atomic: a partial/failed write lands on .tmp and never touches the live
+  // store, so a future failure can't truncate it into the loadStore()→[] wipe.
+  renameSync(tmp, target);
 }
 
 function simpleHash(content: string): string {
@@ -88,7 +116,9 @@ function discoverVaultFiles(): string[] {
   const files: string[] = [];
   const dirs = [
     "learnings",
+    join("learnings", "legacy-imported"), // historical learnings migrated from the old (pre-runtime-switch) vault
     "shared",
+    join("shared", "legacy-imported"), // historical shared docs migrated from the old vault
     join("shared", "project-knowledge"),
     join("shared", "scouted"),
     join("shared", "course-notes", "numerical-methods"),
@@ -363,12 +393,24 @@ export async function hybridSearch(
 
 // ─── Vector Math ─────────────────────────────────────────────────────
 
+// Embeddings are stored AND compared at 6-decimal precision. This is lossless
+// for retrieval: the per-component rounding (≤5e-7) perturbs cosine scores by
+// ~1e-5, vs. inter-result gaps of ~1e-2+ — rankings are unaffected. It also
+// ~halves the on-disk float-JSON. Change detection uses the content `hash`, not
+// the floats, so dedup is untouched. (See vault ERR-embeddings-store corruption.)
+const EMBED_PRECISION = 1e6;
+function roundVec(v: number[]): number[] {
+  return v.map((x) => Math.round(x * EMBED_PRECISION) / EMBED_PRECISION);
+}
+
 function normalizeVector(v: number[]): number[] {
   let magnitude = 0;
   for (const x of v) magnitude += x * x;
   magnitude = Math.sqrt(magnitude);
   if (magnitude === 0) return v;
-  return v.map((x) => x / magnitude);
+  // Round here so newly-embedded vectors AND query vectors (both prepped via
+  // normalizeVector) are stored/compared at the same precision.
+  return roundVec(v.map((x) => x / magnitude));
 }
 
 function dotProduct(a: number[], b: number[]): number {
@@ -405,7 +447,9 @@ let debounceInterval: ReturnType<typeof setInterval> | null = null;
 export function watchVaultForEmbeddings(): void {
   const watchDirs = [
     join(VAULT_DIR, "learnings"),
+    join(VAULT_DIR, "learnings", "legacy-imported"),
     join(VAULT_DIR, "shared"),
+    join(VAULT_DIR, "shared", "legacy-imported"),
     join(VAULT_DIR, "shared", "project-knowledge"),
     join(VAULT_DIR, "shared", "scouted"),
     join(VAULT_DIR, "shared", "course-notes", "numerical-methods"),

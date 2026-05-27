@@ -31,7 +31,7 @@ You are a continuously learning agent. After every meaningful interaction, evalu
 - A better approach is discovered for something you've done before
 - The user provides information you didn't know
 
-### Feature Requests (FEAT) — Log when:
+### Feature Requests (LRN with `category: feature_request`) — Log when:
 - The user asks for a capability that doesn't exist
 - You realize a skill would make a recurring task easier
 - The user says "I wish you could..." or "Can you..."
@@ -43,7 +43,7 @@ Each entry is an **individual markdown file** in `vault/learnings/` with YAML fr
 ### File Naming
 - `vault/learnings/LRN-YYYYMMDD-XXX.md` for learnings
 - `vault/learnings/ERR-YYYYMMDD-XXX.md` for errors
-- `vault/learnings/FEAT-YYYYMMDD-XXX.md` for feature requests
+- `vault/learnings/LRN-YYYYMMDD-XXX.md` with `type: learning` and `category: feature_request` for feature requests
 
 To determine the next sequence number (XXX), list existing files in `vault/learnings/` matching today's date and the entry type prefix, then increment.
 
@@ -52,7 +52,7 @@ To determine the next sequence number (XXX), list existing files in `vault/learn
 See template files for the full frontmatter and body format:
 - [templates/learning.md](templates/learning.md) — LRN template
 - [templates/error.md](templates/error.md) — ERR template
-- [templates/feature.md](templates/feature.md) — FEAT template
+- [templates/feature.md](templates/feature.md) — feature-request learning template
 
 ## Recurring Pattern Detection
 
@@ -88,16 +88,16 @@ When a learning is valuable enough to become a reusable skill, it qualifies if:
 - It required non-obvious debugging to discover
 - It's broadly applicable across projects
 
-To extract, create a new SKILL.md in `.claude/skills/<skill-name>/` with:
+To extract, propose a new SKILL.md in `.claude/skills/<skill-name>/` with:
 - `disable-model-invocation: true` (user must opt-in to new auto-generated skills)
 - Clear description of what the skill does
 - The learned workflow as step-by-step instructions
 
-Always ask the user before creating a new skill.
+Always show the exact proposed skill edit and ask the user before creating or changing any canonical skill file.
 
 ## Daily Digest
 
 When invoked with `/self-improve digest` or at the end of a long session, summarize:
 - New entries added today (count by type) — check `vault/learnings/` for files with today's date
 - Any patterns approaching promotion threshold (recurrence-count >= 2)
-- Any feature requests that could be built quickly
+- Any feature-request learnings that could be built quickly

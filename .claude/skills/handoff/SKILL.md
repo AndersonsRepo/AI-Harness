@@ -22,19 +22,22 @@ Preserve context across session boundaries by extracting the conversation into a
 - Preparing to switch channels or projects
 
 ## Current sessions
-!`python3 heartbeat-tasks/scripts/extract-session.py --list 2>&1 | head -20`
+!`python3 heartbeat-tasks/scripts/extract-session.py --list 2>&1 | head -30`
 
 ## Steps
 
 1. **Parse `$ARGUMENTS`**:
-   - No args → use the most recent session from the list above
+   - No args → omit identifier; the script defaults to the current terminal session
+     (most-recently-modified .jsonl in the cwd's project dir). Do NOT pass a session
+     ID from the list — the "Bot sessions" section lists Discord channel sessions,
+     which are NOT this terminal session.
    - `--list` → show the list and stop (done above)
    - Looks like a UUID (has dashes, >20 chars) → treat as session ID
    - Otherwise → treat as channel ID
 
-2. **Run extraction**:
+2. **Run extraction** (omit the argument entirely when handing off the current session):
 
-       python3 heartbeat-tasks/scripts/extract-session.py <session-or-channel>
+       python3 heartbeat-tasks/scripts/extract-session.py [session-or-channel]
 
    This writes `vault/shared/<channel-or-session>-digest.md` and prints the output path.
 
@@ -47,7 +50,16 @@ Preserve context across session boundaries by extracting the conversation into a
    - **Next steps**: concrete investigation or action items
    - **Full digest**: path to the saved digest file for retrieval
 
-   **Hard limit: the recap (everything inside the inner code fence) must be ≤1800 characters** so the user can paste it as a single Discord message (Discord's per-message cap is 2000; 1800 leaves headroom for code-block fences and any prefix the user adds). If you exceed it, tighten — drop prose, prefer bullets, use IDs over titles, cite the digest path instead of restating its contents. Count after drafting; do not ship over-limit.
+   **Hard limit: the recap (everything inside the inner code fence) must be ≤1800 characters** so the user can paste it as a single Discord message (Discord's per-message cap is 2000; 1800 leaves headroom for code-block fences and any prefix the user adds). If you exceed it, tighten — drop prose, prefer bullets, use IDs over titles, cite the digest path instead of restating its contents.
+
+   **MEASURE — do not eyeball.** Models miscount characters by sight. Write the drafted recap to a temp file and count it, then trim and re-measure until it passes:
+
+       cat > /tmp/handoff-recap.txt <<'RECAP'
+       <the recap text>
+       RECAP
+       wc -c < /tmp/handoff-recap.txt   # must be ≤ 1800
+
+   Do not ship a recap you have not measured at ≤1800.
 
 5. **Output the TL;DR** in a fenced code block so the user can copy-paste it into the new session.
 

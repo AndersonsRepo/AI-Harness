@@ -66,13 +66,23 @@ export function safetyPatternsJson(): string {
 }
 
 /**
- * Claude `--disallowedTools` syntax for the subset that's a Bash
- * command pattern. Preserves the existing semantics for the claude-config
- * caller; non-bash patterns (SQL keywords) are emitted as Bash(...) matchers
- * that catch them appearing inside a shell command.
+ * Values for Claude's `--disallowedTools` flag. Two kinds of entries:
+ *  - bare tool names (e.g. `AskUserQuestion`) that disable a tool outright;
+ *  - `Bash(<prefix>:*)` matchers for destructive shell commands. Non-bash
+ *    danger patterns (SQL keywords) are emitted as Bash(...) matchers so they
+ *    are caught when they appear inside a shell command.
  */
 export function claudeDisallowedToolArgs(): string[] {
   return [
+    // Interactive-only tools: there is no TTY in the headless `claude -p`
+    // pipeline, so a call to either blocks the process forever (it waits for
+    // an answer/approval that can never arrive), the task never emits output,
+    // and the channel lock is never released — the "frozen chat" bug. Blocking
+    // them at the CLI level makes the model surface the question as plain text
+    // (which delivers normally) instead of stalling. See the 2026-05-26 hang
+    // (returncode 143, stdout length 0 after a tool_use AskUserQuestion event).
+    "AskUserQuestion",
+    "ExitPlanMode",
     "Bash(rm -rf:*)",
     "Bash(git push --force:*)",
     "Bash(git reset --hard:*)",

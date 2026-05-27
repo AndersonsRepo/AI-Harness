@@ -9,22 +9,32 @@ import subprocess
 import sys
 from pathlib import Path
 
-HARNESS_ROOT = Path(os.environ.get("HARNESS_ROOT", Path.home() / "Desktop" / "AI-Harness"))
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+from hook_common import resolve_harness_root
 
-# Add lib to path for platform module
-sys.path.insert(0, str(HARNESS_ROOT / "heartbeat-tasks"))
-from lib.platform import paths
+HARNESS_ROOT = resolve_harness_root(SCRIPT_DIR)
 
-SCRIPT = HARNESS_ROOT / "heartbeat-tasks" / "scripts" / "session-debrief.py"
-PYTHON = paths.python()
 
-# Run in background so it doesn't block the exit
-try:
-    subprocess.Popen(
-        [PYTHON, str(SCRIPT)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-except Exception:
-    pass  # Don't block exit on failure
+def main():
+    # Add lib to path for platform module only when the hook actually runs.
+    sys.path.insert(0, str(HARNESS_ROOT / "heartbeat-tasks"))
+    from lib.platform import paths
+
+    script = HARNESS_ROOT / "heartbeat-tasks" / "scripts" / "session-debrief.py"
+    python = paths.python()
+
+    # Run in background so it doesn't block the exit.
+    try:
+        subprocess.Popen(
+            [python, str(script)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass  # Don't block exit on failure
+
+
+if __name__ == "__main__":
+    main()

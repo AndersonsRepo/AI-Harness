@@ -23,6 +23,12 @@ import {
   type Seed,
   type Baseline,
 } from "./seed-loader.js";
+import { replayChain, type ChainReplayRun } from "./chain-baseline.js";
+import {
+  judgeChainRun,
+  chainVerdictToPollResult,
+  type ChainRunVerdict,
+} from "./chain-judge.js";
 
 const HARNESS_ROOT = process.env.HARNESS_ROOT ?? process.cwd();
 const REPLAY_ROOT = join(HARNESS_ROOT, "vault", "shared", "regression-replay");
@@ -33,6 +39,11 @@ const NUM_RUNS_PER_SEED = parseInt(
   process.env.REPLAY_NUM_RUNS ?? "3",
   10,
 );
+// Chain-shape evaluation is gated by an env var during initial rollout so
+// the next scheduled weekly run keeps today's behavior (skipping chain
+// seeds with `no_baseline_output`). Flip the default in a follow-up commit
+// once shape-04 lands a clean Pass^3.
+const CHAIN_ENABLED = process.env.REPLAY_CHAIN_ENABLED === "1";
 
 interface SeedResult {
   seed_id: string;
@@ -60,6 +71,8 @@ interface SeedResult {
     judge_cost_usd: number;
     total_usd: number;
   };
+  // Set only for chain seeds. Per-run chain verdicts with step breakdown.
+  chain_runs?: ChainRunVerdict[];
 }
 
 interface RunReport {
@@ -101,11 +114,110 @@ function persistCandidate(
   return `runs/candidates/${filename}`;
 }
 
+async function evaluateChainSeed(seed: Seed, baseline: Baseline): Promise<SeedResult> {
+  if (!baseline.chain_responses || baseline.chain_responses.length === 0) {
+    return {
+      seed_id: seed.id,
+      shape: seed.shape,
+      status: "no_baseline_output",
+      errors: ["chain seed baseline lacks chain_responses — re-run pin-capture"],
+    };
+  }
+
+  const startedAt = Date.now();
+  const prompt = baseline.resolved_prompt;
+  const errors: string[] = [];
+
+  // Drive N replays via the existing chain-replay driver, then judge each
+  // run's per-step output against baseline.chain_responses. Routing
+  // mismatches short-circuit inside judgeChainRun (no judge spend).
+  const replayResult = await replayChain({
+    seed,
+    baseline,
+    numRuns: NUM_RUNS_PER_SEED,
+    channelId: TIER2_CHANNEL_ID,
+    candidatesDir: CANDIDATES_DIR,
+  });
+
+  const perRunPolls: PollResult[] = [];
+  const chainRuns: ChainRunVerdict[] = [];
+  const candidatePaths: string[] = [];
+  let judgeCostUsd = 0;
+
+  for (const run of replayResult.runs) {
+    if (run.candidate_path) candidatePaths.push(run.candidate_path);
+
+    if (run.status !== "ok") {
+      errors.push(`run ${run.run_index + 1}: ${run.error ?? "agent error"}`);
+      perRunPolls.push({
+        judges: [],
+        final: "judge_failure",
+        disagreement: false,
+        evidence_summary: `chain run failed: ${run.error ?? "unknown"}`,
+      });
+      chainRuns.push({
+        steps: [],
+        final: "judge_failure",
+        routing_mismatch: false,
+        evidence_summary: `chain run failed: ${run.error ?? "unknown"}`,
+        judge_cost_usd: 0,
+      });
+      continue;
+    }
+
+    const verdict = await judgeChainRun({
+      baseline: baseline.chain_responses,
+      candidate: run.chain_responses,
+      prompt,
+      shape: seed.shape,
+    });
+    judgeCostUsd += verdict.judge_cost_usd;
+    chainRuns.push(verdict);
+    perRunPolls.push(chainVerdictToPollResult(verdict));
+  }
+
+  const passk = aggregatePassK(perRunPolls);
+
+  return {
+    seed_id: seed.id,
+    shape: seed.shape,
+    status: passk.final,
+    passk,
+    per_run_polls: perRunPolls,
+    chain_runs: chainRuns,
+    errors: errors.length > 0 ? errors : undefined,
+    total_duration_ms: Date.now() - startedAt,
+    candidate_paths: candidatePaths.length > 0 ? candidatePaths : undefined,
+    cost: {
+      agent_cost_usd: round4(replayResult.total_agent_cost_usd),
+      judge_cost_usd: round4(judgeCostUsd),
+      total_usd: round4(replayResult.total_agent_cost_usd + judgeCostUsd),
+    },
+  };
+}
+
 async function evaluateSeed(seed: Seed): Promise<SeedResult> {
   const baseline = loadBaseline(seed.id);
   if (!baseline || !seed.current_pin) {
     return { seed_id: seed.id, shape: seed.shape, status: "no_pin" };
   }
+
+  // Chain dispatch: chain-shape seeds (expected_agents.length > 1) carry
+  // per-step output in baseline.chain_responses. Until CHAIN_ENABLED flips
+  // to default-on, chain seeds remain skipped with a clear status so the
+  // weekly run keeps existing behavior.
+  if (seed.expected_agents.length > 1) {
+    if (!CHAIN_ENABLED) {
+      return {
+        seed_id: seed.id,
+        shape: seed.shape,
+        status: "skipped",
+        errors: ["chain seed evaluation gated by REPLAY_CHAIN_ENABLED=1"],
+      };
+    }
+    return evaluateChainSeed(seed, baseline);
+  }
+
   if (!baseline.agent_response) {
     return {
       seed_id: seed.id,
@@ -314,7 +426,7 @@ function buildReport(
 
   return {
     run_at: new Date().toISOString(),
-    rubric_version: 2,
+    rubric_version: 3,
     harness_version: 1,
     total_seeds: allSeeds.length,
     evaluated_seeds: evaluated.length,

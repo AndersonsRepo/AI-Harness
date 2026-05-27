@@ -1,6 +1,7 @@
 import type { AgentRuntime } from "./agent-loader.js";
 import { classifyClaudeError, type ClassifiedError } from "./claude-config.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
+import { recordLimitEvent } from "./usage-tracker.js";
 
 export interface RuntimeFailoverInput {
   channelId: string;
@@ -50,6 +51,11 @@ export function classifyRuntimeFailureForFailover(
     input.returncode ?? 1,
   );
   if (!classification) return null;
+
+  // Record usage/rate/credit limit hits for the control-panel dashboard. This
+  // is the single chokepoint both task-runner and subagent-manager reach, so
+  // every Claude limit event is captured here. Best-effort, no tokens.
+  recordLimitEvent(classification.kind, input.failedRuntime);
 
   const nextRuntime = classification.kind === "usage_limit"
     ? getNextFallbackRuntime(input)

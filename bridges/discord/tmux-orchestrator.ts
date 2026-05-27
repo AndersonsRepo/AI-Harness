@@ -14,34 +14,26 @@
  *   6. Aggregated results are fed back to the orchestrator as [PARALLEL_COMPLETE]
  */
 
-import { spawn } from "child_process";
-import { join } from "path";
-import { mkdirSync, existsSync, unlinkSync } from "fs";
 import { getDb } from "./db.js";
 import { getProject, resolveProjectWorkdir } from "./project-manager.js";
-import { FileWatcher, trackWatcher, untrackWatcher } from "./file-watcher.js";
-import { StreamPoller } from "./stream-poller.js";
 import { submitTask } from "./task-runner.js";
 import { setSession } from "./session-store.js";
 import * as tmux from "./tmux-session.js";
 import { needsWorktree, createWorktree, mergeWorktree, removeWorktree, getWorktreeForGroup, isGitRepo } from "./worktree-manager.js";
 import type { AgentRuntime } from "./agent-loader.js";
 import { resolveRuntimePolicy } from "./role-policy.js";
-import { registerInstance, processMonitorEvent, getCompletedSummary, finalizeInstance } from "./instance-monitor.js";
-import { HARNESS_ROOT } from "./claude-config.js";
-import { getAdapter } from "./runtime-adapter.js";
 import { persistTaskTelemetry } from "./task-telemetry.js";
 import {
   classifyRuntimeFailureForFailover,
   runtimeFailoverMessage,
 } from "./runtime-failover.js";
+import {
+  setRuntimeInvocationSpawnProcessForTests,
+  startRuntimeInvocation,
+  type RuntimeInvocationResult,
+} from "./runtime-invocation.js";
 
-const TEMP_DIR = join(HARNESS_ROOT, "bridges", "discord", ".tmp");
-const STREAM_DIR = join(TEMP_DIR, "streams");
-const PROMPT_DIR = join(TEMP_DIR, "prompts");
 const PARALLEL_TIMEOUT_MS = parseInt(process.env.PARALLEL_TIMEOUT_MS || "1800000", 10);
-let spawnProcess = spawn;
-const activeParallelPollers = new Map<string, StreamPoller>();
 
 /**
  * Resolve agent label to actual agent name.
@@ -200,9 +192,9 @@ export function getActiveGroups(): GroupStatus[] {
 }
 
 export function setParallelSpawnProcessForTests(
-  impl: typeof spawn | null,
+  impl: Parameters<typeof setRuntimeInvocationSpawnProcessForTests>[0],
 ): void {
-  spawnProcess = impl || spawn;
+  setRuntimeInvocationSpawnProcessForTests(impl);
 }
 
 // ─── Spawning ───────────────────────────────────────────────────────
@@ -216,10 +208,6 @@ export async function spawnParallelGroup(opts: ParallelGroupOptions): Promise<st
   const { channelId, parentTaskId, directive } = opts;
 
   console.log(`[PARALLEL] Spawning group ${groupId}: ${directive.agents.join(", ")}`);
-
-  try { mkdirSync(TEMP_DIR, { recursive: true }); } catch {}
-  try { mkdirSync(STREAM_DIR, { recursive: true }); } catch {}
-  try { mkdirSync(PROMPT_DIR, { recursive: true }); } catch {}
 
   // Ensure tmux session exists
   tmux.ensureSession();
@@ -260,11 +248,6 @@ async function spawnParallelAgent(
   worktreePath?: string | null,
   options: { forcedRuntime?: AgentRuntime; updateExisting?: boolean } = {},
 ): Promise<void> {
-  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const outputFile = join(TEMP_DIR, `response-${requestId}.json`);
-  const streamDir = join(STREAM_DIR, requestId);
-  let promptFile: string | null = null;
-
   // Resolve numbered labels (e.g., "builder-1" → "builder") for agent personality/tools
   const resolvedAgent = resolveAgentName(agent);
   const runtime = options.forcedRuntime ?? resolveRuntimePolicy({
@@ -272,35 +255,22 @@ async function spawnParallelAgent(
     agentName: resolvedAgent,
   }).selectedRuntime;
 
-  const adapter = getAdapter(runtime);
-  const promptFilePath =
-    runtime === "codex" ? join(PROMPT_DIR, `parallel-${taskId}.prompt.txt`) : undefined;
-  const spawnArgs = await adapter.buildSpawnArgs({
+  const invocation = await startRuntimeInvocation({
     channelId,
     prompt: description,
     agentName: resolvedAgent,
+    runtime,
     sessionKey: `${channelId}:${agent}`,
     taskId,
-    outputFile,
-    streamDir,
+    outputPrefix: "response",
+    timeoutMs: PARALLEL_TIMEOUT_MS,
     skipSessionResume: true,
     worktreePath,
-    promptFilePath,
+    workflowKind: "parallel",
   });
-  promptFile = spawnArgs.promptFilePath;
-
-  const childProc = spawnProcess("python3", spawnArgs.pythonArgs, {
-    cwd: spawnArgs.cwd,
-    env: spawnArgs.env,
-    detached: true,
-    stdio: "ignore",
-  });
-  childProc.unref();
-
-  const pid = childProc.pid!;
 
   // Also try to create a tmux window for visibility
-  tmux.createWindow(winName, `echo "PID: ${pid} | Agent: ${agent} | Group: ${groupId}" && sleep infinity`);
+  tmux.createWindow(winName, `echo "PID: ${invocation.pid} | Agent: ${agent} | Group: ${groupId}" && sleep infinity`);
 
   // Record in database
   const startedAt = new Date().toISOString();
@@ -323,38 +293,11 @@ async function spawnParallelAgent(
     });
   }
 
-  console.log(`[PARALLEL] Spawned ${agent} (${taskId}) PID ${pid}, window: ${winName}`);
+  console.log(`[PARALLEL] Spawned ${agent} (${taskId}) PID ${invocation.pid}, window: ${winName}`);
 
-  registerInstance({
-    taskId,
-    channelId,
-    agent,
-    runtime,
-    prompt: description,
-    pid,
-  });
-
-  // Only attach a StreamPoller for runtimes that emit per-event chunks into
-  // streamDir. Codex's runner accepts --stream-dir for compat but writes
-  // nothing there; its telemetry is replayed post-hoc from final stdout in
-  // handleParallelOutput via adapter.recordResult().
-  if (adapter.capabilities.streamingTelemetry) {
-    const streamPoller = new StreamPoller(streamDir, () => {}, {
-      monitorCallback: (event) => processMonitorEvent(taskId, event),
-    });
-    activeParallelPollers.set(taskId, streamPoller);
-    streamPoller.start();
-  }
-
-  // FileWatcher for output
-  const watcher = new FileWatcher({
-    filePath: outputFile,
-    onFile: (content: string) => {
-      untrackWatcher(watcher);
-      if (promptFile && existsSync(promptFile)) {
-        unlinkSync(promptFile);
-      }
-      handleParallelOutput(groupId, taskId, agent, runtime, winName, content).catch((err) => {
+  invocation.result
+    .then((result) => handleParallelResult(groupId, taskId, agent, runtime, winName, result))
+    .catch((err) => {
         console.error(`[PARALLEL] Output handler error for ${taskId}: ${err.message}`);
         updateParallelTask(groupId, taskId, {
           status: "failed",
@@ -362,97 +305,54 @@ async function spawnParallelAgent(
           completed_at: new Date().toISOString(),
         });
         checkGroupCompletion(groupId);
-      });
-    },
-    onTimeout: () => {
-      untrackWatcher(watcher);
-      if (promptFile && existsSync(promptFile)) {
-        unlinkSync(promptFile);
-      }
-      console.error(`[PARALLEL] Timeout for ${agent} (${taskId})`);
-      updateParallelTask(groupId, taskId, {
-        status: "failed",
-        error: "Timed out",
-        completed_at: new Date().toISOString(),
-      });
-      tmux.killWindow(winName);
-      checkGroupCompletion(groupId);
-    },
-    timeoutMs: PARALLEL_TIMEOUT_MS,
-    retryReadMs: 100,
-    fallbackPollMs: 3000,
-  });
-  trackWatcher(watcher);
-  watcher.start();
+    });
 }
 
 // ─── Output Handling ────────────────────────────────────────────────
 
-async function handleParallelOutput(
+async function handleParallelResult(
   groupId: string,
   taskId: string,
   agent: string,
   runtime: AgentRuntime,
   winName: string,
-  rawContent: string,
+  result: RuntimeInvocationResult,
 ): Promise<void> {
-  const poller = activeParallelPollers.get(taskId);
-  if (poller) {
-    poller.stop();
-    activeParallelPollers.delete(taskId);
-  }
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(rawContent);
-  } catch {
+  if (!result.ok && result.reason === "parse-error") {
     updateParallelTask(groupId, taskId, {
       status: "failed",
       error: "Failed to parse output JSON",
       completed_at: new Date().toISOString(),
     });
-    finalizeInstance(taskId, "failed");
     tmux.killWindow(winName);
     checkGroupCompletion(groupId);
     return;
   }
 
-  const stdout = parsed.stdout || "";
-  const stderr = parsed.stderr || "";
-  const returncode = parsed.returncode ?? 1;
-
-  const adapter = getAdapter(runtime);
-
-  // Replay events into the monitor for non-streaming runtimes (Codex).
-  // Claude's StreamPoller already populated the instance live; recordResult
-  // for Claude re-feeds the same events but processMonitorEvent is
-  // idempotent at the level we care about (chunkCount + assistantText
-  // double-count is acceptable telemetry slop). For Codex this is the
-  // only telemetry capture point.
-  if (!adapter.capabilities.streamingTelemetry) {
-    adapter.recordResult(taskId, parsed);
-  }
-
-  if (returncode !== 0) {
+  if (!result.ok) {
     const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
-    const errorMsg = stderr.trim() || `${runtimeLabel} exited with code ${returncode}`;
+    const errorMsg =
+      "errorMessage" in result
+        ? result.errorMessage
+        : result.reason === "timeout"
+          ? "Timed out"
+          : `${runtimeLabel} exited without a response`;
     const status = getGroupStatus(groupId);
     const taskRecord = status?.tasks.find((task) => task.task_id === taskId);
-    const failover = taskRecord
+    const failover = taskRecord && result.reason === "exit-nonzero"
       ? classifyRuntimeFailureForFailover({
           channelId: taskRecord.channel_id,
           agentName: resolveAgentName(agent),
           explicitRuntime: runtime,
           failedRuntime: runtime,
-          stdout,
-          stderr,
-          returncode,
+          stdout: result.envelope.stdout || "",
+          stderr: result.envelope.stderr,
+          returncode: result.returncode,
         })
       : null;
     if (taskRecord && failover?.shouldFailover && failover.nextRuntime) {
       const message = runtimeFailoverMessage(runtime, failover.nextRuntime);
       console.log(`[PARALLEL] ${agent} (${taskId}) ${message}`);
-      finalizeInstance(taskId, "failed");
       tmux.killWindow(winName);
       const wt = getWorktreeForGroup(groupId) as any;
       await spawnParallelAgent(
@@ -475,8 +375,7 @@ async function handleParallelOutput(
       error: errorMsg.slice(0, 2000),
       completed_at: new Date().toISOString(),
     });
-    const telemetry = getCompletedSummary(taskId);
-    if (telemetry) {
+    if (result.telemetry) {
       persistTaskTelemetry({
         taskId,
         channelId: getGroupStatus(groupId)?.channelId || "",
@@ -484,23 +383,19 @@ async function handleParallelOutput(
         runtime,
         prompt: getGroupStatus(groupId)?.tasks.find((t) => t.task_id === taskId)?.description || "",
         status: "failed",
-        telemetry,
+        telemetry: result.telemetry,
         error: errorMsg,
       });
     }
-    finalizeInstance(taskId, "failed");
   } else {
-    const responseText = adapter.extractResponse(parsed);
-    const sessionId = adapter.extractSessionId(parsed);
-
     // Save session for potential follow-up
-    if (sessionId) {
-      setSession(`${getGroupStatus(groupId)?.channelId}:${agent}`, sessionId, runtime);
+    if (result.sessionId) {
+      setSession(`${getGroupStatus(groupId)?.channelId}:${agent}`, result.sessionId, runtime);
     }
 
     // Truncate result for storage (keep full response manageable)
-    const truncatedResult = responseText
-      ? responseText.slice(0, 4000)
+    const truncatedResult = result.responseText
+      ? result.responseText.slice(0, 4000)
       : "(empty response)";
 
     console.log(`[PARALLEL] ${agent} (${taskId}) completed: ${truncatedResult.length} chars`);
@@ -509,8 +404,7 @@ async function handleParallelOutput(
       result: truncatedResult,
       completed_at: new Date().toISOString(),
     });
-    const telemetry = getCompletedSummary(taskId);
-    if (telemetry) {
+    if (result.telemetry) {
       persistTaskTelemetry({
         taskId,
         channelId: getGroupStatus(groupId)?.channelId || "",
@@ -518,10 +412,9 @@ async function handleParallelOutput(
         runtime,
         prompt: getGroupStatus(groupId)?.tasks.find((t) => t.task_id === taskId)?.description || "",
         status: "completed",
-        telemetry,
+        telemetry: result.telemetry,
       });
     }
-    finalizeInstance(taskId, "completed");
   }
 
   // Clean up tmux window

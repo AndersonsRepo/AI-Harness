@@ -6,13 +6,15 @@ needing a full vault scan.
 """
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-HARNESS_ROOT = Path(os.environ.get("HARNESS_ROOT", SCRIPT_DIR.parent.parent.parent))
+sys.path.insert(0, str(SCRIPT_DIR))
+from hook_common import resolve_harness_root
+
+HARNESS_ROOT = resolve_harness_root(SCRIPT_DIR)
 
 
 def main():

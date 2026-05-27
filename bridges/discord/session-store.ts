@@ -1,6 +1,6 @@
 import { getDb } from "./db.js";
 
-type RuntimeTag = "claude" | "codex";
+type RuntimeTag = "claude" | "codex" | "ollama";
 
 interface SessionEntry {
   sessionId: string;
