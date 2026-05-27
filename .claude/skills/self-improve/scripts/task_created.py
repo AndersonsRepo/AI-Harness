@@ -5,20 +5,25 @@ Logs task creation to Discord #agent-stream for visibility.
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-HARNESS_ROOT = Path(os.environ.get("HARNESS_ROOT", SCRIPT_DIR.parent.parent.parent))
-NOTIFY_FILE = HARNESS_ROOT / "pending-notifications.jsonl"
+sys.path.insert(0, str(SCRIPT_DIR))
+from hook_common import coerce_name, get_value, payload_shape, resolve_harness_root
+
+HARNESS_ROOT = resolve_harness_root(SCRIPT_DIR)
+NOTIFY_FILE = HARNESS_ROOT / "heartbeat-tasks" / "pending-notifications.jsonl"
 
 
 def notify(channel: str, message: str):
     """Append notification for Discord drain."""
     try:
+        NOTIFY_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(NOTIFY_FILE, "a") as f:
-            f.write(json.dumps({"channel": channel, "message": message}) + "\n")
+            # Live drain (bot-v2 → DiscordTransport) reads the `summary` field and
+            # resolves by exact channel name; include both for compatibility.
+            f.write(json.dumps({"channel": channel, "summary": message, "message": message}) + "\n")
     except Exception:
         pass
 
@@ -29,14 +34,34 @@ def main():
     except Exception:
         hook_input = {}
 
-    task_description = hook_input.get("task_description", "")
-    assignee = hook_input.get("assignee", "unassigned")
+    task_description = get_value(
+        hook_input,
+        ("task_description",),
+        ("task", "description"),
+        ("task", "task_description"),
+        ("task", "title"),
+        ("description",),
+    ) or ""
+    assignee = coerce_name(get_value(
+        hook_input,
+        ("assignee",),
+        ("task", "assignee"),
+        ("assigned_to",),
+        ("task", "assigned_to"),
+        ("teammate",),
+        ("agent",),
+    )) or "unassigned"
 
     task_short = (task_description[:100] + "...") if len(task_description) > 100 else task_description
+    diagnostic = (
+        f" (payload shape: {payload_shape(hook_input)})"
+        if assignee == "unassigned" or not task_description
+        else ""
+    )
 
     notify(
         "agent-stream",
-        f"[Agent Teams] Task created → **{assignee}**: {task_short}",
+        f"[Agent Teams] Task created → **{assignee}**: {task_short}{diagnostic}",
     )
 
     print(json.dumps({"suppressOutput": True}))

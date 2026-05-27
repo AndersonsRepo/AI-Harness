@@ -5,17 +5,18 @@ Writes the file directly instead of nudging Claude.
 """
 
 import hashlib
-import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-HARNESS_ROOT = Path(os.environ.get("HARNESS_ROOT", SCRIPT_DIR.parent.parent.parent))
+sys.path.insert(0, str(SCRIPT_DIR))
+from hook_common import resolve_harness_root
+
+HARNESS_ROOT = resolve_harness_root(SCRIPT_DIR)
 VAULT_DIR = HARNESS_ROOT / "vault" / "learnings"
 
-sys.path.insert(0, str(SCRIPT_DIR))
 from dedup_learning import check_and_dedup
 
 # Known noise patterns to skip

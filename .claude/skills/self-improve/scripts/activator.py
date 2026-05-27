@@ -4,7 +4,6 @@ Auto-captures learnings, corrections, feature requests, decisions,
 preferences, and external knowledge to vault/learnings/
 """
 
-import os
 import re
 import sys
 from datetime import datetime
@@ -12,11 +11,12 @@ from pathlib import Path
 
 # Resolve HARNESS_ROOT
 SCRIPT_DIR = Path(__file__).resolve().parent
-HARNESS_ROOT = Path(os.environ.get("HARNESS_ROOT", SCRIPT_DIR.parent.parent.parent))
+sys.path.insert(0, str(SCRIPT_DIR))
+from hook_common import resolve_harness_root
+
+HARNESS_ROOT = resolve_harness_root(SCRIPT_DIR)
 VAULT_DIR = HARNESS_ROOT / "vault" / "learnings"
 
-# Add scripts dir to path for dedup import
-sys.path.insert(0, str(SCRIPT_DIR))
 from dedup_learning import check_and_dedup
 
 # Pattern categories: (compiled_regex, type, category, tags)
@@ -165,7 +165,8 @@ def write_entry(entry_type: str, category: str, tags: str, prompt: str) -> str:
     today_dash = now.strftime("%Y-%m-%d")
     timestamp = now.strftime("%Y-%m-%dT%H:%M:%S")
 
-    entry_id = next_id(VAULT_DIR, entry_type, today_str)
+    id_prefix = "LRN" if entry_type == "FEAT" else entry_type
+    entry_id = next_id(VAULT_DIR, id_prefix, today_str)
     prompt_short = sanitize_prompt(prompt)
     why = WHY_MAP.get(category, "Captured for future reference.")
 
@@ -203,9 +204,10 @@ related: []
         content = f"""---
 id: {entry_id}
 logged: {timestamp}
-type: feature
-status: requested
-complexity: medium
+type: learning
+priority: medium
+status: new
+category: feature_request
 area: general
 agent: main
 project: general

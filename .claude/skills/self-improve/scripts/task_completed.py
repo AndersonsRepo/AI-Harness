@@ -5,14 +5,16 @@ Enforces quality standards, review gate for builder tasks, and notifies Discord.
 """
 
 import json
-import os
 import re
 import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-HARNESS_ROOT = Path(os.environ.get("HARNESS_ROOT", SCRIPT_DIR.parent.parent.parent))
-NOTIFY_FILE = HARNESS_ROOT / "pending-notifications.jsonl"
+sys.path.insert(0, str(SCRIPT_DIR))
+from hook_common import coerce_name, get_value, payload_shape, resolve_harness_root
+
+HARNESS_ROOT = resolve_harness_root(SCRIPT_DIR)
+NOTIFY_FILE = HARNESS_ROOT / "heartbeat-tasks" / "pending-notifications.jsonl"
 
 # Quality check patterns
 TODO_PATTERN = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b", re.I)
@@ -26,8 +28,11 @@ BUILDER_RE = re.compile(r"^builder(-\d+)?$", re.I)
 def notify(channel: str, message: str):
     """Append notification for Discord drain."""
     try:
+        NOTIFY_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(NOTIFY_FILE, "a") as f:
-            f.write(json.dumps({"channel": channel, "message": message}) + "\n")
+            # Live drain (bot-v2 → DiscordTransport) reads the `summary` field and
+            # resolves by exact channel name; include both for compatibility.
+            f.write(json.dumps({"channel": channel, "summary": message, "message": message}) + "\n")
     except Exception:
         pass
 
@@ -66,9 +71,29 @@ def main():
     except Exception:
         hook_input = {}
 
-    teammate_name = hook_input.get("teammate_name", "unknown")
-    task_description = hook_input.get("task_description", "")
-    task_result = hook_input.get("task_result", "")
+    teammate_name = coerce_name(get_value(
+        hook_input,
+        ("teammate_name",),
+        ("teammate",),
+        ("agent",),
+        ("assignee",),
+        ("task", "assignee"),
+    )) or "unknown"
+    task_description = get_value(
+        hook_input,
+        ("task_description",),
+        ("task", "description"),
+        ("task", "task_description"),
+        ("task", "title"),
+        ("description",),
+    ) or ""
+    task_result = get_value(
+        hook_input,
+        ("task_result",),
+        ("result",),
+        ("task", "result"),
+        ("task", "output"),
+    ) or ""
 
     # Run quality checks
     issues = check_quality(task_result)
@@ -98,9 +123,14 @@ def main():
     # Notify Discord on task completion for visibility
     task_short = (task_description[:80] + "...") if len(task_description) > 80 else task_description
     status = "with warnings" if issues else "successfully"
+    diagnostic = (
+        f" (payload shape: {payload_shape(hook_input)})"
+        if teammate_name == "unknown" or not task_description
+        else ""
+    )
     notify(
         "agent-stream",
-        f"[Agent Teams] **{teammate_name}** completed task {status}: {task_short}",
+        f"[Agent Teams] **{teammate_name}** completed task {status}: {task_short}{diagnostic}",
     )
 
     if response:

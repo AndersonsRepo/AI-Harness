@@ -1,10 +1,11 @@
 ```markdown
 ---
-id: FEAT-YYYYMMDD-XXX
+id: LRN-YYYYMMDD-XXX
 logged: YYYY-MM-DDTHH:MM:SS
-type: feature
-status: requested | in_progress | built | wont_build
-complexity: simple | medium | complex
+type: learning
+priority: medium
+status: new
+category: feature_request
 area: frontend | backend | infra | tools | docs | config | general
 agent: main | researcher | discord | reviewer
 project: <project-name or general>

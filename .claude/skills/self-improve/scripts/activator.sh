@@ -89,11 +89,15 @@ NOW=$(date +%Y-%m-%dT%H:%M:%S)
 TODAY_DASH=$(date +%Y-%m-%d)
 
 SEQ=1
-while [ -f "$VAULT_DIR/${TYPE}-${TODAY}-$(printf '%03d' $SEQ).md" ]; do
+ID_PREFIX="$TYPE"
+if [ "$TYPE" = "FEAT" ]; then
+  ID_PREFIX="LRN"
+fi
+while [ -f "$VAULT_DIR/${ID_PREFIX}-${TODAY}-$(printf '%03d' $SEQ).md" ]; do
   SEQ=$((SEQ + 1))
 done
 SEQ_STR=$(printf '%03d' $SEQ)
-ID="${TYPE}-${TODAY}-${SEQ_STR}"
+ID="${ID_PREFIX}-${TODAY}-${SEQ_STR}"
 
 # Sanitize prompt (first 300 chars, redact secrets)
 PROMPT_SHORT=$(echo "$PROMPT" | head -c 300 | sed 's/`/\\`/g' | sed -E 's/(key|token|password|secret)[[:space:]]*[:=][[:space:]]*[^ ]+/\1=REDACTED/gi')
@@ -144,9 +148,10 @@ elif [ "$TYPE" = "FEAT" ]; then
 ---
 id: $ID
 logged: $NOW
-type: feature
-status: requested
-complexity: medium
+type: learning
+priority: medium
+status: new
+category: feature_request
 area: general
 agent: main
 project: general
